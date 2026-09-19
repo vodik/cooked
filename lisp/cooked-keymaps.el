@@ -114,7 +114,7 @@ back from the binding the exception was made to keep."
     (control meta shift))
   "Every combination of Shift, Control and Meta, the modifiers xterm spells.
 
-`cooked--build-passthrough-map' binds each key of `cooked--key-encodings'
+`cooked--build-passthrough-map' binds each key of `cooked--key-names'
 under all of them.  A combination left out is shift-translated when it has no
 binding: \\`C-M-S-<up>' used to run as \\`C-M-<up>', and a child that asked
 for `ESC [ 1 ; 8 A' got `ESC [ 1 ; 7 A' instead.")
@@ -237,7 +237,7 @@ spell them, and a chord Emacs binds is left to Emacs."
     (unless reserve-chords
       (dolist (event (cooked--super-chord-events exceptions))
         (define-key map (vector event) (cooked--kitty-chord #'cooked-send-key event)))
-      (dolist (key (append (mapcar #'car cooked--key-encodings)
+      (dolist (key (append cooked--key-names
                            (mapcar #'car cooked--key-event-aliases)))
         (dolist (extra '((super) (hyper)))
           (dolist (mods cooked--modifier-sets)
@@ -265,7 +265,7 @@ spell them, and a chord Emacs binds is left to Emacs."
     ;; By the time `cooked-send-key' looks, the shift is gone and unrecoverable.
     ;; A graphical frame's own names for a row are bound the same way, since
     ;; `delete' reaches `deletechar' only when nothing binds it.
-    (dolist (key (append (mapcar #'car cooked--key-encodings)
+    (dolist (key (append cooked--key-names
                          (mapcar #'car cooked--key-event-aliases)))
       (dolist (mods cooked--modifier-sets)
         (let ((event (event-convert-list (append mods (list key)))))
@@ -276,7 +276,7 @@ spell them, and a chord Emacs binds is left to Emacs."
                       (memq event exceptions))
             (define-key map (vector event)
                         ;; A key with no spelling but kitty's is kitty's alone.
-                        (if (eq (cadr (assq key cooked--key-encodings)) 'none)
+                        (if (memq key cooked--kitty-only-keys)
                             kitty-only
                           #'cooked-send-key))))))
     ;; Everything else cooked binds under `C-c' -- its own commands, and the
@@ -661,11 +661,7 @@ the child's, so a prompt it shows is not left waiting for nothing."
   (cooked--resume-forwarding)
   (when (cooked--input-state-p)
     (user-error "Emacs already owns the line; type directly instead"))
-  (let ((cooked--keys (or (cooked--assumed-key-protocol) cooked--keys))
-        (event (funcall read)))
-    (when-let* ((bytes (cooked--encode-event event)))
-      (cooked--snap-to-cursor)
-      (cooked--send-to-child bytes))))
+  (cooked--send-key-event (funcall read)))
 
 ;;;; The map Emacs owns the line through
 
@@ -756,9 +752,9 @@ sending a control key is what it is for."
   "Delegate the pending input and send the key that invoked this command.
 See `cooked-delegate-key' and `cooked-delegate-keys'."
   (interactive)
-  (let ((cooked--keys (or (cooked--assumed-key-protocol) cooked--keys)))
-    (when-let* ((bytes (cooked--encode-event last-command-event)))
-      (cooked-delegate-key bytes))))
+  (when-let* ((bytes (cooked--encode-key-event last-command-event
+                                               (cooked--assumed-key-protocol))))
+    (cooked-delegate-key bytes)))
 
 (defcustom cooked-delegate-keys '("C-r")
   "Keys that hand the line to the child's line editor before being sent.

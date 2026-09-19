@@ -2204,23 +2204,15 @@ instead -- this is the regression guard for using comint's version by mistake."
     (cooked-next-input)
     (should (equal (cooked--pending-input) "half-typed"))))
 
-(ert-deftest cooked-arrow-keys-follow-application-cursor-mode ()
-  "Regression: DECCKM was ignored, so arrows reached full-screen programs in the
-CSI encoding while ncurses (via `smkx') expects SS3, and nothing happened."
-  (cooked-tests--with-session '("/bin/sh" "-c" "sleep 5")
-    (setq cooked--app-cursor nil)
-    (should (equal (cooked--encode-event 'up) "\e[A"))
-    (should (equal (cooked--encode-event 'left) "\e[D"))
-    (setq cooked--app-cursor t)
-    (should (equal (cooked--encode-event 'up) "\eOA"))
-    (should (equal (cooked--encode-event 'left) "\eOD"))
-    ;; Keys outside the cursor cluster are unaffected by the mode.
-    (should (equal (cooked--encode-event 'next) "\e[6~"))))
-
 (ert-deftest cooked-application-cursor-mode-round-trips ()
+  "Regression: DECCKM was ignored, so arrows reached full-screen programs in the
+CSI encoding while ncurses (via `smkx') expects SS3, and nothing happened.
+Which keys follow the mode, and how, is checked in the core's own tests."
   (cooked-tests--with-session '("/bin/sh" "-c" "printf '\\033[?1h'; sleep 5")
     (should (cooked-tests--settle (lambda () cooked--app-cursor)))
-    (should (equal (cooked--encode-event 'up) "\eOA"))))
+    (should (equal (cooked-tests--spell 'up) "\eOA"))
+    (should (equal (cooked-tests--spell 'left) "\eOD"))
+    (should (equal (cooked-tests--spell 'next) "\e[6~"))))
 
 (ert-deftest cooked-mouse-reports-reach-the-child ()
   "A press and a release sent as intent come out of the pty as SGR reports.
@@ -2706,10 +2698,10 @@ drifting while \\`C-c C-q' waited was the key sent, and the real one was lost."
     (let ((unread-command-events
            (list (list 'mouse-movement (cooked-tests--posn nil)) ?a))
           sent)
-      (cl-letf (((symbol-function 'cooked--send-to-child)
-                 (lambda (text) (push text sent))))
+      (cl-letf (((symbol-function 'cooked--send-key)
+                 (lambda (_session key &rest _) (push key sent))))
         (cooked-send-literal-key))
-      (should (equal sent '("a"))))))
+      (should (equal sent '(?a))))))
 
 (ert-deftest cooked-a-drag-does-not-leave-track-mouse-on-globally ()
   "The `track-mouse' form restores the old value into whichever binding is
@@ -3452,380 +3444,149 @@ older visibility test never saw it."
     (should (cooked-tests--settle
              (lambda () (string-match-p "SAW-EOF" (cooked-tests--text)))))))
 
+(ert-deftest cooked-a-key-is-spelled-against-what-the-child-holds-now ()
+  "Regression: the spelling followed a copy of the negotiation a drain left
+behind, so a child that pushed kitty flags and read a key before Emacs next
+drained was answered in the encoding it had just stopped reading.
+
+Nothing is drained here, which is the point: `cooked-tests--negotiate' puts the
+sequence in the terminal and leaves Lisp's copy of it as it was, so every
+spelling below is read from where the modes actually live.  The encoding itself,
+and every table behind it, is the core's -- see the key tests in
+src/emu/term/tests/keyboard.rs, which carry the cases this file used to."
+  (cooked-tests--with-session '("/bin/sh" "-c" "sleep 5")
+    ;; Nothing negotiated: the classical spellings.
+    (should (equal (cooked-tests--spell 'up) "\e[A"))
+    (should (equal (cooked-tests--spell 'S-return) "\r"))
+    (should (equal (cooked-tests--spell 'escape) "\e"))
+    ;; DECCKM, which only the unmodified cursor keys follow.
+    (cooked-tests--negotiate "\e[?1h")
+    (should (equal (cooked-tests--spell 'up) "\eOA"))
+    (should (equal (cooked-tests--spell 'C-up) "\e[1;5A"))
+    (should (equal (cooked-tests--spell 'next) "\e[6~"))
+    ;; DECKPAM, which is what the keypad follows -- `smkx' sets both, and Lisp
+    ;; used to read the keypad's mode off DECCKM because the core tracked it
+    ;; without reporting it.
+    (should (equal (cooked-tests--spell 'kp-1) "1"))
+    (cooked-tests--negotiate "\e=")
+    (should (equal (cooked-tests--spell 'kp-1) "\eOq"))
+    (should (equal (cooked-tests--spell 'kp-home) "\eOw"))
+    (cooked-tests--negotiate "\e>\e[?1l")
+    (should (equal (cooked-tests--spell 'kp-1) "1"))
+    ;; modifyOtherKeys, and then the kitty protocol over the top of it.
+    (cooked-tests--negotiate "\e[>4;2m")
+    (should (equal (cooked-tests--spell 'S-return) "\e[27;2;13~"))
+    (should (equal (cooked-tests--spell ?\C-\;) "\e[27;5;59~"))
+    (cooked-tests--negotiate "\e[>1u")
+    ;; Lisp's copy of all this is still what it was before the first feed, which
+    ;; is what the spelling used to read: nothing here would move if it still did.
+    (should (eq cooked--keys 'legacy))
+    (should (= cooked--kitty-flags 0))
+    (should-not cooked--app-cursor)
+    (should (equal (cooked-tests--spell 'S-return) "\e[13;2u"))
+    (should (equal (cooked-tests--spell 'escape) "\e[27u"))
+    ;; And a pop puts back what the push replaced.
+    (cooked-tests--negotiate "\e[<1u")
+    (should (equal (cooked-tests--spell 'escape) "\e"))))
+
 (ert-deftest cooked-shifted-keys-are-not-flattened ()
   "Regression: Emacs reports S as shift+s, so reading `event-basic-type' alone
 turned every capital letter into a lowercase one."
   (cooked-tests--with-session '("/bin/sh" "-c" "sleep 5")
-    (setq cooked--app-cursor nil)
-    (should (equal (cooked--encode-event ?S) "S"))
-    (should (equal (cooked--encode-event ?A) "A"))
-    (should (equal (cooked--encode-event ?s) "s"))
-    (should (equal (cooked--encode-event ?!) "!"))
+    (should (equal (cooked-tests--spell ?S) "S"))
+    (should (equal (cooked-tests--spell ?A) "A"))
+    (should (equal (cooked-tests--spell ?s) "s"))
+    (should (equal (cooked-tests--spell ?!) "!"))
     ;; Control and meta still survive.
-    (should (equal (cooked--encode-event ?\C-a) "\C-a"))
-    (should (equal (cooked--encode-event ?\M-x) "\ex"))))
+    (should (equal (cooked-tests--spell ?\C-a) "\C-a"))
+    (should (equal (cooked-tests--spell ?\M-x) "\ex"))))
 
-(ert-deftest cooked-an-event-in-none-of-the-tables-encodes-as-nil ()
-  "An event no table spells has no encoding, and nil is how that is said.
+(ert-deftest cooked-an-event-with-no-key-in-it-encodes-as-nil ()
+  "An event that names no key cooked speaks for has no encoding, and nil is how
+`cooked--key-parts' says so.
 
-The contract the fall-through rests on, pinned rather than assumed: nil means
-`cooked-send-key' has nothing to forward, and the tables are searched in order
-on the understanding that the first one holding a key answers for it.  Written
-as a `cond' whose clauses were the lookups themselves, a table that hit but
-produced nil would have carried on to the next one and encoded the key as a
-different key; `cl-block' is what makes a hit terminal instead."
+The contract the callers rest on, pinned rather than assumed: nil means
+`cooked-send-key' has nothing to forward, and no key is sent."
   (cooked-tests--with-session '("/bin/sh" "-c" "sleep 5")
-    (setq cooked--app-cursor nil)
     ;; A mouse event is a list, and `event-basic-type' answers with a symbol no
     ;; table carries -- the shape a key reaches the end of the search in.
-    (should-not (cooked--encode-event '(mouse-1 (nil 1 (0 . 0) 0))))
-    (should-not (cooked--encode-event 'wheel-up))
-    (should-not (cooked--encode-event 'f30))
+    (should-not (cooked--key-parts '(mouse-1 (nil 1 (0 . 0) 0))))
+    (should-not (cooked--key-parts 'wheel-up))
+    (should-not (cooked--key-parts 'f30))
     ;; Including with modifiers, which is the case that would otherwise have
-    ;; found a code point in a `literal' `cooked--key-encodings' entry on the way past.
-    (should-not (cooked--encode-event 'C-f30))))
+    ;; found a code point on the way past.
+    (should-not (cooked--key-parts 'C-f30))
+    (should-not (cooked-tests--spell 'f30))
+    ;; A key with no spelling outside the kitty protocol has none until it is
+    ;; negotiated, and then it has one.
+    (should-not (cooked-tests--spell 'pause))
+    (cooked-tests--negotiate "\e[>1u")
+    (should (equal (cooked-tests--spell 'pause) "\e[57362u"))))
 
-(ert-deftest cooked-modified-arrows-use-xterm-parameters ()
+(ert-deftest cooked-the-key-an-event-names-is-emacs-own-question ()
+  "What is left on this side once the spelling moved to the core: which key an
+Emacs event is, which is a question about Emacs rather than about the child.
+
+`backtab' carries its shift in the base symbol and reports none in
+`event-modifiers' at all, so a naive reading saw it as unmodified and it could
+never be spelled any way but the classical `ESC [ Z'.  A terminal frame's TAB,
+CR, DEL and NUL are the keys, not `C-i', `C-m', `C-?' and `C-@'; its ESC is
+half of every Meta chord and stays the byte.  A graphical frame's Delete is
+`delete', which only reaches `deletechar' when nothing binds it."
+  (should (equal (cooked--key-parts 'backtab) '(backtab shift)))
+  (should (equal (cooked--key-parts 'C-backtab) '(backtab shift control)))
+  (should (equal (cooked--key-parts 'S-tab) '(backtab shift)))
+  (should (equal (cooked--key-parts 'delete) '(deletechar)))
+  (should (equal (cooked--key-parts 'C-delete) '(deletechar control)))
+  (should (equal (cooked--key-parts ?\C-i) '(tab)))
+  (should (equal (cooked--key-parts ?\M-\C-i) '(tab meta)))
+  (should (equal (cooked--key-parts 13) '(return)))
+  (should (equal (cooked--key-parts 127) '(backspace)))
+  (should (equal (cooked--key-parts ?\C-\s) '(32 control)))
+  (should (equal (cooked--key-parts 27) '(27)))
+  (should (equal (cooked--key-parts ?\C-a) '(97 control)))
+  (should (equal (cooked--key-parts ?A) '(97 shift))))
+
+(ert-deftest cooked-key-names-match-the-core ()
+  "The keys Lisp binds are exactly the keys the core spells.
+
+`cooked--key-names' is a second copy of the core's own table, kept because
+`cooked--build-passthrough-map' runs before the module is loaded.  A key added
+to one side and forgotten on the other would bind a key that encodes to nothing,
+or spell a key nothing ever sends, so the two are held against each other here."
   (cooked-tests--with-session '("/bin/sh" "-c" "sleep 5")
-    (setq cooked--app-cursor nil)
-    (should (equal (cooked--encode-event 'up) "\e[A"))
-    (should (equal (cooked--encode-event 'S-up) "\e[1;2A"))
-    (should (equal (cooked--encode-event 'M-up) "\e[1;3A"))
-    (should (equal (cooked--encode-event 'C-up) "\e[1;5A"))
-    (should (equal (cooked--encode-event 'C-S-right) "\e[1;6C"))
-    ;; DECCKM only applies to the unmodified form.
-    (setq cooked--app-cursor t)
-    (should (equal (cooked--encode-event 'up) "\eOA"))
-    (should (equal (cooked--encode-event 'C-up) "\e[1;5A"))))
-
-(ert-deftest cooked-modified-special-keys-are-encoded ()
-  "Regression: the special-key branch applied only the meta modifier, so
-Shift+Return, Control+Return, Shift+F5 and Shift+PageDown were all sent as their
-unmodified selves, and Shift+TAB produced nothing at all."
-  (cooked-tests--with-session '("/bin/sh" "-c" "sleep 5")
-    (setq cooked--app-cursor nil)
-    ;; Shift+TAB has a real terminfo entry (kcbt), so it needs no negotiation.
-    (should (equal (cooked--encode-event 'backtab) "\e[Z"))
-    ;; Tilde-style keys take the modifier as a second parameter.
-    (should (equal (cooked--encode-event 'f5) "\e[15~"))
-    (should (equal (cooked--encode-event 'S-f5) "\e[15;2~"))
-    (should (equal (cooked--encode-event 'S-next) "\e[6;2~"))
-    ;; F1-F4 are SS3 until modified, then CSI like everything else.
-    (should (equal (cooked--encode-event 'f1) "\eOP"))
-    (should (equal (cooked--encode-event 'S-f1) "\e[1;2P"))
-
-    ;; Return and friends have no classical modified form, so they follow whatever
-    ;; the child negotiated — and send the bare byte when it negotiated nothing.
-    (setq cooked--keys 'legacy)
-    (should (equal (cooked--encode-event 'return) "\r"))
-    (should (equal (cooked--encode-event 'S-return) "\r"))
-    (should (equal (cooked--encode-event 'M-return) "\e\r"))
-
-    (setq cooked--keys 'modify-other)
-    (should (equal (cooked--encode-event 'S-return) "\e[27;2;13~"))
-    (should (equal (cooked--encode-event 'C-return) "\e[27;5;13~"))
-    (should (equal (cooked--encode-event 'C-tab) "\e[27;5;9~"))
-    ;; Unmodified stays plain regardless of what was negotiated.
-    (should (equal (cooked--encode-event 'return) "\r"))
-
-    (setq cooked--keys 'kitty)
-    (should (equal (cooked--encode-event 'S-return) "\e[13;2u"))
-    (should (equal (cooked--encode-event 'C-return) "\e[13;5u"))
-    (should (equal (cooked--encode-event 'return) "\r"))))
+    (let ((table (cooked--key-table)))
+      (should (equal (mapcar #'car table) cooked--key-names))
+      (should (equal (mapcar #'car (seq-filter #'cdr table))
+                     cooked--kitty-only-keys)))))
 
 (ert-deftest cooked-backtab-follows-negotiation-like-any-other-literal-key ()
-  "Regression: `backtab' carries its shift in the base symbol, not in
-`event-modifiers' -- so a naive param computation saw it as unmodified, and it
-could never be spelled any way but the classical `ESC [ Z', negotiation or
-override notwithstanding.  A program that switched itself to the kitty
-protocol without negotiating (Claude Code) is no longer listening for that."
+  "Regression: `backtab' could never be spelled any way but the classical
+`ESC [ Z', negotiation or override notwithstanding.  A program that switched
+itself to the kitty protocol without negotiating (Claude Code) is no longer
+listening for that."
   (cooked-tests--with-session '("/bin/sh" "-c" "sleep 5")
-    ;; Nothing negotiated: the classical spelling, same as before this existed.
-    (setq cooked--keys 'legacy)
-    (should (equal (cooked--encode-event 'backtab) "\e[Z"))
-    ;; Held alongside another modifier, Emacs still hides the shift -- `mods' is
-    ;; `(control)', not `(control shift)' -- but the fallback stays the bare
-    ;; classical sequence either way, same as the other literal keys above.
-    (should (equal (cooked--encode-event 'C-backtab) "\e[Z"))
-    (should (equal (cooked--encode-event 'M-backtab) "\e\e[Z"))
-
-    ;; xterm sends Shift+Tab as `ESC [ Z' under modifyOtherKeys too, and spells
-    ;; it only with another modifier held beside Shift.
-    (setq cooked--keys 'modify-other)
-    (should (equal (cooked--encode-event 'backtab) "\e[Z"))
-    (should (equal (cooked--encode-event 'C-backtab) "\e[27;6;9~"))
-
-    (setq cooked--keys 'kitty)
-    (should (equal (cooked--encode-event 'backtab) "\e[9;2u"))
-    (should (equal (cooked--encode-event 'C-backtab) "\e[9;6u"))
+    (should (equal (cooked-tests--spell 'backtab) "\e[Z"))
+    (should (equal (cooked-tests--spell 'C-backtab) "\e[Z"))
+    (cooked-tests--negotiate "\e[>1u")
+    (should (equal (cooked-tests--spell 'backtab) "\e[9;2u"))
     ;; And the override path, which is what this was actually for: forcing the
     ;; kitty spelling on a `backtab' works now, where it used to be a no-op
-    ;; because `cooked--encode-event' never had a branch that read `cooked--keys'
-    ;; for this key at all.
-    (setq cooked--keys nil)
+    ;; because nothing read the protocol for this key at all.
+    (cooked-tests--negotiate "\e[<1u")
     (should (equal (cooked--override-bytes-for :kitty 'backtab) "\e[9;2u"))))
-
-(defmacro cooked-tests--with-kitty-flags (flags &rest body)
-  "Run BODY as if the child had pushed kitty FLAGS, which cooked honours."
-  (declare (indent 1))
-  `(let ((cooked--keys 'kitty)
-         (cooked--kitty-flags ,flags)
-         (cooked--app-cursor nil))
-     ,@body))
-
-(ert-deftest cooked-kitty-disambiguate-follows-kittys-text-key-table ()
-  "Bit 1 against the example table in kitty's keyboard protocol document.
-
-Before flags 4, 8 and 16 were honoured this bit covered only the `literal'
-keys, which left Control and Meta chords -- the ambiguity the bit is named for
--- spelled exactly as a legacy terminal spells them.
-
-The table's key is `i', which is the one letter whose Control chords cannot be
-checked here: Emacs folds C-i into TAB before any keymap sees it, on either
-kind of frame, and a terminal frame's Tab key is the same byte.  Taking it as
-Tab is what every terminal before kitty did, so those columns are checked on
-`c' instead, where the table's rule is the same rule."
-  (cooked-tests--with-session '("/bin/sh" "-c" "sleep 5")
-    (cooked-tests--with-kitty-flags 1
-      (should (equal (cooked--encode-event ?i) "i"))
-      (should (equal (cooked--encode-event ?I) "I"))
-      (should (equal (cooked--encode-event ?\M-i) "\e[105;3u"))
-      (should (equal (cooked--encode-event ?\M-I) "\e[105;4u"))
-      (should (equal (cooked--encode-event ?\C-c) "\e[99;5u"))
-      (should (equal (cooked--encode-event ?\C-\M-c) "\e[99;7u"))
-      (should (equal (cooked--encode-event ?\C-\S-c) "\e[99;6u"))
-      (should (equal (cooked--encode-event ?\C-i) "\t"))
-      (should (equal (cooked--encode-event ?\C-\s) "\e[32;5u"))
-      ;; Escape is always an escape code; Return, Tab and Backspace stay bare
-      ;; unmodified, so `reset' can still be typed after a crash.
-      (should (equal (cooked--encode-event 'escape) "\e[27u"))
-      (should (equal (cooked--encode-event 'M-escape) "\e[27;3u"))
-      (should (equal (cooked--encode-event 'return) "\r"))
-      (should (equal (cooked--encode-event 'tab) "\t"))
-      (should (equal (cooked--encode-event 'backspace) "\177"))
-      (should (equal (cooked--encode-event 'S-return) "\e[13;2u"))
-      (should (equal (cooked--encode-event 'backtab) "\e[9;2u"))
-      ;; A terminal frame's TAB, CR and DEL are the keys, not C-i, C-m and C-?;
-      ;; its ESC is half of every Meta chord and goes as the byte.
-      (should (equal (cooked--encode-event 9) "\t"))
-      (should (equal (cooked--encode-event 13) "\r"))
-      (should (equal (cooked--encode-event 127) "\177"))
-      (should (equal (cooked--encode-event 27) "\e"))
-      ;; Non-text keys leave SS3 behind, DECCKM or not, and F3 is not a CPR.
-      (let ((cooked--app-cursor t))
-        (should (equal (cooked--encode-event 'up) "\e[A"))
-        (should (equal (cooked--encode-event 'f1) "\e[P")))
-      (should (equal (cooked--encode-event 'C-up) "\e[1;5A"))
-      (should (equal (cooked--encode-event 'f3) "\e[13~"))
-      (should (equal (cooked--encode-event 'S-f3) "\e[13;2~"))
-      (should (equal (cooked--encode-event 'f5) "\e[15~"))
-      (should (equal (cooked--encode-event 'C-next) "\e[6;5~"))
-      ;; The keypad is keys of its own: text where the cap has text, codes
-      ;; where it does not.
-      (should (equal (cooked--encode-event 'kp-1) "1"))
-      (should (equal (cooked--encode-event 'C-kp-1) "\e[57400;5u"))
-      (should (equal (cooked--encode-event 'kp-home) "\e[57423u"))
-      (should (equal (cooked--encode-event 'kp-enter) "\e[57414u")))))
-
-(ert-deftest cooked-kitty-alternate-keys-report-the-shifted-key ()
-  "Bit 4: the shifted key after a colon, and only with Shift held.
-
-kitty's document: ctrl+shift+a is `CSI 97 : 65 ; 6 u', never `CSI 65'.  The
-base-layout key is never sent -- an Emacs event has no physical key to name --
-which the protocol allows."
-  (cooked-tests--with-session '("/bin/sh" "-c" "sleep 5")
-    (cooked-tests--with-kitty-flags #b101
-      (should (equal (cooked--encode-event ?\C-\S-a) "\e[97:65;6u"))
-      (should (equal (cooked--encode-event ?\M-A) "\e[97:65;4u"))
-      ;; No Shift, no shifted key.
-      (should (equal (cooked--encode-event ?\C-a) "\e[97;5u"))
-      ;; Only on a key that was going to be an escape code anyway.
-      (should (equal (cooked--encode-event ?A) "A"))
-      ;; Not on a key that produces no text.
-      (should (equal (cooked--encode-event 'S-return) "\e[13;2u"))
-      (should (equal (cooked--encode-event 'S-up) "\e[1;2A")))
-    ;; Without the bit, the same chord has no alternate.
-    (cooked-tests--with-kitty-flags 1
-      (should (equal (cooked--encode-event ?\C-\S-a) "\e[97;6u")))))
-
-(ert-deftest cooked-kitty-report-all-keys-sends-text-as-escape-codes ()
-  "Bit 8: every key an escape code, Return, Tab and Backspace included.
-
-And bit 16 beside it, which is the only way the text survives: kitty's
-document gives shift+a as `CSI 97 ; 2 ; 65 u'."
-  (cooked-tests--with-session '("/bin/sh" "-c" "sleep 5")
-    (cooked-tests--with-kitty-flags #b1000
-      (should (equal (cooked--encode-event ?a) "\e[97u"))
-      (should (equal (cooked--encode-event ?A) "\e[97;2u"))
-      (should (equal (cooked--encode-event 'return) "\e[13u"))
-      (should (equal (cooked--encode-event 'tab) "\e[9u"))
-      (should (equal (cooked--encode-event 'backspace) "\e[127u"))
-      (should (equal (cooked--encode-event 9) "\e[9u"))
-      (should (equal (cooked--encode-event 'escape) "\e[27u"))
-      (should (equal (cooked--encode-event 'kp-1) "\e[57400u"))
-      (should (equal (cooked--encode-event 'up) "\e[A")))
-    (cooked-tests--with-kitty-flags #b11000
-      (should (equal (cooked--encode-event ?A) "\e[97;2;65u"))
-      (should (equal (cooked--encode-event ?a) "\e[97;;97u"))
-      (should (equal (cooked--encode-event ?é) "\e[233;;233u"))
-      (should (equal (cooked--encode-event 'kp-1) "\e[57400;;49u"))
-      ;; Control prevents text, and keys that produce none carry none: kitty's
-      ;; Enter with every flag on is `CSI 13 u'.
-      (should (equal (cooked--encode-event ?\C-a) "\e[97;5u"))
-      (should (equal (cooked--encode-event 'return) "\e[13u"))
-      (should (equal (cooked--encode-event 'kp-enter) "\e[57414u")))
-    ;; Everything at once.
-    (cooked-tests--with-kitty-flags #b11101
-      (should (equal (cooked--encode-event ?A) "\e[97:65;2;65u"))
-      (should (equal (cooked--encode-event ?\C-\S-a) "\e[97:65;6u")))))
-
-(ert-deftest cooked-kitty-associated-text-alone-changes-nothing ()
-  "Bit 16 is an enhancement to bit 8 and undefined without it.
-
-Under bit 1 alone, every key that produces text is sent as that text, and
-every escape code it does send is for a chord Control or Meta has already
-taken the text from -- so there is nowhere for the field to go."
-  (cooked-tests--with-session '("/bin/sh" "-c" "sleep 5")
-    (cooked-tests--with-kitty-flags #b10001
-      (should (equal (cooked--encode-event ?a) "a"))
-      (should (equal (cooked--encode-event ?A) "A"))
-      (should (equal (cooked--encode-event ?\M-a) "\e[97;3u")))))
-
-(ert-deftest cooked-kitty-guess-re-spells-only-the-literal-keys ()
-  "`cooked-key-protocol-overrides' binds `kitty' with no flags behind it.
-
-That is a guess about a program that never asked, and it must go on meaning
-what it meant before the protocol proper was implemented: Shift+Return and
-Shift+Tab re-spelled, Escape and every Control chord untouched."
-  (cooked-tests--with-session '("/bin/sh" "-c" "sleep 5")
-    (cooked-tests--with-kitty-flags 0
-      (should-not (cooked--kitty-negotiated-p))
-      (should (equal (cooked--encode-event 'S-return) "\e[13;2u"))
-      (should (equal (cooked--encode-event 'escape) "\e"))
-      (should (equal (cooked--encode-event ?\C-a) "\C-a"))
-      (should (equal (cooked--encode-event ?\M-x) "\ex")))))
 
 (ert-deftest cooked-kitty-flags-arrive-with-the-drain ()
   "The flags a child pushes reach `cooked--kitty-flags', masked to what is
-honoured: bit 2 asks for release events Emacs never delivers."
+honoured: bit 2 asks for release events Emacs never delivers.
+
+The copy is what decides which keys the passthrough map takes away from Emacs;
+what the child is sent is spelled against the flags the core holds."
   (cooked-tests--with-session
       '("/bin/sh" "-c" "printf '\033[>31u'; sleep 5")
     (should (cooked-tests--settle (lambda () (eq cooked--keys 'kitty))))
-    (should (= cooked--kitty-flags 29))))
-
-(defmacro cooked-tests--with-modify-other-keys (level &rest body)
-  "Run BODY as if the child had set modifyOtherKeys LEVEL, 0 meaning a guess."
-  (declare (indent 1))
-  `(let ((cooked--keys 'modify-other)
-         (cooked--modify-other-keys ,level)
-         (cooked--kitty-flags 0)
-         (cooked--app-cursor nil))
-     ,@body))
-
-(ert-deftest cooked-modify-other-keys-level-2-spells-every-modified-key ()
-  "Level 2 against xterm: `ModifyOtherKeys' in input.c, and the us-pc105 table
-in xterm's modified-keys FAQ, whose Mode 2 column every expected value here is
-read from.  Before, only the `literal' keys were re-spelled, so `C-;' went out
-as a bare ESC -- the ambiguity the level exists to remove."
-  (cooked-tests--with-modify-other-keys 2
-    (should (eq (cooked--modify-other-level) 2))
-    ;; The task's own four.
-    (should (equal (cooked--encode-event ?\C-\;) "\e[27;5;59~"))
-    (should (equal (cooked--encode-event ?\C-.) "\e[27;5;46~"))
-    (should (equal (cooked--encode-event ?\C-,) "\e[27;5;44~"))
-    (should (equal (cooked--encode-event ?\M-\C-a) "\e[27;7;97~"))
-    ;; Control and Meta re-spell anything, keys with a control byte included.
-    (should (equal (cooked--encode-event ?\C-a) "\e[27;5;97~"))
-    (should (equal (cooked--encode-event ?\M-a) "\e[27;3;97~"))
-    (should (equal (cooked--encode-event ?\C-1) "\e[27;5;49~"))
-    (should (equal (cooked--encode-event ?\C-\s) "\e[27;5;32~"))
-    (should (equal (cooked--encode-event ?\C-é) "\e[27;5;233~"))
-    ;; Shift alone re-spells a letter, sent as its capital, and the space bar ...
-    (should (equal (cooked--encode-event ?A) "\e[27;2;65~"))
-    (should (equal (cooked--encode-event ?\C-\S-a) "\e[27;6;65~"))
-    (should (equal (cooked--encode-event (aref (kbd "S-SPC") 0)) "\e[27;2;32~"))
-    ;; ... but not a key that shifting already made unambiguous, and nothing
-    ;; unmodified.
-    (should (equal (cooked--encode-event ?!) "!"))
-    (should (equal (cooked--encode-event ?É) "É"))
-    (should (equal (cooked--encode-event ?a) "a"))
-    ;; The literal keys are as they were, but for Shift+Tab, which is `ESC [ Z'
-    ;; unless something besides Shift is held.
-    (should (equal (cooked--encode-event 'backtab) "\e[Z"))
-    (should (equal (cooked--encode-event 'S-tab) "\e[Z"))
-    (should (equal (cooked--encode-event 'C-backtab) "\e[27;6;9~"))
-    (should (equal (cooked--encode-event 'S-return) "\e[27;2;13~"))
-    (should (equal (cooked--encode-event 'M-escape) "\e[27;3;27~"))
-    (should (equal (cooked--encode-event 'return) "\r"))
-    ;; Function and cursor keys are not the protocol's.
-    (should (equal (cooked--encode-event 'C-up) "\e[1;5A"))
-    ;; A terminal frame's TAB and ESC are keys, not C-i and a Control chord.
-    (should (equal (cooked--encode-event 9) "\t"))
-    (should (equal (cooked--encode-event 27) "\e"))))
-
-(ert-deftest cooked-modify-other-keys-level-1-leaves-what-already-means-something ()
-  "Level 1 against xterm's `allowedCharModifiers' and the Mode 1 column of the
-same table, with Meta following metaSendsEscape as xterm's manual says it
-does at this level."
-  (cooked-tests--with-modify-other-keys 1
-    ;; The task's pair: a chord with a control byte keeps it, one without is
-    ;; re-spelled.
-    (should (equal (cooked--encode-event ?\C-a) "\C-a"))
-    (should (equal (cooked--encode-event ?\C-\;) "\e[27;5;59~"))
-    ;; X's table, not a five-bit mask: these have bytes and keep them.
-    (should (equal (cooked--encode-event ?\C-2) "\0"))
-    (should (equal (cooked--encode-event ?\C-3) "\e"))
-    (should (equal (cooked--encode-event ?\C-/) "\037"))
-    (should (equal (cooked--encode-event ?\C-\S-a) "\C-a"))
-    (should (equal (cooked--encode-event ?\C-1) "\e[27;5;49~"))
-    ;; Shift alone and Meta alone never re-spell.
-    (should (equal (cooked--encode-event ?A) "A"))
-    (should (equal (cooked--encode-event ?\M-a) "\ea"))
-    (should (equal (cooked--encode-event ?\M-\C-a) "\e\C-a"))
-    ;; Where the rest re-spells, Meta counts in the parameter.
-    (should (equal (cooked--encode-event ?\M-\C-\;) "\e[27;7;59~"))
-    ;; Return and Tab under Shift or Control, but Meta takes itself and Control
-    ;; out first, as xterm's `filterAltMeta' does.
-    (should (equal (cooked--encode-event 'S-return) "\e[27;2;13~"))
-    (should (equal (cooked--encode-event 'C-tab) "\e[27;5;9~"))
-    (should (equal (cooked--encode-event 'M-return) "\e\r"))
-    (should (equal (cooked--encode-event 'C-M-return) "\e\r"))
-    (should (equal (cooked--encode-event 'M-S-return) "\e[27;2;13~"))
-    ;; Shift+Tab is `ESC [ Z' at this level whatever else is held.
-    (should (equal (cooked--encode-event 'backtab) "\e[Z"))
-    (should (equal (cooked--encode-event 'C-backtab) "\e[Z"))
-    ;; Escape only with Meta and Control or Shift; Backspace never.
-    (should (equal (cooked--encode-event 'S-escape) "\e"))
-    (should (equal (cooked--encode-event 'C-S-escape) "\e"))
-    (should (equal (cooked--encode-event 'C-M-escape) "\e[27;7;27~"))
-    (should (equal (cooked--encode-event 'C-backspace) "\177"))
-    ;; Super has no bit in xterm's parameter, and is dropped from a chord.
-    (should (equal (cooked--encode-event (aref (kbd "C-s-;") 0)) "\e[27;5;59~"))))
-
-(ert-deftest cooked-modify-other-keys-guessed-re-spells-only-the-literal-keys ()
-  "`modify-other' with no level is `cooked-key-protocol-overrides' guessing,
-and a guess goes on meaning what it meant: Return and friends re-spelled,
-every Control chord untouched."
-  (cooked-tests--with-modify-other-keys 0
-    (should-not (cooked--modify-other-level))
-    (should (equal (cooked--encode-event 'S-return) "\e[27;2;13~"))
-    (should (equal (cooked--encode-event 'C-backspace) "\e[27;5;127~"))
-    (should (equal (cooked--encode-event ?\C-a) "\C-a"))
-    (should (equal (cooked--encode-event ?\M-x) "\ex"))))
-
-(ert-deftest cooked-legacy-control-chords-follow-x11 ()
-  "Control makes a byte only where X11 makes one, and otherwise sends the key.
-Masking every character to five bits sent `C-;' as ESC and `C-/' as SI."
-  (let ((cooked--keys 'legacy) (cooked--app-cursor nil))
-    (should (equal (cooked--encode-event ?\C-\;) ";"))
-    (should (equal (cooked--encode-event ?\C-.) "."))
-    (should (equal (cooked--encode-event ?\C-/) "\037"))
-    (should (equal (cooked--encode-event ?\C-2) "\0"))
-    (should (equal (cooked--encode-event ?\C-7) "\037"))
-    (should (equal (cooked--encode-event ?\C-8) "\177"))
-    (should (equal (cooked--encode-event ?\C-?) "\177"))
-    (should (equal (cooked--encode-event ?\C-\S-a) "\C-a"))
-    (should (equal (cooked--encode-event ?\M-\C-a) "\e\C-a"))))
+    (should (= cooked--kitty-flags 29))
+    (should (equal (cooked-tests--spell ?A) "\e[97:65;2;65u"))))
 
 (ert-deftest cooked-modify-other-keys-level-arrives-with-the-drain ()
   "The level a child sets reaches `cooked--modify-other-keys', level 1 included."
@@ -3833,7 +3594,26 @@ Masking every character to five bits sent `C-;' as ESC and `C-/' as SI."
       '("/bin/sh" "-c" "printf '\033[>4;1m'; sleep 5")
     (should (cooked-tests--settle (lambda () (eq cooked--keys 'modify-other))))
     (should (= cooked--modify-other-keys 1))
-    (should (equal (cooked--encode-event ?\C-\;) "\e[27;5;59~"))))
+    (should (equal (cooked-tests--spell ?\C-\;) "\e[27;5;59~"))
+    ;; Level 1 leaves alone every chord that already means something, where
+    ;; level 2 re-spells it; the levels are told apart by the core.
+    (should (equal (cooked-tests--spell ?\C-a) "\C-a"))))
+
+(ert-deftest cooked-a-guessed-protocol-re-spells-only-the-literal-keys ()
+  "`cooked-key-protocol-overrides' binds `kitty' with no flags behind it.
+
+That is a guess about a program that never asked, and it must go on meaning
+what it meant: Shift+Return and Shift+Tab re-spelled, Escape and every Control
+chord untouched."
+  (cooked-tests--with-session '("/bin/sh" "-c" "sleep 5")
+    (should (equal (cooked-tests--spell 'S-return 'kitty) "\e[13;2u"))
+    (should (equal (cooked-tests--spell 'escape 'kitty) "\e"))
+    (should (equal (cooked-tests--spell ?\C-a 'kitty) "\C-a"))
+    (should (equal (cooked-tests--spell 'S-return 'modify-other) "\e[27;2;13~"))
+    (should (equal (cooked-tests--spell ?\C-a 'modify-other) "\C-a"))
+    ;; And a real negotiation is believed over it.
+    (cooked-tests--negotiate "\e[>1u")
+    (should (equal (cooked-tests--spell 'escape 'modify-other) "\e[27u"))))
 
 (ert-deftest cooked-control-chords-on-printable-keys-reach-the-child ()
   "A graphical frame's `C-;' and `C-S-a' are events of their own; unbound, the
@@ -3849,7 +3629,7 @@ take cooked's own prefix back through a shift."
 (ert-deftest cooked-super-hyper-and-kittys-own-keys-reach-a-kitty-child ()
   "Through the command loop, the keys kitty spells and nothing else did reach it.
 
-`cooked--modifier-param' summed Shift, Meta and Control, so \\`s-a' and \\`H-a'
+The modifier parameter summed Shift, Meta and Control, so \\`s-a' and \\`H-a'
 went out as a plain `a', and no map bound them anyway.  \\`C-M-S-<up>' was not
 among the modified spellings the maps bind, so Emacs shift-translated it to
 \\`C-M-<up>' and the Shift was gone before `cooked-send-key' ran.  F13 and Pause
@@ -3990,25 +3770,32 @@ that the `shifted' row the table spells it with is checked as well.")
   "Every key the entry declares is what cooked sends for that key.
 
 The terminfo audit checked modes and queries, and nothing checked the ~160 key
-capabilities: `kf5' could lose its row in `cooked--key-encodings' and every
-test pass, while ncurses waited on a sequence that never arrived.  Under `smkx'
-each capability is the key's spelling exactly.  Under `rmkx' the keypad and
-cursor keys go back to their other spelling and every other key is unchanged.
-A capability with no entry in `cooked-tests--terminfo-key-events' fails, so a
-new one is checked from the day it is added."
-  (let ((source (cooked--terminfo-source))
-        (cooked--keys 'legacy))
-    (skip-unless (file-exists-p source))
-    (pcase-dolist (`(,name . ,bytes) (cooked-tests--terminfo-keys))
-      (ert-info ((format "`%s' is %S" name bytes))
-        (let ((entry (assoc name cooked-tests--terminfo-key-events)))
-          (should entry)
-          (when-let* ((event (cdr entry)))
-            (let ((cooked--app-cursor t))
-              (should (equal (cooked--encode-event event) bytes)))
+capabilities: `kf5' could lose its row in the core's table and every test pass,
+while ncurses waited on a sequence that never arrived.  Under `smkx' each
+capability is the key's spelling exactly.  Under `rmkx' the keypad and cursor
+keys go back to their other spelling and every other key is unchanged.  A
+capability with no entry in `cooked-tests--terminfo-key-events' fails, so a new
+one is checked from the day it is added.
+
+`smkx' is `ESC [ ? 1 h ESC =' and `rmkx' is `ESC [ ? 1 l ESC >', so the child
+is made to send exactly what ncurses would: the two modes the keys follow are
+the terminal's now, not a copy of them here."
+  (skip-unless (file-exists-p (cooked--terminfo-source)))
+  (let ((capabilities (cooked-tests--terminfo-keys)))
+    (cooked-tests--with-session '("/bin/sh" "-c" "sleep 5")
+      (cooked-tests--negotiate "\e[?1h\e=")
+      (pcase-dolist (`(,name . ,bytes) capabilities)
+        (ert-info ((format "`%s' is %S under smkx" name bytes))
+          (let ((entry (assoc name cooked-tests--terminfo-key-events)))
+            (should entry)
+            (when-let* ((event (cdr entry)))
+              (should (equal (cooked-tests--spell event) bytes))))))
+      (cooked-tests--negotiate "\e[?1l\e>")
+      (pcase-dolist (`(,name . ,bytes) capabilities)
+        (ert-info ((format "`%s' is %S under rmkx" name bytes))
+          (when-let* ((event (cdr (assoc name cooked-tests--terminfo-key-events))))
             (unless (string-prefix-p "\eO" bytes)
-              (let ((cooked--app-cursor nil))
-                (should (equal (cooked--encode-event event) bytes))))))))))
+              (should (equal (cooked-tests--spell event) bytes)))))))))
 
 (ert-deftest cooked-key-override-actions-encode-to-their-bytes ()
   "Every `cooked-key-overrides' action form, and the reason each one exists:
@@ -4035,11 +3822,10 @@ program, not a discovery about what the child asked for.  If it leaked into
 protocol the child never negotiated -- which is the rubbish-in-the-input case
 cooked exists to avoid."
   (cooked-tests--with-session '("/bin/sh" "-c" "sleep 5")
-    (setq cooked--keys 'legacy)
     (should (equal (cooked--override-bytes-for :kitty 'S-return) "\e[13;2u"))
     (should (eq cooked--keys 'legacy))
     ;; And the ordinary path is still spelling keys the legacy way.
-    (should (equal (cooked--encode-event 'S-return) "\r"))))
+    (should (equal (cooked-tests--spell 'S-return) "\r"))))
 
 (ert-deftest cooked-key-override-matches-the-foreground-program ()
   "The child cooked spawned is a shell; the program an override names is
@@ -4090,28 +3876,28 @@ stop composing a multi-line command."
       (should (eq (cooked--assumed-key-protocol) 'kitty))
       ;; It only ever adjusts the ordinary path, not the negotiated state itself.
       (should (eq cooked--keys 'legacy))
-      (let ((sent nil))
-        (cl-letf (((symbol-function 'cooked--send)
-                   (lambda (_s text) (push text sent))))
-          (let ((last-command-event 'backtab))
-            (cooked-send-key))
-          (should (equal sent '("\e[9;2u"))))))))
+      (let ((last-command-event 'backtab))
+        (cooked-send-key))
+      (should (cooked-tests--settle
+               (lambda () (string-search "^[[9;2u" (cooked-tests--text))))))))
 
 (ert-deftest cooked-key-protocol-override-yields-to-a-real-negotiation ()
   "A guess about what a program probably wants is never trusted over what it
 actually asked for -- if that ever happened, this would be indistinguishable
 from a bug that silently ignored `CSI ? u'."
   (let ((cooked-key-protocol-overrides '(("\\`cat\\'" . kitty))))
-    (cooked-tests--with-session '("/bin/cat")
-      (should (cooked-tests--settle (lambda () (eq cooked--mode 'cooked))))
-      (setq cooked--keys 'modify-other)
-      (should-not (cooked--assumed-key-protocol))
-      (let ((sent nil))
-        (cl-letf (((symbol-function 'cooked--send)
-                   (lambda (_s text) (push text sent))))
-          (let ((last-command-event 'S-return))
-            (cooked-send-key))
-          (should (equal sent '("\e[27;2;13~"))))))))
+    (cooked-tests--with-session
+        '("/bin/sh" "-c"
+          "printf '\\033[?1049h\\033[>4;2m'; stty raw -echo; exec cat -v")
+      (should (cooked-tests--settle (lambda () (eq cooked--keys 'modify-other))))
+      ;; The guess is still offered -- the program is `cat' either way -- and the
+      ;; core is the end that declines it, because it is the end that knows a
+      ;; negotiation has happened.
+      (should (eq (cooked--assumed-key-protocol) 'kitty))
+      (let ((last-command-event 'S-return))
+        (cooked-send-key))
+      (should (cooked-tests--settle
+               (lambda () (string-search "^[[27;2;13~" (cooked-tests--text))))))))
 
 (ert-deftest cooked-key-protocol-override-is-inert-when-emacs-owns-the-line ()
   "Same gating as `cooked-key-overrides', and for the same reason: this is
@@ -4265,8 +4051,8 @@ command runs, flattening the event past recovery.  The binding is the fix."
 (ert-deftest cooked-shift-reaches-the-child ()
   (cooked-tests--with-session '("/bin/cat")
     (should (cooked-tests--settle (lambda () (eq cooked--mode 'cooked))))
-    (cooked--send cooked--session (cooked--encode-event ?S))
-    (cooked--send cooked--session (cooked--encode-event ?H))
+    (cooked--send cooked--session (cooked-tests--spell ?S))
+    (cooked--send cooked--session (cooked-tests--spell ?H))
     (cooked--send cooked--session "\r")
     (should (cooked-tests--settle
              (lambda () (string-match-p "SH" (cooked-tests--text)))))))
@@ -5856,14 +5642,13 @@ Emacs, and at a prompt it is not there at all."
       (cooked--refresh-keymap)
       (cooked-tests--assert-forwarded 'command))
     (cooked-tests--with-session
-        '("/bin/sh" "-c" "printf '\\033[?1049h'; stty raw -echo; cat -v")
+        '("/bin/sh" "-c" "printf '\\033[?1049h\\033[>1u'; stty raw -echo; cat -v")
       (should (cooked-tests--settle (lambda () cooked--alt)))
       (cooked-tests--assert-forwarded 'alt)
       ;; And what the forwarded keys send, from insert state.
       (evil-insert-state)
-      (cooked-tests--with-kitty-flags 1
-        (let ((last-command-event 'S-return))
-          (call-interactively (key-binding (kbd "S-<return>")))))
+      (let ((last-command-event 'S-return))
+        (call-interactively (key-binding (kbd "S-<return>"))))
       (should (cooked-tests--settle
                (lambda () (string-search "^[[13;2u" (cooked-tests--text)))))
       ;; A graphical frame's Delete key is `delete', not the `deletechar' a

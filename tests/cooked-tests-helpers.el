@@ -535,6 +535,22 @@ off the buffer."
      (should-not (cooked--input-state-p))
      ,@body))
 
+(defun cooked-tests--negotiate (bytes)
+  "Have the emulator see BYTES, as though the child had written them.
+
+`cooked--feed' wakes nobody and drains nothing, so the terminal has the
+negotiation and Lisp's copy of it does not -- which is exactly the window a key
+is spelled in when a child asks for a protocol and reads a key before Emacs
+next draws.  A key spelled after this is spelled against what the child holds,
+or the spelling is still reading a drain-old copy of it."
+  (cooked--feed cooked--session bytes))
+
+(defun cooked-tests--spell (event &optional assumed)
+  "The bytes cooked would send the child for EVENT, or nil for no key at all.
+ASSUMED is a protocol to assume for a program that negotiated none, as for
+`cooked--send-key'."
+  (cooked--encode-key-event event assumed))
+
 (defconst cooked-tests--prompt "$ "
   "The prompt `cooked-tests--zshrc' sets, for tests that must recognise one.
 

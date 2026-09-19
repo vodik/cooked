@@ -329,9 +329,13 @@ the `editing' binding in `cooked--apply'."
   "How to spell modified keys for this child.
 
 One of `legacy', `modify-other' or `kitty', as negotiated by the child itself —
-see `cooked--key-encodings' for why this cannot simply be assumed.  Which keys a
-protocol covers is a second question, answered by `cooked--kitty-flags' and
-`cooked--modify-other-keys'.")
+see `cooked-key-protocol-overrides' for why this cannot simply be assumed.
+Which keys a protocol covers is a second question, answered by
+`cooked--kitty-flags' and `cooked--modify-other-keys'.
+
+The copy a drain leaves here says which keys the passthrough map takes away
+from Emacs; what the child is sent is spelled by the core against the
+negotiation it holds at the moment of the write.")
 (defvar-local cooked--kitty-flags 0
   "The kitty keyboard flags the child pushed, masked to what cooked honours.
 
@@ -347,7 +351,7 @@ re-spelled.  See `cooked--kitty-negotiated-p'.")
 1 or 2; the core reports anything else as 0.  Read only while `cooked--keys'
 is `modify-other', and the difference between 0 and a level there is the
 difference between a guess and a negotiation -- see
-`cooked--modify-other-level'.")
+`cooked-key-protocol-overrides'.")
 (defvar-local cooked-title nil
   "Title the child last set, via OSC 0 or 2, or nil if it never set one.
 
@@ -400,8 +404,8 @@ reports and the completion channel.  What actually differs between those sites
 is the parameters and the final byte, and that is all they say.
 
 FINAL is a string rather than a character because that is what it already is at
-the site that has one to hand: `cooked--key-encodings' stores the final byte of
-a `csi' key as a string.
+the site that has one to hand: `cooked--alt-scroll-keys' names the cursor key a
+wheel notch stands in for by its final byte.
 
 PARAMS are numbers, so `(cooked--csi \"~\" 5 2)' is `ESC [ 5 ; 2 ~', the
 modified spelling of `prior'.  None of them at all is the unparameterised
@@ -448,18 +452,9 @@ F1 through F4 whatever mode it is in.
 Not `cooked--csi' with a different introducer, because SS3 shifts exactly one
 character and so can carry no parameters at all.  That is not a limitation this
 has to work around -- a key with a modifier to report leaves SS3 behind and is
-spelled as a CSI instead, which `cooked--encode-event' does for both of the
+spelled as a CSI instead, which the core's key encoder does for both of the
 cases above."
   (concat "\eO" final))
-
-(defun cooked--meta-prefixed (mods seq)
-  "SEQ as a key held with MODS sends it where no protocol spells the modifier.
-
-That is SEQ with an ESC in front when MODS holds `meta', and SEQ unchanged
-otherwise: `M-x' is `ESC x', which is xterm's `metaSendsEscape' and the
-only spelling of Meta a child that negotiated nothing can read.  Control and
-Shift are not this function's to apply, having already been folded into SEQ."
-  (if (memq 'meta mods) (concat "\e" seq) seq))
 
 (defun cooked--cursor-key (final)
   "Cursor key FINAL spelled the way the child last asked for it.
@@ -467,12 +462,9 @@ Shift are not this function's to apply, having already been folded into SEQ."
 `ESC O FINAL' while DECCKM is set -- see `cooked--app-cursor' -- and
 `ESC [ FINAL' otherwise.
 
-Here rather than in cooked-keys.el because the choice is made twice and from
-two different subjects: `cooked--encode-event' makes it for an arrow the user
-pressed, and `cooked--alt-scroll-keys' for the arrows a wheel notch stands in
-for on the alternate screen.  Those had the conditional written out once each,
-which is the shape that lets a child in application mode be sent one spelling
-by the keyboard and the other by the mouse."
+The arrows a wheel notch stands in for on the alternate screen are the one
+caller left here; the key encoder makes the same choice in the core, against
+the mode the child holds at the moment of the write."
   (if cooked--app-cursor (cooked--ss3 final) (cooked--csi final)))
 
 ;;;; Who owns the keyboard

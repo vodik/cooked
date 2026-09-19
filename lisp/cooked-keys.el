@@ -26,463 +26,138 @@
 (cooked--declare-core)
 
 ;;;; Key encoding
+;;
+;; The spelling itself is the core's, in src/emu/term/keypress.rs, and reaches the
+;; child through `cooked--send-key'.  Which protocol the child negotiated, at which
+;; level, with which kitty flags, and whether DECCKM and DECKPAM are set are all the
+;; child's to change at any moment; spelled from this side they were read as of the
+;; last drain, so a key pressed after a `CSI > 1 u' and before the next drain went out
+;; in the encoding the child had just stopped reading.  What is left here is the half
+;; that is Emacs': which key an event names, and which protocol to assume for a program
+;; that reads one without ever asking for it.
 
-(defconst cooked--key-encodings
-  `((up          csi     "A")
-    (down        csi     "B")
-    (right       csi     "C")
-    (left        csi     "D")
-    (home        csi     "H")
-    (end         csi     "F")
-    (f1          ss3     "P")
-    (f2          ss3     "Q")
-    (f3          ss3     "R")
-    (f4          ss3     "S")
-    (prior       tilde   5)
-    (next        tilde   6)
-    (insert      tilde   2)
-    (deletechar  tilde   3)
-    (f5          tilde   15)
-    (f6          tilde   17)
-    (f7          tilde   18)
-    (f8          tilde   19)
-    (f9          tilde   20)
-    (f10         tilde   21)
-    (f11         tilde   23)
-    (f12         tilde   24)
-    (return      literal 13)
-    (tab         literal 9)
-    (escape      literal 27)
-    (backspace   literal 127)
-    ;; Shift+TAB is reported by Emacs as `backtab\=', not as `S-tab\=' -- see
-    ;; `cooked--encode-event\=', which restores the shift `event-modifiers\=' leaves
-    ;; out so this falls out of the ordinary modifier logic after all.  The
-    ;; explicit fallback is the classical, un-negotiated spelling; terminfo calls
-    ;; it `kcbt\='.  It is the one entry whose fallback is not simply its code
-    ;; point as a character.
-    (backtab     literal 9 ,(cooked--csi "Z"))
-    ;; `begin\=' is here for the keypad's centre key rather than for itself: no
-    ;; ordinary keyboard sends it, but `kbeg\=' is what terminfo calls that key
-    ;; and this is the row `kp-begin\=' falls back to.
-    (begin       csi     "E")
-    ;; The keypad.  Nineteen capabilities -- `ka1\=' through `kc3\=', `kbeg\=',
-    ;; `kp5\=', `kent\=' and the `kpADD\=' family -- were declared in
-    ;; terminfo/cooked.ti and none of them were ever sent, because this table
-    ;; had no keypad row at all.  After `keypad(true)\=' ncurses waited on
-    ;; getch for sequences that could not arrive.
-    ;;
-    ;; Emacs reports the same physical key under two names depending on
-    ;; NumLock, so both halves are listed: `kp-7\=' and `kp-home\=' are one
-    ;; key and share the SS3 final `w\='.  What differs is the *other*
-    ;; spelling -- the digit half falls back to the character on the key cap,
-    ;; the editing half to whatever the equivalent main-keyboard key sends,
-    ;; named here as a symbol so that a modifier reaches the spelling that key
-    ;; already has rather than a keypad form nothing decodes.
-    (kp-0        keypad  "p" "0")
-    (kp-1        keypad  "q" "1")
-    (kp-2        keypad  "r" "2")
-    (kp-3        keypad  "s" "3")
-    (kp-4        keypad  "t" "4")
-    (kp-5        keypad  "u" "5")
-    (kp-6        keypad  "v" "6")
-    (kp-7        keypad  "w" "7")
-    (kp-8        keypad  "x" "8")
-    (kp-9        keypad  "y" "9")
-    (kp-decimal  keypad  "n" ".")
-    (kp-add      keypad  "k" "+")
-    (kp-subtract keypad  "m" "-")
-    (kp-multiply keypad  "j" "*")
-    (kp-divide   keypad  "o" "/")
-    (kp-separator keypad "l" ",")
-    (kp-enter    keypad  "M" "\r")
-    (kp-home     keypad  "w" home)
-    (kp-up       keypad  "x" up)
-    (kp-prior    keypad  "y" prior)
-    (kp-left     keypad  "t" left)
-    (kp-begin    keypad  "E" begin)
-    (kp-right    keypad  "v" right)
-    (kp-end      keypad  "q" end)
-    (kp-down     keypad  "r" down)
-    (kp-next     keypad  "s" next)
-    (kp-insert   keypad  "p" insert)
-    (kp-delete   keypad  "n" deletechar)
-    ;; F13-F24 as terminfo/cooked.ti names them: `kf13\=' is Shift+F1's
-    ;; `ESC [ 1 ; 2 P\=', up to `kf24\=', Shift+F12's `ESC [ 24 ; 2 ~\='.
-    (f13         shifted f1)
-    (f14         shifted f2)
-    (f15         shifted f3)
-    (f16         shifted f4)
-    (f17         shifted f5)
-    (f18         shifted f6)
-    (f19         shifted f7)
-    (f20         shifted f8)
-    (f21         shifted f9)
-    (f22         shifted f10)
-    (f23         shifted f11)
-    (f24         shifted f12)
-    (menu        tilde   29)
-    (pause       none)
-    (print       none))
-  "Every non-character key cooked speaks for, as (SYMBOL KIND PAYLOAD [FALLBACK]).
+(defconst cooked--key-names
+  '(up down right left home end
+    f1 f2 f3 f4 prior next insert deletechar
+    f5 f6 f7 f8 f9 f10 f11 f12
+    return tab escape backspace backtab begin
+    kp-0 kp-1 kp-2 kp-3 kp-4 kp-5 kp-6 kp-7 kp-8 kp-9
+    kp-decimal kp-add kp-subtract kp-multiply kp-divide kp-separator kp-enter
+    kp-home kp-up kp-prior kp-left kp-begin kp-right kp-end kp-down kp-next
+    kp-insert kp-delete
+    f13 f14 f15 f16 f17 f18 f19 f20 f21 f22 f23 f24
+    menu pause print)
+  "Every non-character key cooked speaks for, by the symbol Emacs names it with.
 
-One table rather than parallel ones per spelling, because the unmodified
-spelling of every key is derivable from its modified one: a separate table of
-unmodified spellings would be a denormalization maintained by hand, and one
-consulted after the others could never be reached at all.
+The spelling of each is the core's, in `NamedKey'; this list is the same set of
+names in the same order, because `cooked--build-passthrough-map' has to bind
+every one of them, in every modified spelling, before the module is loaded and
+so before `cooked--key-table' could be asked.  The test
+`cooked-key-names-match-the-core' holds the two against each other, so a key
+added on one side and forgotten on the other fails rather than encoding to
+nothing.")
 
-KIND says both how the key is spelled and what a modifier does to it:
+(defconst cooked--kitty-only-keys '(pause print)
+  "Keys with no spelling outside the kitty keyboard protocol.
 
-  `csi'      PAYLOAD is the final byte.  Unmodified, \\='ESC [ FINAL\\=', or
-              \\='ESC O FINAL\\=' under DECCKM; modified, \\='ESC [ 1 ; MOD FINAL\\='.
-  `ss3'      PAYLOAD is the final byte.  Unmodified \\='ESC O FINAL\\=', and
-              modified \\='ESC [ 1 ; MOD FINAL\\=' -- F1-F4 leave SS3 behind the
-              moment they are modified.
-  `tilde'    PAYLOAD is the number N in \\='ESC [ N ~\\=', which takes a modifier
-              as \\='ESC [ N ; MOD ~\\='.
-  `literal'  PAYLOAD is the code point for the negotiated encodings, and the
-              unmodified spelling is that code point as a character unless
-              FALLBACK says otherwise.  See `cooked--encode-literal' for why a
-              modifier here is spelled out only when the child opted in.
-  `keypad'   PAYLOAD is the SS3 final byte the key sends under application
-              keypad -- `ESC O PAYLOAD', which is what `ka1' and its
-              nineteen neighbours in terminfo/cooked.ti spell out.  FALLBACK is
-              the other spelling, the one `rmkx' asks for: a string for the
-              keys with a character on the cap, or the symbol of the row this
-              key stands in for when NumLock is off.  See
-              `cooked--app-keypad-p' for which of the two is sent.
-  `shifted'  PAYLOAD is the row this key is spelled as with Shift held, so
-              `f13' is sent as `S-f1' and `C-f13' as `C-S-f1'.  That is
-              how the entry declares `kf13' through `kf24', after xterm's
-              PC keyboard, where F13 is what Shift+F1 is called.  xterm sends
-              a key that really is F13 as `ESC [ 25 ~', but no capability in
-              terminfo/cooked.ti names that, so a program reading the entry
-              would take it for an unknown key.
-  `none'     There is no spelling outside the kitty protocol, which gives the
-              key a code point of its own in `cooked--kitty-functional-codes'.
-              Pause and Print Screen send nothing in xterm and have no
-              capability in terminfo, and inventing a sequence for them would
-              put bytes in a program's input that it never agreed to read.
-
-`cooked--key-sequence' derives the unmodified spelling, so the two can no
-longer disagree.  The symbols are also exactly the set
-`cooked--build-passthrough-map' binds explicitly, in every modified spelling,
-for each of the maps it builds -- which is the table's other consumer.  A
-`none' key is bound only while the kitty protocol is negotiated; see
-`cooked--kitty-only'.")
+Pause and Print Screen send nothing in xterm and have no capability in
+terminfo, and inventing a sequence for them would put bytes in a program's
+input that it never agreed to read.  The protocol gives each a code point of
+its own, so `cooked--build-passthrough-map' binds them only while it is
+negotiated; see `cooked--kitty-only'.")
 
 (defconst cooked--key-event-aliases
   '((delete . deletechar))
   "Keys a graphical frame names differently, as (EVENT . SYMBOL).
 
-SYMBOL is the `cooked--key-encodings' row the key is spelled by, and EVENT is
-the name a graphical frame gives the same key.  A terminal frame decodes the
-Delete key's `ESC [ 3 ~' as `deletechar', but a graphical frame reports it
-as `delete' and translates that to `deletechar' through
-`local-function-key-map' only when nothing binds `delete' -- and
-`comint-mode-map' does.  So Delete in a full-screen program ran
-`delete-forward-char' on a read-only row instead of reaching the child.
+SYMBOL is the `cooked--key-names' entry the key is spelled by, and EVENT is the
+name a graphical frame gives the same key.  A terminal frame decodes the Delete
+key's `ESC [ 3 ~' as `deletechar', but a graphical frame reports it as
+`delete' and translates that to `deletechar' through `local-function-key-map'
+only when nothing binds `delete' -- and `comint-mode-map' does.  So Delete in a
+full-screen program ran `delete-forward-char' on a read-only row instead of
+reaching the child.
 
 `cooked--build-passthrough-map' binds each EVENT beside its row, in every
-modified spelling, and `cooked--encode-event' reads EVENT as SYMBOL, so
-\\`C-<delete>' is sent as `ESC [ 3 ; 5 ~' on either frame.  Every other row
-of the table is named alike on both.")
+modified spelling, and `cooked--key-parts' reads EVENT as SYMBOL, so
+\\`C-<delete>' is sent as `ESC [ 3 ; 5 ~' on either frame.  Every other key is
+named alike on both.")
 
-(defun cooked--key-sequence (entry)
-  "The unmodified, un-negotiated escape sequence ENTRY names.
+(defun cooked--key-parts (event)
+  "The key EVENT names and the modifiers it was held with, or nil.
 
-ENTRY is a `cooked--key-encodings' row.  Deriving the unmodified spelling
-rather than writing it out a second time is what keeps the two spellings of one
-key from drifting apart."
-  (pcase entry
-    (`(,_ csi ,final) (cooked--csi final))
-    (`(,_ ss3 ,final) (cooked--ss3 final))
-    (`(,_ tilde ,n) (cooked--csi "~" n))
-    (`(,_ keypad ,_ ,plain)
-     (if (symbolp plain)
-         (cooked--key-sequence (assq plain cooked--key-encodings))
-       plain))
-    (`(,_ literal ,_ ,fallback) fallback)
-    (`(,_ literal ,code) (string code))))
+A cons (KEY . MODS), where KEY is a character -- the key `event-basic-type'
+reports, with no modifier folded into it -- or one of `cooked--key-names', and
+MODS a list of `event-modifiers' symbols.  That is what `cooked--send-key'
+takes.  nil for an event this terminal has no key in: a mouse event, whose
+`event-basic-type' is a symbol no table carries, or a key such as `f30' that
+no protocol spells.
 
-(defun cooked--modifier-param (mods)
-  "Return the modifier parameter for MODS: 1 plus a bit per held modifier.
+`event-modifiers' is asked first, and not merely for readability: on a symbolic
+event such as `S-up' it is what parses and caches `event-symbol-elements',
+which `event-basic-type' only reads.  Ask the other way round and the first
+press of every modified key decodes as nil."
+  (let* ((mods (event-modifiers event))
+         (basic (event-basic-type event))
+         (basic (alist-get basic cooked--key-event-aliases basic))
+         ;; Emacs bakes `backtab''s shift into the base symbol and reports none
+         ;; in MODS at all, for `backtab' alone or with other modifiers held
+         ;; alongside it (`C-backtab' still reports only `(control)').  Restore
+         ;; it, or the key has a code point no modifier ever reaches.
+         (mods (if (eq basic 'backtab) (cons 'shift mods) mods))
+         ;; And the other way round: where a frame names the key `S-tab', it is
+         ;; still the Shift+Tab X calls `ISO_Left_Tab', which every protocol
+         ;; spells as `backtab' rather than as a Tab with a modifier.
+         (basic (if (and (eq basic 'tab) (memq 'shift mods)) 'backtab basic)))
+    ;; A terminal frame delivers Tab, Return, Backspace and NUL as the bare
+    ;; bytes, which Emacs names by the letter they are typed with: a TAB read
+    ;; there is `C-i', and a protocol told that would send `ESC [ 105 ; 5 u'
+    ;; for every Tab.  A graphical frame reports the key itself and this does
+    ;; not arise; a terminal frame cannot tell the two apart, and every
+    ;; terminal before kitty sent Tab for both, so the key is taken to be Tab.
+    ;; ESC is the exception left alone: there it is both the Escape key and the
+    ;; first half of every Meta chord, and the core sends it as the byte.
+    (pcase (and (integerp event) (logand event (1- (ash 1 22))))
+      ((and code (or 9 13 127))
+       (cons (pcase code (9 'tab) (13 'return) (127 'backspace))
+             (remq 'control mods)))
+      (0 (cons ?\s mods))
+      ;; Emacs names ESC `C-[', which no protocol may re-spell: the core reads
+      ;; the bare character 27 as the byte and sends it as the byte.
+      (27 (cons 27 (remq 'control mods)))
+      (_ (and (or (characterp basic) (memq basic cooked--key-names))
+              (cons basic mods))))))
 
-Shift is 1, Meta 2 and Control 4, as in xterm, where the key Emacs calls Meta
-is the one xterm calls Alt.  Super is 8 and Hyper 16, as in kitty's keyboard
-protocol, so \\`s-<up>' is `ESC [ 1 ; 9 A'.  xterm's own 8 is a Meta key
-distinct from Alt, which a PC keyboard does not have, and kitty sends Super in
-that place in its legacy spellings too.  Emacs' Alt modifier has no bit in
-either protocol and is not spelled, which is also why mode 1039 is declined."
-  (+ 1
-     (if (memq 'shift mods) 1 0)
-     (if (memq 'meta mods) 2 0)
-     (if (memq 'control mods) 4 0)
-     (if (memq 'super mods) 8 0)
-     (if (memq 'hyper mods) 16 0)))
+(defun cooked--send-key-event (event)
+  "Send the key EVENT names to the child, or return nil if it names none.
 
-(defun cooked--app-keypad-p ()
-  "Whether the keypad should send the SS3 spelling `smkx' asked for.
+The bytes are the core's: `cooked--send-key' spells the key against the
+protocol the child holds at the moment of the write, and writes it in the same
+step.  The protocol `cooked-key-protocol-overrides' guesses for the program in
+the foreground goes with it, and the core applies that only where the child
+negotiated nothing of its own."
+  (when-let* ((parts (cooked--key-parts event)))
+    (cooked--snap-to-cursor)
+    (cooked--send-key (cooked--require-session) (car parts) (cdr parts)
+                      (cooked--assumed-key-protocol))))
 
-DECKPAM is the mode that actually governs this, and it is read here from
-DECCKM instead -- `cooked--app-cursor' -- because the core tracks DECKPAM
-without reporting it to Lisp, so there is nothing here to read.  The
-substitution is exact for everything that drives the keypad the way terminfo
-describes it: `smkx' is `ESC [ ? 1 h ESC =' and `rmkx' is
-`ESC [ ? 1 l ESC >', so every program that turns the keypad on through the
-entry turns both modes on in the same breath and off again in the same breath.
+(defun cooked--encode-key-event (event &optional assumed)
+  "The bytes the child would receive for the key EVENT names, or nil.
 
-They part only for a child that sends a bare `ESC =' with no `ESC [ ? 1 h'
-beside it, which no capability in terminfo/cooked.ti describes and which
-nothing reaches through ncurses.  One function rather than the variable at each
-call site, so that the day the core reports DECKPAM there is a single line to
-change."
-  cooked--app-cursor)
-
-(defun cooked--encode-literal (entry code param mods)
-  "Encode the `literal' key ENTRY with modifiers, given its code point CODE.
-
-CODE is the kitty/modifyOtherKeys code point, and PARAM the xterm modifier
-parameter, with MODS the modifier list.  Falls back to `cooked--key-sequence'
-when the child has negotiated nothing, since that is what every terminal has
-always sent and what every program still understands -- a bare byte for most
-keys here, but `backtab' falls back to its own classical, three-byte spelling
-instead."
-  (let ((seq (cooked--key-sequence entry))
-        (level (cooked--modify-other-level)))
-    (cond
-     ((= param 1) (cooked--meta-prefixed mods seq))
-     ;; A level the child set says which of these keys it covers.  A guess from
-     ;; `cooked-key-protocol-overrides\=' has no level and is read as level 2,
-     ;; which re-spells these four keys under any modifier -- as the guess always
-     ;; has -- but for Shift+Tab, which even level 2 leaves as `ESC [ Z\='.
-     ((and-let* (((eq cooked--keys 'modify-other))
-                 (spelled (cooked--modify-other-mods (or level 2) code mods)))
-        (cooked--csi "~" 27 (cooked--modifier-param spelled) code)))
-     ((eq cooked--keys 'kitty) (cooked--csi "u" code param))
-     ;; Nothing negotiated, or a key level 1 leaves alone: meta has a classical
-     ;; spelling, the rest do not.
-     (t (cooked--meta-prefixed mods seq)))))
-
-(defun cooked--encode-entry (entry param mods)
-  "Bytes for the `cooked--key-encodings' row ENTRY, held with MODS.
-
-PARAM is the xterm modifier parameter `cooked--modifier-param' derived from
-MODS, and both are passed because the two are wanted in different places: the
-parameter goes into a CSI, the list decides whether a leading ESC is what Meta
-becomes.
-
-A function of its own rather than the body of `cooked--encode-event' because
-the keypad answers by deferring: a modified `kp-home' is a modified `home',
-and saying so means dispatching on that row from inside this one."
-  (let ((modified (> param 1)))
-    (pcase entry
-      (`(,_ csi ,final)
-       (if modified (cooked--csi final 1 param) (cooked--cursor-key final)))
-      ;; F1-F4 leave SS3 behind the moment they are modified.
-      (`(,_ ss3 ,final)
-       (if modified (cooked--csi final 1 param) (cooked--ss3 final)))
-      (`(,_ tilde ,n)
-       (if modified (cooked--csi "~" n param) (cooked--csi "~" n)))
-      (`(,_ keypad ,final ,plain)
-       (cond
-        ;; The whole of what `smkx\=' buys: `ESC O w\=' for the upper-left
-        ;; key, which is `ka1\=', and eighteen more like it.
-        ((and (not modified) (cooked--app-keypad-p)) (cooked--ss3 final))
-        ;; NumLock off: this key *is* the editing key it stands in for, so a
-        ;; modifier reaches that key's spelling.  Terminfo declares no modified
-        ;; keypad capability, and inventing `ESC [ 1 ; 5 w\=' to fill the gap
-        ;; would send a sequence nothing decodes.
-        ((symbolp plain)
-         (cooked--encode-entry (assq plain cooked--key-encodings) param mods))
-        ;; A character on the key cap, so it behaves as that character does --
-        ;; including under a negotiated protocol, where `C-kp-add\=' is spelled
-        ;; from the code point of `+\=' exactly as `C-+\=' would be.
-        (t (cooked--encode-literal entry (aref plain 0) param mods))))
-      (`(,_ literal ,code . ,_)
-       (cooked--encode-literal entry code param mods))
-      (`(,_ shifted ,key)
-       (let ((mods (cons 'shift mods)))
-         (cooked--encode-entry (assq key cooked--key-encodings)
-                               (cooked--modifier-param mods) mods)))
-      (`(,_ none) nil))))
-
-;;;; xterm's modifyOtherKeys, as negotiated
-
-(defun cooked--control-char (char)
-  "The byte Control turns CHAR into, or nil where Control makes no byte.
-
-This is X11's table, from `XkbToControl' in libX11, and xterm's too, since
-xterm takes the byte from `XLookupString': `@' through `~' and the space
-bar are masked to their low five bits, `2' is NUL, `3' through `7' are ESC
-through US, `8' and `?' are DEL, and `/' is US.  Every other character has
-no control form, and Control on it sends the character itself.
-
-The obvious rule, masking any character to five bits, is wrong on both sides of
-that line.  It sent `C-;' as a bare ESC, which a child reads as the start of
-an escape sequence, and `C-/' as SI rather than the US every shell binds to
-undo.  modifyOtherKeys needs the real table for a second reason: level 1 is
-defined by it, re-spelling exactly the chords that have no byte here."
-  (cond ((or (<= ?@ char ?~) (= char ?\s)) (logand char #x1f))
-        ((= char ?2) 0)
-        ((<= ?3 char ?7) (+ 27 (- char ?3)))
-        ((memq char '(?8 ??)) 127)
-        ((= char ?/) 31)))
-
-(defun cooked--modify-other-level ()
-  "The modifyOtherKeys level the child negotiated, or nil if it negotiated none.
-
-nil while `cooked--keys' is `modify-other' means that value was assumed by
-`cooked-key-protocol-overrides' or `cooked-key-overrides' rather than asked
-for, and then only the `literal' keys are re-spelled, exactly as for a kitty
-guess and for the reason `cooked--kitty-negotiated-p' gives: `C-a' sent as
-`ESC [ 27 ; 5 ; 97 ~' to a program that never asked is not a Control-a."
-  (and (eq cooked--keys 'modify-other)
-       (memq cooked--modify-other-keys '(1 2))
-       cooked--modify-other-keys))
-
-(defun cooked--modify-other-mods (level code mods)
-  "The modifiers modifyOtherKeys LEVEL spells CODE with, held with MODS, or nil.
-
-nil means the key is not re-spelled and goes as its classical bytes.  Otherwise
-the answer is the modifiers the parameter of `ESC [ 27 ; PARAM ; CODE ~' is
-made from, which are MODS less what xterm leaves out of it.  Super and Hyper
-are always left out, since xterm's `allowedCharModifiers' keeps only
-Shift, Control and Alt: \\`s-a' is a plain `a' at either level.
-
-CODE is the character the key types, shifted -- `A' for shift+a, which is the
-keysym xterm reads and the number it sends -- or the code point of a `literal'
-key in `cooked--key-encodings'.  The rules are `ModifyOtherKeys',
-`allowedCharModifiers' and `filterAltMeta' in xterm's input.c (patch
-411), checked against the us-pc105 table in xterm's modified-keys FAQ.
-
-Tab with Shift held is Shift+Tab, whichever name Emacs gave it, because that is
-the key X reports as `ISO_Left_Tab' and xterm sends as `ESC [ Z' at both
-levels.  Level 2 re-spells it only when another modifier is held beside Shift,
-so \\`C-S-<tab>' is `ESC [ 27 ; 6 ; 9 ~' while Shift+Tab alone stays
-`ESC [ Z', which is what a program that reads `kcbt' is waiting for.
-
-Level 2 re-spells any key held with Control or Meta.  Shift alone re-spells
-only the keys Control would otherwise turn into a byte -- the letters and
-`@[\\]^_' with their shifted partners -- and the space bar, since shift+1
-already types a `!' nobody could mistake.  So shift+a is
-`ESC [ 27 ; 2 ; 65 ~' and `!' stays `!'.  Return, Tab, Escape and
-Backspace are re-spelled under any modifier.  xterm leaves Control+Backspace
-alone, since Control there flips Backspace between BS and DEL, a switch cooked
-does not have; spelling it out loses nothing a child that asked for this can
-misread.
-
-Level 1 leaves alone every chord that already means something.  Control
-re-spells a key only where `cooked--control-char' finds no byte for it, so
-`C-a' stays SOH while `C-;' becomes `ESC [ 27 ; 5 ; 59 ~'.  Shift alone
-re-spells nothing, and neither does Meta: xterm's manual says Meta at this
-level follows metaSendsEscape, which is how cooked always spells it.
-
-Return and Tab are re-spelled under Shift or Control, except that Meta takes
-Control and itself out of the chord first, as `filterAltMeta' does for the
-sake of Emacs' own `C-M-RET'.  So \\`C-M-<return>' is `ESC CR' and
-\\`M-S-<return>' is `ESC [ 27 ; 2 ; 13 ~'.  Escape is re-spelled only with
-Meta and Control or Shift held together, which is what `filterAltMeta' leaves
-of a chord on a key that is its own control byte; Backspace never is.
-
-Where any other chord is re-spelled, Meta still counts in its parameter, so
-\\`C-M-;' is `ESC [ 27 ; 7 ; 59 ~'.  That is xterm with its default
-resources, where metaSendsEscape is off.  With it on xterm drops Meta from the
-parameter too, and the chord arrives as \\`C-;': cooked keeps the modifier
-rather than lose it.  Where a chord is not re-spelled, Meta is the leading ESC
-it always was."
-  (let* ((mods (seq-difference mods '(super hyper)))
-         (ctrl (memq 'control mods))
-         (shift (memq 'shift mods))
-         (meta (memq 'meta mods)))
-    (pcase level
-      (2 (and (pcase code
-                ((guard (and (= code 9) shift)) (or ctrl meta))
-                ((or 9 13 27 127) (or ctrl shift meta))
-                (_ (or ctrl meta
-                       (and shift (or (<= #x40 code #x7f) (= code ?\s))))))
-              mods))
-      (1 (pcase code
-           ((guard (and (= code 9) shift)) nil)
-           ((or 9 13) (cond (meta (and shift '(shift)))
-                            ((or ctrl shift) mods)))
-           (27 (and meta (or ctrl shift) mods))
-           (127 nil)
-           (_ (and ctrl (not (cooked--control-char code)) mods)))))))
-
-(defun cooked--encode-char (char mods)
-  "The bytes for the text key CHAR held with MODS, when no protocol spells it.
-
-CHAR is the unshifted key, as `event-basic-type' reports it.  Shift becomes a
-capital, Control the byte `cooked--control-char' names or nothing, and Meta a
-leading ESC."
-  (let* ((char (if (memq 'shift mods) (upcase char) char))
-         (char (or (and (memq 'control mods) (cooked--control-char char))
-                   char)))
-    (cooked--meta-prefixed mods (string char))))
-
-(defun cooked--encode-modify-other (basic mods param level)
-  "Encode BASIC held with MODS for a child that negotiated modifyOtherKeys LEVEL.
-
-BASIC and MODS are as `cooked--kitty-event' names the key, and PARAM the xterm
-modifier parameter derived from MODS.  A key in `cooked--key-encodings' goes
-the way it always has, with `cooked--encode-literal' asking LEVEL about the
-four keys the protocol re-spells; a text key is `ESC [ 27 ; PARAM ; CODE ~'
-where `cooked--modify-other-mods' says so, and its classical bytes where not.
-
-Narrower than xterm where an Emacs event lacks the fact, as the kitty encoder
-is: shift+1 arrives as a bare `!', so Control+Shift+1 is sent as Control+`!'
-with parameter 5 rather than xterm's 6, and C-i, C-m and C-[ merge into Tab,
-Return and Escape."
-  (if-let* ((entry (assq basic cooked--key-encodings)))
-      (cooked--encode-entry entry param mods)
-    (when (characterp basic)
-      (let ((code (if (memq 'shift mods) (upcase basic) basic)))
-        (if-let* ((spelled (cooked--modify-other-mods level code mods)))
-            (cooked--csi "~" 27 (cooked--modifier-param spelled) code)
-          (cooked--encode-char basic mods))))))
+ASSUMED is a protocol to assume for a program that negotiated none, as for
+`cooked--send-key'.  For the two callers that have to compose the key with
+other bytes and write them together; everything else sends the key through
+`cooked--send-key-event'."
+  (when-let* ((parts (cooked--key-parts event)))
+    (cooked--encode-key (cooked--require-session) (car parts) (cdr parts) assumed)))
 
 ;;;; The kitty keyboard protocol, as negotiated
-
-(defconst cooked--kitty-keypad-codes
-  '((kp-0 . 57399) (kp-1 . 57400) (kp-2 . 57401) (kp-3 . 57402)
-    (kp-4 . 57403) (kp-5 . 57404) (kp-6 . 57405) (kp-7 . 57406)
-    (kp-8 . 57407) (kp-9 . 57408) (kp-decimal . 57409) (kp-divide . 57410)
-    (kp-multiply . 57411) (kp-subtract . 57412) (kp-add . 57413)
-    (kp-enter . 57414) (kp-separator . 57416) (kp-left . 57417)
-    (kp-right . 57418) (kp-up . 57419) (kp-down . 57420) (kp-prior . 57421)
-    (kp-next . 57422) (kp-home . 57423) (kp-end . 57424) (kp-insert . 57425)
-    (kp-delete . 57426) (kp-begin . 57427))
-  "The private-use code point kitty gives each keypad key.
-
-From the functional key table in kitty's keyboard protocol document.  The
-keypad is the one part of `cooked--key-encodings' the protocol spells
-differently from the legacy terminal: a keypad key is a key of its own there,
-not the main-keyboard key it stands in for, so that `kp-home' and `home'
-can be told apart.")
-
-(defconst cooked--kitty-functional-codes
-  '((f13 . 57376) (f14 . 57377) (f15 . 57378) (f16 . 57379) (f17 . 57380)
-    (f18 . 57381) (f19 . 57382) (f20 . 57383) (f21 . 57384) (f22 . 57385)
-    (f23 . 57386) (f24 . 57387) (print . 57361) (pause . 57362) (menu . 57363))
-  "The private-use code point kitty gives the keys that have no legacy spelling.
-
-From the same table as `cooked--kitty-keypad-codes'.  `menu' has a legacy
-spelling, `ESC [ 29 ~', but the protocol names it `ESC [ 57363 u' all the
-same, and F13-F24, which terminfo spells as shifted F1-F12, are keys of their
-own here, as the keypad is.  Scroll Lock and the lock keys have codes too, and
-are missing because Emacs reports none of them as a key.")
 
 (defconst cooked--kitty-disambiguate 1
   "Kitty keyboard flag 1: spell ambiguous keys, Escape and chords, as escape codes.")
 
-(defconst cooked--kitty-alternate-keys 4
-  "Kitty keyboard flag 4: report the shifted key alongside the key itself.")
-
 (defconst cooked--kitty-all-keys 8
   "Kitty keyboard flag 8: report every key as an escape code, text keys included.")
-
-(defconst cooked--kitty-associated-text 16
-  "Kitty keyboard flag 16: report the text a key produces alongside its code.")
 
 (defconst cooked--kitty-negotiated
   (logior cooked--kitty-disambiguate cooked--kitty-all-keys)
@@ -491,219 +166,31 @@ are missing because Emacs reports none of them as a key.")
 Flag 8 turns the protocol on as surely as flag 1 does, since reporting every key
 as an escape code disambiguates them all by construction, while flags 4 and 16
 only add a field to an escape code something else already chose to send.  The
-core makes the same test in `State::key_encoding'.")
-
-(defun cooked--kitty-flag-p (bit)
-  "Whether the child's kitty flags include BIT."
-  (/= 0 (logand cooked--kitty-flags bit)))
+core makes the same test in `KittyFlags::enables_encoding'.")
 
 (defun cooked--kitty-negotiated-p ()
   "Whether the child asked for the kitty protocol itself, so all of it applies.
 
 See `cooked--kitty-negotiated' for which flags say so.  What it rules out is a
-`kitty' that nobody negotiated, which `cooked-key-protocol-overrides' binds
-for a program that reads the protocol without ever asking for it.  That guess
-re-spells only the `literal' keys: a Claude Code sent Escape as
-`ESC [ 27 u' on the strength of a match against its process name would be the
-rubbish-in-the-input case the negotiation exists to prevent."
+`kitty' that nobody negotiated, which `cooked-key-protocol-overrides' assumes
+for a program that reads the protocol without ever asking for it.
+
+Read from the drain's copy of the flags, which is right for what asks: this
+decides which keys `cooked--build-passthrough-map' takes away from Emacs, and
+a keymap is rebuilt on a drain anyway.  What the child is *sent* is spelled
+against the flags it holds at the moment of the write, which is the core's to
+read."
   (and (eq cooked--keys 'kitty)
-       (cooked--kitty-flag-p cooked--kitty-negotiated)))
-
-(defun cooked--kitty-textless-p (mods)
-  "Whether MODS hold a modifier that stops a key producing text.
-
-That is every modifier but Shift: Control and Meta, and Super and Hyper, whose
-chords are shortcuts rather than characters.  kitty spells \\`s-a' as
-`ESC [ 97 ; 9 u' under bit 1, as it does \\`M-a'."
-  (seq-some (lambda (modifier) (memq modifier mods)) '(control meta super hyper)))
-
-(defun cooked--kitty-text-p (char)
-  "Whether CHAR may be reported as associated text: not a C0 or C1 control."
-  (and char (>= char #x20) (not (<= #x7f char #x9f))))
-
-(defun cooked--kitty-csi-u (code param &optional shifted text)
-  "The kitty sequence for key CODE held with modifier parameter PARAM.
-
-That is `ESC [ CODE : SHIFTED ; PARAM ; TEXT u', with each optional part left
-out when it has nothing to say: SHIFTED is the shifted key bit 4 reports, and
-TEXT the character bit 16 reports.  PARAM is omitted at 1, which is its default,
-unless TEXT follows it -- then its field is left empty rather than dropped, so
-that the text is not read as a modifier.  kitty's own example is shift+a,
-`ESC [ 97 ; 2 ; 65 u', and the same key with no modifier would be
-`ESC [ 97 ; ; 97 u'.
-
-The base-layout key, which the protocol puts after SHIFTED, is never sent: it
-names the physical key on a US layout, and an Emacs event carries no physical
-key.  The protocol makes both alternates optional."
-  (let ((key (if shifted (format "%d:%d" code shifted) code)))
-    (cond (text (cooked--csi "u" key (if (> param 1) param "") text))
-          ((> param 1) (cooked--csi "u" key param))
-          (t (cooked--csi "u" key)))))
-
-(defun cooked--encode-kitty-char (char mods param)
-  "Encode the text key CHAR, held with MODS, for a child that negotiated kitty.
-
-CHAR is the unshifted key, as `event-basic-type' reports it, and PARAM the
-modifier parameter.  Plain text, shifted or not, goes as the text itself unless
-bit 8 asked for every key as an escape code; Control or Meta makes it an escape
-code under bit 1 alone, which is what disambiguation means for a text key.
-kitty's table for `i' is the whole of the rule: `i', `I', then
-`ESC [ 105 ; 3 u' for alt, `105 ; 5' for ctrl, `105 ; 4' for shift+alt,
-`105 ; 7' for ctrl+alt and `105 ; 6' for ctrl+shift.
-
-Associated text is reported only where the key still produces text, which
-any modifier but Shift prevents; see `cooked--kitty-textless-p'.  The shifted
-key is reported only with Shift held and only where shifting changed something.
-Both are narrower than kitty for a key whose shifted glyph is not its upper
-case: Emacs reports shift+1 as a bare `!' with no Shift, so it is sent as the
-key `!', and nothing here can recover that it was a `1' -- a fact about the
-keyboard layout that an Emacs event does not carry."
-  (let* ((textless (cooked--kitty-textless-p mods))
-         (shift (memq 'shift mods))
-         (text (if shift (upcase char) char)))
-    (if (and (not textless) (not (cooked--kitty-flag-p cooked--kitty-all-keys)))
-        (string text)
-      (cooked--kitty-csi-u
-       char param
-       (and (cooked--kitty-flag-p cooked--kitty-alternate-keys) shift (/= text char) text)
-       (and (cooked--kitty-flag-p cooked--kitty-associated-text) (not textless)
-            (cooked--kitty-text-p text) text)))))
-
-(defun cooked--encode-kitty-entry (entry mods param)
-  "Encode the `cooked--key-encodings' row ENTRY for a negotiated kitty child.
-
-MODS and PARAM are as for `cooked--encode-entry', which this departs from in
-five places, each of them the protocol's rule that a key which produces no
-text is `CSI number ; modifier u' or `CSI 1 ; modifier FINAL':
-
-  A key in `cooked--kitty-functional-codes' is that code point, so F13 is
-  `ESC [ 57376 u' rather than the Shift+F1 terminfo calls it.
-
-  Escape is always an escape code, `ESC [ 27 u' unmodified.  Return, Tab and
-  Backspace stay bare bytes unmodified, so that `reset' can still be typed
-  after a program dies with the mode on -- until bit 8, which takes that away
-  too.
-  F1-F4 and the cursor keys drop SS3, even under DECCKM and even unmodified.
-  F3 is `ESC [ 13 ~', since `ESC [ 1 ; MOD R' is a cursor position report.
-  The keypad is a set of keys of its own; see `cooked--kitty-keypad-codes'."
-  (let ((modified (> param 1))
-        (all (cooked--kitty-flag-p cooked--kitty-all-keys)))
-    (pcase entry
-      ((and `(,key . ,_)
-            (let code (alist-get key cooked--kitty-functional-codes))
-            (guard code))
-       (cooked--kitty-csi-u code param))
-      (`(escape . ,_) (cooked--kitty-csi-u 27 param))
-      (`(,_ literal ,code . ,_)
-       (if (or modified all)
-           (cooked--kitty-csi-u code param)
-         (cooked--key-sequence entry)))
-      (`(f3 . ,_) (if modified (cooked--csi "~" 13 param) (cooked--csi "~" 13)))
-      (`(,_ ,(or 'csi 'ss3) ,final)
-       (if modified (cooked--csi final 1 param) (cooked--csi final)))
-      (`(,key keypad ,_ ,plain)
-       (let ((code (alist-get key cooked--kitty-keypad-codes))
-             (char (and (stringp plain) (aref plain 0))))
-         (if (and (cooked--kitty-text-p char) (not all)
-                  (not (cooked--kitty-textless-p mods)))
-             ;; A printable character on the cap types that character, shifted
-             ;; or not, as a main-keyboard text key would.
-             plain
-           (cooked--kitty-csi-u
-            code param nil
-            (and (cooked--kitty-flag-p cooked--kitty-associated-text) (cooked--kitty-text-p char)
-                 (not (cooked--kitty-textless-p mods))
-                 char)))))
-      (_ (cooked--encode-entry entry param mods)))))
-
-(defun cooked--kitty-event (event basic mods)
-  "BASIC and MODS for EVENT as the kitty protocol would name the key, or nil.
-
-modifyOtherKeys names keys the same way and asks this too; the kitty protocol
-is where the question first came up.
-
-A cons (BASIC . MODS), or nil for a key that has to go as the byte it arrived
-as.  Emacs names a control character by the letter it is typed with, so a TAB
-read from a terminal frame is `C-i' -- and the kitty protocol, told that,
-sends `ESC [ 105 ; 5 u' for every Tab.  A graphical frame reports the key as
-`tab' and this does not arise; a terminal frame cannot tell the two apart, and
-every terminal before kitty sent Tab for both, so the key is taken to be Tab.
-Return and Backspace are the same case, and NUL is Control plus the space bar
-rather than Control plus `@'.
-
-ESC is the exception that is left alone.  On a terminal frame it is both the
-Escape key and the first half of every Meta chord, which arrive as two separate
-keys; sent as `ESC [ 27 u', a Meta chord would reach the child as an Escape
-followed by a letter.  The graphical frame, where Escape is a key of its own,
-reports it as `escape' and gets the protocol's spelling."
-  (pcase (and (integerp event) (logand event (1- (ash 1 22))))
-    (27 nil)
-    ((and code (or 9 13 127))
-     (cons (pcase code (9 'tab) (13 'return) (127 'backspace))
-           (remq 'control mods)))
-    (0 (cons ?\s mods))
-    (_ (cons basic mods))))
-
-(defun cooked--encode-event (event)
-  "Bytes the child should receive for EVENT, or nil.
-
-Note that Emacs reports a capital letter as shift plus the lowercase one, so the
-shift modifier has to be applied here — reading `event-basic-type' alone turns
-every capital into a lowercase letter."
-  ;; `event-modifiers' first, and not merely for readability: on a symbolic event
-  ;; such as `S-up' it is what parses and caches `event-symbol-elements', which
-  ;; `event-basic-type' only reads.  Ask the other way round and the first press of
-  ;; every modified key decodes as nil.
-  ;;
-  ;; One lookup and one dispatch on the entry's KIND.  With one entry per key
-  ;; there is no ordering to get wrong: a key is in the table or it is not,
-  ;; and if it is not it falls through to the plain-character case below.
-  (let* ((mods (event-modifiers event))
-         (basic (event-basic-type event))
-         (basic (alist-get basic cooked--key-event-aliases basic))
-         ;; `backtab' is the mirror image of the capital-letter case above: Emacs
-         ;; bakes its shift into the base symbol and reports none in `mods' at
-         ;; all, for `backtab' alone or with other modifiers held alongside it
-         ;; (`C-backtab' still reports only `(control)').  Restore it before
-         ;; `param' is computed, or the `literal' entry for `backtab' has a code
-         ;; point that no modifier ever reaches.
-         (mods (if (eq basic 'backtab) (cons 'shift mods) mods))
-         ;; And the other way round: where a frame names the key `S-tab\=', it is
-         ;; still the Shift+Tab X calls `ISO_Left_Tab\=', which every protocol
-         ;; spells as `backtab\=' rather than as a Tab with a modifier.
-         (basic (if (and (eq basic 'tab) (memq 'shift mods)) 'backtab basic))
-         (param (cooked--modifier-param mods)))
-    (pcase (and (or (cooked--kitty-negotiated-p) (cooked--modify-other-level))
-                (cooked--kitty-event event basic mods))
-      ;; A protocol proper, when the child asked for one: every key it spells
-      ;; differently goes through here, and the rest is deferred back to
-      ;; `cooked--encode-entry' from inside.
-      (`(,basic . ,mods)
-       (let ((param (cooked--modifier-param mods)))
-         (if-let* ((level (cooked--modify-other-level)))
-             (cooked--encode-modify-other basic mods param level)
-           (if-let* ((entry (assq basic cooked--key-encodings)))
-               (cooked--encode-kitty-entry entry mods param)
-             (when (characterp basic)
-               (cooked--encode-kitty-char basic mods param))))))
-      (_
-       (if-let* ((entry (assq basic cooked--key-encodings)))
-           (cooked--encode-entry entry param mods)
-         ;; Not in the table at all: a plain character, or nothing we can spell.
-         (when (characterp basic)
-           (cooked--encode-char basic mods)))))))
+       (/= 0 (logand cooked--kitty-flags cooked--kitty-negotiated))))
 
 (defun cooked-send-key ()
   "Send the key that invoked this command straight to the child.
 
-Bound under whatever `cooked--keys' says was actually negotiated, unless
-`cooked-key-protocol-overrides' has a program-wide guess to stand in for a
-negotiation that never happened -- see `cooked--assumed-key-protocol'."
+Spelled in whatever the child negotiated, or in the protocol
+`cooked-key-protocol-overrides' assumes for a program that never negotiated one
+-- see `cooked--assumed-key-protocol'."
   (interactive)
-  (let ((cooked--keys (or (cooked--assumed-key-protocol) cooked--keys)))
-    (when-let* ((bytes (cooked--encode-event last-command-event)))
-      (cooked--snap-to-cursor)
-      (cooked--send-to-child bytes))))
+  (cooked--send-key-event last-command-event))
 
 (defun cooked-send-meta-key ()
   "Send the key that invoked this command to the child, with Meta applied.
@@ -1076,9 +563,8 @@ become cooked's idea of what the child negotiated."
   (cond
    ((stringp action) action)
    ((alist-get action cooked--override-bytes))
-   ((when-let* ((encoding (alist-get action cooked--override-encodings)))
-      (let ((cooked--keys encoding))
-        (cooked--encode-event event))))))
+   ((when-let* ((protocol (alist-get action cooked--override-encodings)))
+      (cooked--encode-key-event event protocol)))))
 
 (defun cooked-send-override ()
   "Send the bytes `cooked-key-overrides' gives for the key that invoked this."
@@ -1141,14 +627,14 @@ PROTOCOL is `kitty' or `modify-other' -- one of the values `cooked--keys' takes
 when a child negotiates one of them for real, via `CSI ? u'.
 
 This is the blanket version of `cooked-key-overrides': rather than re-spelling
-one named key, it makes `cooked-send-key' behave, for every key with a
-`literal' encoding in `cooked--key-encodings', exactly as if the child had
-negotiated PROTOCOL -- the right tool once a whole program is known to accept
-a protocol it simply
-never asks for, rather than one specific key found to need nudging around its
-absence.  Consulted only while the child owns the keyboard, and only when
-`cooked--keys' is still `legacy': a real negotiation is always believed over a
-guess about what a program probably wants, never overridden by one.
+one named key, it makes `cooked-send-key' behave, for Return, Tab, Escape,
+Backspace and Shift+Tab, exactly as if the child had negotiated PROTOCOL -- the
+right tool once a whole program is known to accept a protocol it simply never
+asks for, rather than one specific key found to need nudging around its
+absence.  Consulted only while the child owns the keyboard, and applied by the
+core only while the child has negotiated nothing itself: a real negotiation is
+always believed over a guess about what a program probably wants, never
+overridden by one.
 
 A `cooked-key-overrides' entry for the same key still wins over this: it is
 consulted first, from a keymap that sits above the ordinary passthrough map
@@ -1157,11 +643,10 @@ this only ever adjusts.
 The default covers Claude Code, which decides whether the kitty protocol is
 available by matching TERM and TERM_PROGRAM against terminals it knows rather
 than by asking: it never sends the `CSI ? u' query cooked stands ready to
-answer.  So `cooked--keys' stays `legacy' and the modified forms of the
-`literal' keys in `cooked--key-encodings' are never sent -- although Claude
-decodes them without
-difficulty once they arrive, having only ever needed to expect them, not to
-have negotiated them.
+answer.  So nothing is negotiated and the modified forms of Return, Tab,
+Escape, Backspace and Shift+Tab are never sent -- although Claude decodes them
+without difficulty once they arrive, having only ever needed to expect them,
+not to have negotiated them.
 
 The override is therefore the missing half of a negotiation nobody started.
 The other way through would be to answer the sniff -- report a TERM from
@@ -1177,11 +662,11 @@ keyboard rather than misreporting cooked's identity."
 (defun cooked--assumed-key-protocol ()
   "Protocol `cooked-key-protocol-overrides' assumes for what is running now.
 
-nil when nothing matches, when the child owns nothing right now to assume it
-for, or when `cooked--keys' says a real negotiation already answered the
-question -- see `cooked-key-protocol-overrides'."
+nil when nothing matches, or when the child owns nothing right now to assume it
+for.  Whether the guess applies at all is the core's: a real negotiation is
+always believed over it, and the core is the end that knows whether one has
+happened since the last drain.  See `cooked-key-protocol-overrides'."
   (and cooked-key-protocol-overrides
-       (eq cooked--keys 'legacy)
        (not (cooked--input-state-p))
        (not (cooked--suspended-p))
        (cdr (seq-find (lambda (entry) (cooked--override-applies-p (car entry)))

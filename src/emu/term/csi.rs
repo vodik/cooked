@@ -318,8 +318,8 @@ impl State {
             // `PermanentlySet`: xterm answers 1 here, and a child that reads 3 concludes
             // the mode cannot be reset.
             DecMode::SaveCursor => ModeReport::Set,
-            // Meta sends ESC before the key always: it is how `cooked--encode-event'
-            // spells Meta on every key the negotiated protocols do not re-encode. Not 4,
+            // Meta sends ESC before the key always: it is how the key encoder spells
+            // Meta on every key the negotiated protocols do not re-encode. Not 4,
             // which would tell a child that M-x arrives as something other than ESC x.
             DecMode::MetaSendsEscape => ModeReport::PermanentlySet,
             // Not settable because there is nothing to turn off: the segmenter is how

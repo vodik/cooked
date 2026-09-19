@@ -202,9 +202,7 @@ key a terminal would have sent.  Sent as the key rather than as
 thing \\`<up>' does instead of forwarding a Meta chord the child never asked
 for."
   (cooked--resume-forwarding)
-  (when-let* ((bytes (cooked--encode-event key)))
-    (cooked--snap-to-cursor)
-    (dotimes (_ (max 1 n)) (cooked--send-to-child bytes))))
+  (dotimes (_ (max 1 n)) (cooked--send-key-event key)))
 
 (defun cooked-previous-input (&optional n)
   "Recall the Nth previous input.
@@ -286,7 +284,7 @@ decide.  Reading that character rather than assuming ^C/^\\/^Z is what makes
 
 With ISIG off the line discipline decides nothing, and the child is a program
 that cleared it so as to read the key itself.  It gets the key, from
-`cooked--job-control-keys' and through `cooked--encode-event', so that a child
+`cooked--job-control-keys' and through `cooked--send-key-event', so that a child
 which negotiated the kitty keyboard protocol reads it spelled that way.  This
 branch used to send SIGNAL instead, which is precisely the signalling behind a
 program's back that honouring ISIG exists to prevent, and it was not harmless.
@@ -308,7 +306,8 @@ is; this side cannot, so this side spells the name."
     (cond
      ((not (plist-get jc :isig))
       (let ((press (alist-get key cooked--job-control-keys)))
-        (cooked--send-to-child (or (cooked--encode-event press) (string press)))))
+        (unless (cooked--send-key-event press)
+          (cooked--send-to-child (string press)))))
      (char (cooked--send-to-child (string char)))
      (t (cooked--signal session signal)))))
 

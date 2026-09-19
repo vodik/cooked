@@ -557,7 +557,10 @@ fn modify_other_keys_level_2_spells_every_modified_key() {
     // The literal keys are as they were, but for Shift+Tab, which is `ESC [ Z' unless
     // something besides Shift is held.
     assert_eq!(spell(&t, named("backtab"), SHIFT), "\x1b[Z");
-    assert_eq!(spell(&t, named("backtab"), CONTROL.with(SHIFT)), "\x1b[27;6;9~");
+    assert_eq!(
+        spell(&t, named("backtab"), CONTROL.with(SHIFT)),
+        "\x1b[27;6;9~"
+    );
     assert_eq!(spell(&t, named("return"), SHIFT), "\x1b[27;2;13~");
     assert_eq!(spell(&t, named("return"), CONTROL), "\x1b[27;5;13~");
     assert_eq!(spell(&t, named("tab"), CONTROL), "\x1b[27;5;9~");
@@ -596,7 +599,10 @@ fn modify_other_keys_level_1_leaves_what_already_means_something() {
     assert_eq!(spell(&t, named("tab"), CONTROL), "\x1b[27;5;9~");
     assert_eq!(spell(&t, named("return"), META), "\x1b\r");
     assert_eq!(spell(&t, named("return"), META.with(CONTROL)), "\x1b\r");
-    assert_eq!(spell(&t, named("return"), META.with(SHIFT)), "\x1b[27;2;13~");
+    assert_eq!(
+        spell(&t, named("return"), META.with(SHIFT)),
+        "\x1b[27;2;13~"
+    );
     // Shift+Tab is `ESC [ Z' at this level whatever else is held.
     assert_eq!(spell(&t, named("backtab"), SHIFT), "\x1b[Z");
     assert_eq!(spell(&t, named("backtab"), CONTROL.with(SHIFT)), "\x1b[Z");
@@ -731,20 +737,35 @@ fn a_guessed_protocol_re_spells_only_the_literal_keys() {
     // case the negotiation exists to prevent.
     let t = term(4, 20, b"");
     let kitty = Some(Assumed::Kitty);
-    assert_eq!(guessing(&t, named("return"), SHIFT, kitty).unwrap(), "\x1b[13;2u");
-    assert_eq!(guessing(&t, named("backtab"), SHIFT, kitty).unwrap(), "\x1b[9;2u");
+    assert_eq!(
+        guessing(&t, named("return"), SHIFT, kitty).unwrap(),
+        "\x1b[13;2u"
+    );
+    assert_eq!(
+        guessing(&t, named("backtab"), SHIFT, kitty).unwrap(),
+        "\x1b[9;2u"
+    );
     assert_eq!(guessing(&t, named("escape"), NONE, kitty).unwrap(), "\x1b");
     assert_eq!(guessing(&t, ch('a'), CONTROL, kitty).unwrap(), "\x01");
     assert_eq!(guessing(&t, ch('x'), META, kitty).unwrap(), "\x1bx");
 
     // The modifyOtherKeys guess has no level and is read as level 2 over the same keys.
     let other = Some(Assumed::ModifyOther);
-    assert_eq!(guessing(&t, named("return"), SHIFT, other).unwrap(), "\x1b[27;2;13~");
-    assert_eq!(guessing(&t, named("backspace"), CONTROL, other).unwrap(), "\x1b[27;5;127~");
+    assert_eq!(
+        guessing(&t, named("return"), SHIFT, other).unwrap(),
+        "\x1b[27;2;13~"
+    );
+    assert_eq!(
+        guessing(&t, named("backspace"), CONTROL, other).unwrap(),
+        "\x1b[27;5;127~"
+    );
     assert_eq!(guessing(&t, ch('a'), CONTROL, other).unwrap(), "\x01");
     assert_eq!(guessing(&t, ch('x'), META, other).unwrap(), "\x1bx");
 
     // A real negotiation is believed over a guess about what a program probably wants.
     let t = term(4, 20, b"\x1b[>1u");
-    assert_eq!(guessing(&t, named("escape"), NONE, other).unwrap(), "\x1b[27u");
+    assert_eq!(
+        guessing(&t, named("escape"), NONE, other).unwrap(),
+        "\x1b[27u"
+    );
 }

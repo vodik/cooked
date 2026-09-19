@@ -26,9 +26,11 @@ indistinguishable from C-i, C-m and C-?, and are taken to be the keys; ESC there
 half of every Meta chord, so it goes as the plain byte. On a graphical frame Ctrl+[ is that
 same ESC, which is the prefix Meta chords are read under, so it waits for the next key
 rather than going out as `CSI 91;5u`. Under bit 8 the text an input method commits arrives
-as key events, `中` as `CSI 20013u`, since Emacs cannot tell a commit from a key press. And
-the flags reach the encoder with the drain that carries them, so a key typed between a
-child's `CSI > 1 u` and that drain is still spelled the legacy way.
+as key events, `中` as `CSI 20013u`, since Emacs cannot tell a commit from a key press.
+The spelling is the core's, in `src/emu/term/keypress.rs`, and the flags are read from
+the terminal under its lock at the moment the key is written — so a key typed between a
+child's `CSI > 1 u` and the next drain is spelled the way the child has just asked for.
+Which key an Emacs event names is still Lisp's, in `cooked--key-parts`.
 
 Super and Hyper are kitty's bits 8 and 16, and F13 to F24, Menu, Pause and Print Screen
 are its code points. A Super or Hyper chord, Pause and Print Screen have no spelling
@@ -74,11 +76,12 @@ rather than cooked's identity being misreported:
 That is the default. The condition matches the name of the program in the child's
 **foreground process group**, so it catches a `claude` typed at a cooked shell, not just
 one started as the session's command; a function of no arguments works too, for a test the
-process name cannot express. With it matching, cooked spells *every* modified key in
-the `literal` keys of `cooked--key-encodings` — Return, Tab, Escape, Backspace, Shift+Tab
-among them — exactly as
-if PROTOCOL had actually been negotiated, so nothing has to be named one key at a time; a
-real negotiation is still believed over the guess whenever one actually happens.
+process name cannot express. With it matching, cooked spells *every* modified form of the
+keys with no classical one — Return, Tab, Escape, Backspace and Shift+Tab — exactly as if
+PROTOCOL had actually been negotiated, so nothing has to be named one key at a time; a
+real negotiation is still believed over the guess whenever one actually happens, and the
+core is the end that decides that, so a negotiation arriving mid-session takes effect at
+once.
 
 For the narrower case a blanket protocol guess can't cover — a specific byte a program
 wants regardless of protocol, or a key with no negotiated encoding to re-spell at all —

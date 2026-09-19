@@ -77,7 +77,12 @@ impl Modifiers {
     /// Control and Meta, and Super and Hyper, whose chords are shortcuts rather than
     /// characters: kitty spells `s-a` as `ESC [ 97 ; 9 u` under bit 1, as it does `M-a`.
     const fn textless(self) -> bool {
-        self.holds(Self::CONTROL.with(Self::META).with(Self::SUPER).with(Self::HYPER))
+        self.holds(
+            Self::CONTROL
+                .with(Self::META)
+                .with(Self::SUPER)
+                .with(Self::HYPER),
+        )
     }
 
     /// SEQ as a key held with these modifiers sends it where no protocol spells the
@@ -172,11 +177,7 @@ enum Spelling {
     /// the kitty protocol gives the key, which is the one part of this table the protocol
     /// spells differently from a legacy terminal: a keypad key is a key of its own there,
     /// so that `kp-home` and `home` can be told apart.
-    Keypad {
-        app: char,
-        plain: Plain,
-        kitty: u32,
-    },
+    Keypad { app: char, plain: Plain, kitty: u32 },
     /// The key this one is spelled as with Shift held, so `f13` is sent as `S-f1` and
     /// `C-f13` as `C-S-f1`.
     ///
@@ -578,7 +579,9 @@ impl Encoder {
             (_, Key::LooseEscape) => Some(mods.meta_prefixed(b"\x1b".to_vec())),
             (Protocol::Kitty(flags), Key::Named(key)) => self.kitty_entry(key, mods, flags),
             (Protocol::Kitty(flags), Key::Text(c)) => Some(self.kitty_text(c, mods, flags)),
-            (Protocol::ModifyOther(level), Key::Text(c)) => Some(self.modify_other_text(c, mods, level)),
+            (Protocol::ModifyOther(level), Key::Text(c)) => {
+                Some(self.modify_other_text(c, mods, level))
+            }
             (_, Key::Named(key)) => self.entry(key, mods),
             (_, Key::Text(c)) => Some(self.text_key(c, mods)),
         }
@@ -729,7 +732,11 @@ impl Encoder {
         let param = mods.param();
         match associated {
             Some(associated) => {
-                let param = if param > 1 { param.to_string() } else { String::new() };
+                let param = if param > 1 {
+                    param.to_string()
+                } else {
+                    String::new()
+                };
                 csi(&[&key, &param, &associated.to_string()], 'u')
             }
             None if param > 1 => csi(&[&key, &param.to_string()], 'u'),
@@ -822,14 +829,16 @@ impl Encoder {
                     // A printable character on the cap types that character, shifted or
                     // not, as a main-keyboard text key would.
                     Some(cap) if types && !all => Some(text(cap)),
-                    _ => Some(self.kitty_csi_u(
-                        kitty,
-                        mods,
-                        None,
-                        (flags.intersects(KittyFlags::REPORT_TEXT) && types)
-                            .then(|| cap.map(|cap| cap as u32))
-                            .flatten(),
-                    )),
+                    _ => Some(
+                        self.kitty_csi_u(
+                            kitty,
+                            mods,
+                            None,
+                            (flags.intersects(KittyFlags::REPORT_TEXT) && types)
+                                .then(|| cap.map(|cap| cap as u32))
+                                .flatten(),
+                        ),
+                    ),
                 }
             }
             _ => self.entry(key, mods),
