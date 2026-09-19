@@ -98,8 +98,8 @@ until it does.")
 ;; A test that mocks a core function captures `symbol-function' and rebinds it
 ;; with `cl-letf'; run alone, the lazy load then happened inside that binding,
 ;; and its `defalias' replaced the mock -- so
-;; `cooked-osc-4-sweep-comes-back-in-a-handful-of-writes' failed under
-;; SELECTOR and passed in the full suite, where an earlier test had loaded it.
+;; `cooked-osc-4-sweep-is-answered-without-waking-lisp' failed under SELECTOR
+;; and passed in the full suite, where an earlier test had loaded it.
 (cooked--load-module)
 
 ;;;; Nothing reads the terminal

@@ -345,9 +345,18 @@ file's Commentary for why it cannot be the child's own process."
                                   (expand-file-name (or (cooked--local-name directory) "~")))
                              (round (* 1000 cooked-min-redisplay-interval))
                              cooked-backlog-limit))
-        ;; Where the query handlers `cooked-process--answer' calls look for
-        ;; the session to reply on, as they would in a session buffer.
-        (setq cooked--session cooked-process--session)))
+        ;; Where `cooked-process--answer' and `cooked--sync-palette' look for the
+        ;; session to speak for, as they would in a session buffer.
+        (setq cooked--session cooked-process--session)
+        ;; The colours a build tool asks about before it draws, so the core can answer
+        ;; `OSC 11 ; ?' itself and the probe costs no drain.  Once, here: this host is
+        ;; not a `cooked-mode' buffer and `cooked-theme-change-hook' does not run in
+        ;; it, so a theme changed mid-build leaves the rest of that build answering in
+        ;; the theme it started under -- which is what the text already above it in the
+        ;; buffer says, and is the same bargain `cooked-process--text' strikes with its
+        ;; face cache.
+        (cooked--protect-seam 'cooked--sync-palette
+          (cooked--sync-palette))))
     proc))
 
 (defun cooked-process-start-shell-command (name buffer command)
@@ -511,40 +520,31 @@ of the build twice."
 
 ;;;; The pump
 
-(defconst cooked-process--query-handlers '(cooked--osc-color cooked--osc-palette)
-  "The OSC handlers a headless session answers a query through.
-
-The colours are the questions a child asks to decide how to draw, and their
-answers come from faces every buffer shares, so the hidden host answers them as
-a terminal would: a build tool asking `OSC 11 ; ?' for the background is told
-the theme's.  The rest of `cooked-osc-handlers' act on the buffer showing the
-terminal, and there is none: a title would rename the host, and OSC 7 would move
-its `default-directory'.  The clipboard and the pointer shape are not offered
-to a build either, so those queries go unanswered, as they did before any of
-this.")
-
 (defun cooked-process--answer (events)
   "Owe the child what EVENTS, a drain's `:events', ask of its terminal.
 
 A `reply' is one the core composed alone but held behind a query only Lisp
-answers, so it is passed on in its place.  An OSC query is answered through
-`cooked-process--query-handlers'.  A colour set in the same sequence is
-refused, since it would remap a face in a buffer nobody sees, or set the
-cursor colour of the whole frame.  Every other event is about a buffer showing
-the terminal and is dropped.
+answers, so it is passed on in its place.  Every other event is about a buffer
+showing the terminal, and there is none: a title would rename the hidden host,
+OSC 7 would move its `default-directory', and a colour set would remap a face in
+a buffer nobody sees or repaint the cursor of the whole frame.  So they are
+dropped.
+
+Nothing here answers a query any more, and that is what `cooked--set-palette'
+bought: the colours are the questions a build tool actually asks -- `OSC 11 ; ?'
+for the background before it decides whether to print dark or light -- and the
+core answers those itself, from the palette `cooked-process-start' pushed, with
+no drain in the loop at all.  What is left over goes unanswered, as the
+clipboard and the pointer shape always have: the cursor colour and the selection
+colours of a compilation buffer are not questions with an answer.
 
 The caller says `cooked--ready' afterwards, and must: until then the core
-keeps every later reply behind the query, so DA1 after `OSC 11 ; ?' would
-wait for as long as the child lived."
+keeps every later reply behind any query that did reach a drain, so DA1 after
+`OSC 12 ; ?' would wait for as long as the child lived."
   (cooked--batching-replies cooked--session
     (dolist (event events)
       (pcase event
-        (`(reply . ,bytes) (cooked--queue-reply cooked--session bytes))
-        (`(osc ,code ,bell . ,parts)
-         (when (memq (alist-get code cooked-osc-handlers)
-                     cooked-process--query-handlers)
-           (let ((cooked-allow-color-set nil))
-             (cooked--handle-osc code bell parts))))))))
+        (`(reply . ,bytes) (cooked--queue-reply cooked--session bytes))))))
 
 (defun cooked-process--pump (host)
   "Drain HOST's session and pass what retired to the consumer.

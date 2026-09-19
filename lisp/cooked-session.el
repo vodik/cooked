@@ -249,10 +249,11 @@ wherever Emacs is, and is not a request to be second-guessed."
                       (round (* 1000 cooked-min-redisplay-interval))
                       cooked-backlog-limit
                       cooked--graphics-shown))
-  ;; Once, at the start: the core answers `CSI ? 996 n' from what Emacs last reported,
-  ;; and a session that outlives no theme change would otherwise answer with silence for
-  ;; its whole life.  Here rather than in `cooked--start-session' so that the callers who
-  ;; spawn directly -- the test fixture and the benchmark -- exercise the same path.
+  ;; Once, at the start: the core answers `CSI ? 996 n' from what Emacs last reported and
+  ;; a colour query from the palette, and a session that outlives no theme change would
+  ;; otherwise answer with silence for its whole life.  Here rather than in
+  ;; `cooked--start-session' so that the callers who spawn directly -- the test fixture
+  ;; and the benchmark -- exercise the same path.
   ;;
   ;; Protected because the session is already started by this point and is correct
   ;; without it: the only thing lost is a courtesy answer to a query most children never
@@ -262,6 +263,8 @@ wherever Emacs is, and is not a request to be second-guessed."
   ;; signal on a frame that claims to be graphical without a window system behind it.
   (cooked--protect-seam 'cooked--sync-color-scheme
     (cooked--sync-color-scheme))
+  (cooked--protect-seam 'cooked--sync-palette
+    (cooked--sync-palette))
   cooked--session)
 
 (defun cooked--child-environment (&optional extra)

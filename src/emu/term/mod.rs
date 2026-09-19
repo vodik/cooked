@@ -43,6 +43,9 @@ mod perform;
 pub(crate) mod reply;
 mod screens;
 mod state;
+
+pub(crate) use osc::{Palette, Rgb};
+
 #[cfg(test)]
 mod tests;
 mod xtgettcap;
@@ -247,6 +250,19 @@ impl Event {
             Self::FrameSize(_) => true,
             _ => false,
         }
+    }
+
+    /// Whether this is a colour sequence whose handling may move what the palette holds,
+    /// so the core must not answer a colour query from it until Lisp has been through.
+    ///
+    /// A *set* is the case, and it is not [`Event::awaits_answer`]: `OSC 11 ; #ff0000`
+    /// asks for nothing and holds no reply back, and yet a query after it is owed the
+    /// colour Lisp is about to remap to rather than the one being replaced. The resets,
+    /// `OSC 110` to `OSC 112`, move it the other way for the same reason. A query is
+    /// included because a handler may reply and set in one pass; see [`osc::Palette`].
+    fn asks_about_color(&self) -> bool {
+        matches!(self, Self::Osc(code, ..)
+            if *code == 4 || (10..=19).contains(code) || (110..=112).contains(code))
     }
 
     /// Whether Lisp needs the screen's text in the buffer to act on this, which is what
@@ -994,6 +1010,7 @@ impl Term {
     pub fn events_handled(&mut self) {
         let state = &mut self.state;
         state.replies.handling = false;
+        state.palette_pending = state.events.iter().any(Event::asks_about_color);
         if !state.replies.direct || !state.replies.undrained {
             return;
         }
@@ -1094,6 +1111,16 @@ impl Term {
     pub fn set_color_scheme(&mut self, scheme: ColorScheme) -> Option<Vec<u8>> {
         let changed = self.state.color_scheme.replace(scheme) != Some(scheme);
         (changed && self.state.modes.color_scheme_updates).then(|| color_scheme_report(scheme))
+    }
+
+    /// Tell the emulator the colours Emacs draws with, so it can answer for them.
+    ///
+    /// Nothing is owed on a change, unlike the colour scheme: a palette entry is not a
+    /// subscription, and a child that wants to know a colour again asks again. See
+    /// [`osc::Palette`] for what is held and what is still Lisp's, and
+    /// `cooked--set-palette' for when Lisp says it.
+    pub(crate) fn set_palette(&mut self, palette: osc::Palette) {
+        self.state.palette = palette;
     }
 
     /// Tell the emulator which pictures this session transmits Emacs can show.
@@ -1546,6 +1573,16 @@ struct State {
     terminfo: Option<&'static crate::emu::terminfo::Entry>,
     /// The cell size Emacs reports, for turning pixels into a cell rectangle.
     metrics: Option<CellMetrics>,
+    /// The colours Emacs draws with, for answering a colour query where it arrives; see
+    /// [`osc::Palette`].
+    palette: osc::Palette,
+    /// Whether a colour sequence is with Lisp, unhandled, so `palette` may be about to
+    /// move under a query; see [`Event::asks_about_color`].
+    ///
+    /// Raised where the event is pushed and lowered by [`Term::events_handled`], which
+    /// recomputes it from the events queued since the drain rather than simply clearing
+    /// it: a set that arrived after that drain is still owed a pass through Lisp.
+    palette_pending: bool,
     /// The light/dark scheme Emacs reports, for answering `CSI ? 996 n`.
     ///
     /// Emacs' to know and ours to answer with, as `metrics` is: the theme resolves against

@@ -164,9 +164,10 @@ mod tests {
 
     /// Every query form the core sees, each carrying printable text where a reply might
     /// echo it, paired with that text, and whether the core itself answers it. The OSCs
-    /// are answered in Lisp and are here so that moving one into the core cannot skip
-    /// this check; `cooked-no-osc-query-echoes-the-text-it-was-sent` sends the same
-    /// payloads through the real Lisp answers.
+    /// are the ones Lisp answers -- every form below is malformed enough that the palette
+    /// declines it, which is what the second pass in the test below checks -- and
+    /// `cooked-no-osc-query-echoes-the-text-it-was-sent` sends the same payloads through
+    /// the real Lisp answers.
     fn queries() -> Vec<(String, String, bool)> {
         let long = "A".repeat(5000);
         let mut queries = vec![
@@ -234,32 +235,57 @@ mod tests {
         queries
     }
 
+    /// A palette as Lisp pushes one, so the second pass of the test below runs with every
+    /// slot the core can answer from filled.
+    fn full_palette() -> super::super::Palette {
+        let white = super::super::Rgb {
+            r: 0xffff,
+            g: 0xffff,
+            b: 0xffff,
+        };
+        let mut palette = super::super::Palette {
+            foreground: Some(white),
+            background: Some(white),
+            ..super::super::Palette::default()
+        };
+        palette.indexed.fill(Some(white));
+        palette
+    }
+
     #[test]
     fn no_query_echoes_the_text_it_was_sent() {
         for (query, payload, answered) in queries() {
-            let mut t = super::super::Term::new(4, 20);
-            t.feed(query.as_bytes());
-            let replies: Vec<Vec<u8>> = t
-                .drain()
-                .events
-                .into_iter()
-                .filter_map(|event| match event {
-                    super::super::Event::Reply(bytes, super::super::ReplyKind::Answer) => {
-                        Some(bytes)
-                    }
-                    _ => None,
-                })
-                .collect();
-            // A form the core stopped answering would pass the check below vacuously.
-            assert_eq!(!replies.is_empty(), answered, "{query:?}: {replies:?}");
-            for reply in &replies {
-                assert!(
-                    !reply
-                        .windows(payload.len())
-                        .any(|w| w == payload.as_bytes()),
-                    "{query:?} echoed its payload: {:?}",
-                    String::from_utf8_lossy(reply)
-                );
+            for held in [false, true] {
+                let mut t = super::super::Term::new(4, 20);
+                if held {
+                    t.set_palette(full_palette());
+                }
+                t.feed(query.as_bytes());
+                let replies: Vec<Vec<u8>> = t
+                    .drain()
+                    .events
+                    .into_iter()
+                    .filter_map(|event| match event {
+                        super::super::Event::Reply(bytes, super::super::ReplyKind::Answer) => {
+                            Some(bytes)
+                        }
+                        _ => None,
+                    })
+                    .collect();
+                // A form the core stopped answering would pass the check below vacuously.
+                // The palette changes no answer here: every OSC form above is a set, or
+                // carries the payload where the index or the `?` belongs, so it reaches
+                // Lisp either way.
+                assert_eq!(!replies.is_empty(), answered, "{query:?}: {replies:?}");
+                for reply in &replies {
+                    assert!(
+                        !reply
+                            .windows(payload.len())
+                            .any(|w| w == payload.as_bytes()),
+                        "{query:?} echoed its payload: {:?}",
+                        String::from_utf8_lossy(reply)
+                    );
+                }
             }
         }
     }

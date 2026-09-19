@@ -1,7 +1,145 @@
-//! `OSC` dispatch: semantic prompts (133), hyperlinks (8), text sizing (66), and the
-//! marks they make.
+//! `OSC` dispatch: semantic prompts (133), hyperlinks (8), text sizing (66), the colour
+//! queries answered from the palette Emacs reports, and the marks they make.
 
 use super::*;
+
+/// One colour as Emacs measures it: three channels of sixteen bits.
+///
+/// That is what `color-values' answers and what xterm's `rgb:RRRR/GGGG/BBBB' spells, so a
+/// colour crosses from Lisp and goes out to the child with no rescaling anywhere; see
+/// `cooked--color-to-osc'.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Rgb {
+    pub(crate) r: u16,
+    pub(crate) g: u16,
+    pub(crate) b: u16,
+}
+
+impl std::fmt::Display for Rgb {
+    /// xterm's answer to a colour query, which is the only form anything here writes.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "rgb:{:04x}/{:04x}/{:04x}", self.r, self.g, self.b)
+    }
+}
+
+/// The colours Emacs draws with, as the child is to be told them.
+///
+/// Held so that `OSC 4 ; N ; ? ST` and `OSC 10 ; ? ST` can be answered where the query
+/// arrives, the way [`State::color_scheme`](super::State#structfield.color_scheme) lets
+/// `CSI ? 996 n` be. A theme-aware program probes for the background in its first
+/// instant, and answering from Lisp cost that probe a wake, a drain and a reply batch,
+/// behind `cooked-min-redisplay-interval' when the screen was busy.
+///
+/// Empty until Lisp says otherwise, and every slot is separately absent: what a colour
+/// resolves to is a question about faces, which only Emacs can answer, so a slot nothing
+/// has reported is one the query goes to Lisp for exactly as it always did. A bare
+/// [`Term`] with no session behind it therefore answers no colour query at all.
+///
+/// `foreground` and `background` are the colours the buffer *draws*, DECSCNM not applied:
+/// reverse video swaps the pair for a query as it does for the screen, and the swap is
+/// made here, at the query, because the mode is the child's to change between two pushes.
+/// A remap an `OSC 11` set made is already in them, that being what Lisp draws with.
+#[derive(Debug, Clone)]
+pub(crate) struct Palette {
+    pub(crate) foreground: Option<Rgb>,
+    pub(crate) background: Option<Rgb>,
+    /// The 256 indexed colours, by index: the sixteen ANSI ones as the theme's
+    /// `ansi-color-' faces resolve them, and the xterm cube and grey ramp above them.
+    pub(crate) indexed: Box<[Option<Rgb>; 256]>,
+}
+
+impl Default for Palette {
+    fn default() -> Self {
+        Self {
+            foreground: None,
+            background: None,
+            indexed: Box::new([None; 256]),
+        }
+    }
+}
+
+/// The OSC codes that ask about one colour each, `OSC 10` to `OSC 19`.
+///
+/// A chained query walks them: `OSC 10 ; ? ; ? ST` asks for the foreground and then the
+/// background, so the second field is a question about code 11.
+const COLOR_CODES: std::ops::RangeInclusive<u16> = 10..=19;
+
+impl State {
+    /// The replies a colour query owes, or `None` for an OSC that is not one to answer
+    /// here.
+    ///
+    /// `None` means "hand it to Lisp unchanged", which is where every colour query went
+    /// before this existed, and it is the answer for all of these:
+    ///
+    ///   - anything that is not a query: a *set* is policy, `cooked-allow-color-set',
+    ///     and stays Lisp's;
+    ///   - a slot the palette has no colour for, such as `OSC 12` for the cursor, which
+    ///     is the frame's and not the buffer's;
+    ///   - any query arriving while Lisp has a colour sequence of its own unhandled, or a
+    ///     question of any kind unanswered. That one is freshness as much as ordering:
+    ///     Lisp may be about to honour a set that moves the answer, as
+    ///     `ESC ] 11 ; #ff0000 ST ESC ] 11 ; ? ST` in one read asks it to, and a colour
+    ///     answered from the palette in between would answer the colour being replaced.
+    ///
+    /// Partial answers are not a case: a chained query is answered here only if every
+    /// field of it can be, so the child hears one voice per sequence and the replies keep
+    /// their order without this having to interleave with Lisp's.
+    fn color_answers(&self, code: OscCode, payload: &[u8]) -> Option<Vec<(u16, String)>> {
+        let route = &self.replies;
+        if route.undrained || route.handling || self.palette_pending {
+            return None;
+        }
+        let fields = || payload.split(|&b| b == b';');
+        if code.get() == 4 {
+            // `INDEX ; SPEC` per entry. An odd number of fields is a malformed query
+            // whose reading is `cooked--osc-palette''s, which walks the pairs and drops
+            // the one left with nothing to say.
+            let fields: Vec<&[u8]> = fields().collect();
+            if fields.is_empty() || fields.len() % 2 != 0 {
+                return None;
+            }
+            return fields
+                .chunks(2)
+                .map(|pair| {
+                    let index: u8 = (pair[1] == b"?")
+                        .then(|| std::str::from_utf8(pair[0]).ok()?.parse().ok())
+                        .flatten()?;
+                    let color = self.palette.indexed[usize::from(index)]?;
+                    Some((4, format!("{index};{color}")))
+                })
+                .collect();
+        }
+        if !COLOR_CODES.contains(&code.get()) {
+            return None;
+        }
+        let mut answers = Vec::new();
+        for (offset, spec) in fields().enumerate() {
+            if spec != b"?" {
+                return None;
+            }
+            let code = code.get() + u16::try_from(offset).ok()?;
+            answers.push((code, self.default_color(code)?.to_string()));
+        }
+        (!answers.is_empty()).then_some(answers)
+    }
+
+    /// The colour `OSC 10` or `OSC 11` answers with, or `None` for any other code.
+    ///
+    /// Under DECSCNM the two are exchanged, as xterm exchanges its own: the mode draws
+    /// the screen with the defaults swapped, and a child asking what it is drawing on is
+    /// owed the colour it can see. Only these two of the ten are held; the rest are
+    /// `cooked--osc-color''s, and say why there.
+    fn default_color(&self, code: u16) -> Option<Rgb> {
+        let reversed = self.modes.reverse_screen;
+        match code {
+            10 if reversed => self.palette.background,
+            11 if reversed => self.palette.foreground,
+            10 => self.palette.foreground,
+            11 => self.palette.background,
+            _ => None,
+        }
+    }
+}
 
 /// BYTES cut at the first `;`: the field before it, and everything after it.
 ///
@@ -391,6 +529,18 @@ impl State {
         if code == OscCode::ITERM && self.iterm_file(body) {
             return;
         }
+        // A colour query the palette can answer is answered here and raises no event, so a
+        // start-up probe costs the child nothing but the reply. Everything else about
+        // colour, a set above all, is still Lisp's; see [`State::color_answers`].
+        if let Some(answers) = self.color_answers(code, body) {
+            for (code, payload) in answers {
+                let terminator = Terminator::from_bell(bell_terminated);
+                if let Some(bytes) = reply::osc_reply(code, &payload, terminator) {
+                    self.push_reply(Event::answer(bytes));
+                }
+            }
+            return;
+        }
         // Lisp takes the payload as fields, which is how every OSC it handles is laid
         // out. At most [`MAX_OSC_FIELDS`], the last of which keeps whatever semicolons
         // are left, so a payload of nothing but `;` is not a list a megabyte long. None
@@ -404,10 +554,10 @@ impl State {
             .flat_map(|body| body.splitn(MAX_OSC_FIELDS, |&b| b == b';'))
             .map(|p| String::from_utf8_lossy(p).into_owned())
             .collect();
-        self.push_for_lisp(Event::Osc(
-            code.get(),
-            parts,
-            Terminator::from_bell(bell_terminated),
-        ));
+        let event = Event::Osc(code.get(), parts, Terminator::from_bell(bell_terminated));
+        // A colour sequence Lisp is about to act on, a set above all: until it has, the
+        // palette is not the answer to a query. See [`Event::asks_about_color`].
+        self.palette_pending |= event.asks_about_color();
+        self.push_for_lisp(event);
     }
 }

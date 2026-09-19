@@ -1905,64 +1905,75 @@ colours it draws, which DECSCNM exchanges."
                           'light)))))
       (delete-file out))))
 
-(ert-deftest cooked-osc-4-sweep-comes-back-in-a-handful-of-writes ()
-  "A theme picker asking for all 256 palette entries gets them back in barely any writes.
+(defun cooked-tests--palette-answer (index)
+  "The payload a query for palette INDEX is owed, as `cooked--osc-palette' reads it.
+Spelled out here rather than taken from `cooked--palette-colors', so that what
+the core answers is compared against the function that paints cells and not
+against the list it was handed."
+  (or (cooked--color-to-osc (cooked--color index))
+      (and (< index 16) (cooked--color-to-osc (aref cooked-color-names index)))))
 
-Each answer used to be its own synchronous write to the pty, so the sweep cost
-256 of them, each able to stall on a child that had stopped reading.  The
-queries go out from a file in one `cat', so they ordinarily reach the core in
-one read and Lisp in one drain, and the whole sweep goes out as a single
-write.
+(ert-deftest cooked-osc-4-sweep-is-answered-without-waking-lisp ()
+  "A theme picker asking for all 256 palette entries never reaches Lisp at all.
 
-Under real contention on a shared machine this was measured landing in the
-reader thread as two reads about 16ms apart -- the `cat' that owns the write
-lost the CPU mid-copy -- which is far past `QUIESCENCE' in src/session.rs,
-500 microseconds tuned against a 32us median and 102us 99th-percentile gap
-between reads on a quiet machine.  Widening that window to cover a 16ms
-stall would hold every frame for as long as a slow client keeps writing,
-trading the latency `QUIESCENCE' exists to bound for a property this test
-does not actually need: what must never come back is the one-write-per-query
-answer this guards against, not literal atomicity the reader cannot promise
-under an adversarial scheduler.  So the bound below is generous -- room for a
-few genuine splits -- and nowhere near 256."
+Each answer was once its own synchronous write to the pty, so the sweep cost
+256 of them, each able to stall on a child that had stopped reading; then it
+cost one drain and one reply batch, which still put a wake and
+`cooked-min-redisplay-interval' between the child and its answer.  The colours
+are now held in the core -- `cooked--sync-palette' pushes them at the spawn --
+and a query for an entry it holds is answered where it arrives.
+
+So the assertion is that `cooked--osc-palette', which is still where a query
+the core declines is answered and still where the colours themselves are
+decided, was not reached once, and that all 256 answers came back in order and
+in the form xterm uses."
   (let ((out (make-temp-file "cooked-osc4-sweep"))
         (queries (make-temp-file "cooked-osc4-queries"))
-        (writes nil)
-        (reply (symbol-function 'cooked--reply)))
+        (reached 0)
+        (palette (symbol-function 'cooked--osc-palette))
+        (expected (mapconcat (lambda (index)
+                               (format "\e]4;%d;%s\a" index
+                                       (cooked-tests--palette-answer index)))
+                             (number-sequence 0 255))))
     (unwind-protect
         (progn
           (with-temp-file queries
-            (dotimes (n 256) (insert (format "\e]4;%d;?\a" n))))
-          (cl-letf (((symbol-function 'cooked--reply)
-                     (lambda (session bytes)
-                       (when (string-match-p "\e]4;" bytes) (push bytes writes))
-                       (funcall reply session bytes))))
+            (dotimes (index 256) (insert (format "\e]4;%d;?\a" index))))
+          (cl-letf (((symbol-function 'cooked--osc-palette)
+                     (lambda (parts)
+                       (setq reached (1+ reached))
+                       (funcall palette parts))))
             (cooked-tests--with-session
                 (list "/bin/sh" "-c"
                       (format "stty raw -echo; cat %s; cat > %s" queries out))
               (should (cooked-tests--settle
                        (lambda () (string-match-p "4;255;rgb:"
                                                   (cooked-tests--contents out)))))
-              (setq writes (nreverse writes))
-              (should (< (length writes) 8))
-              (should (equal (cooked-tests--contents out) (apply #'concat writes)))
-              (should (string-prefix-p "\e]4;0;rgb:" (car writes))))))
+              (should (equal (cooked-tests--contents out) expected))
+              (should (eql reached 0)))))
       (delete-file out)
       (delete-file queries))))
 
 (ert-deftest cooked-a-frozen-buffer-keeps-a-colour-answer-ahead-of-da1 ()
   "DA1 behind a colour query waits with the query for the thaw, and follows it.
 
-A program asks for the background and then DA1, and takes DA1 answered first
-as the colour never coming.  Only Lisp can answer the colour, and a frozen
-buffer does not drain, so the core must not send DA1 on ahead of it."
+A program asks for a colour and then DA1, and takes DA1 answered first as the
+colour never coming.  Where only Lisp can answer the colour, and a frozen
+buffer does not drain, the core must not send DA1 on ahead of it.
+
+`OSC 12', the cursor, is the query asked here, and the cursor is the reason:
+it is the frame's colour and not the buffer's, so it is not in the palette
+`cooked--set-palette' holds and it is still answered from Lisp.  The
+background, which this test used to ask for, is now answered in the core where
+it arrives -- so it is no longer behind anything, and asking it here would
+assert the opposite of what the test is for."
   (let ((out (make-temp-file "cooked-frozen-osc11"))
         (flag (make-temp-name (expand-file-name "cooked-frozen-flag"
                                                 temporary-file-directory))))
     (unwind-protect
         (cooked-tests--with-session
             (list "/bin/sh" "-c"
-                  (format "stty raw -echo; printf ready; until [ -e %s ]; do sleep 0.02; done; printf '\\033]11;?\\033\\\\\\033[c'; cat > %s"
+                  (format "stty raw -echo; printf ready; until [ -e %s ]; do sleep 0.02; done; printf '\\033]12;?\\033\\\\\\033[c'; cat > %s"
                           flag out))
           (should (cooked-tests--settle
                    (lambda () (string-match-p "ready" (cooked-tests--text)))))
@@ -1973,7 +1984,7 @@ buffer does not drain, so the core must not send DA1 on ahead of it."
           (setq cooked--input-mode nil)
           (should (cooked-tests--settle
                    (lambda () (string-suffix-p "c" (cooked-tests--contents out)))))
-          (should (string-match-p "\\`\e\\]11;rgb:[^\e]+\e\\\\\e\\[\\?62[;0-9]*c\\'"
+          (should (string-match-p "\\`\e\\]12;rgb:[^\e]+\e\\\\\e\\[\\?62[;0-9]*c\\'"
                                   (cooked-tests--contents out))))
       (delete-file out)
       (ignore-errors (delete-file flag)))))
@@ -1999,6 +2010,42 @@ buffer does not drain, so the core must not send DA1 on ahead of it."
           (should (string-match-p "\\`\033\\]10;rgb:[^\007]+\007\033\\]11;rgb:"
                                   (cooked-tests--contents out))))
       (delete-file out))))
+
+(ert-deftest cooked-a-colour-the-child-set-is-answered-from-what-it-left ()
+  "Once Lisp has honoured a set, the core answers the colour the set left.
+
+The loop the palette has to close.  A set is policy and stays Lisp's; Lisp
+remaps the buffer's `default' face for it; and `cooked--flush-face-cache' runs
+`cooked-theme-change-hook', which is what re-tells the core.  Without that last
+step the next query would be answered from the palette, quickly and wrongly,
+with the colour that had just been replaced.
+
+`cooked--osc-color' is counted rather than mocked: it must be reached exactly
+once, for the set, and not again for the query the core now answers.  The child
+echoes what it is sent -- `cat -v' spelling the escape out -- so the answer
+arrives as buffer text."
+  (let ((cooked-allow-color-set t)
+        (reached 0)
+        (osc-color (symbol-function 'cooked--osc-color)))
+    (cooked-tests--with-echoing-child ""
+      (cl-letf (((symbol-function 'cooked--osc-color)
+                 (lambda (parts)
+                   (setq reached (1+ reached))
+                   (funcall osc-color parts))))
+        (cooked--feed cooked--session "\e]11;#ff0000\a")
+        (should (cooked-tests--settle
+                 (lambda () (equal (color-values (cooked--screen-color 'background))
+                                   '(65535 0 0)))))
+        (should (eql reached 1))
+        ;; What `cooked--drain-and-apply' says from its own cleanup, and what tells
+        ;; the core the set has been through Lisp: until then a query for the same
+        ;; colour is handed over rather than answered, on purpose.
+        (cooked--ready cooked--session)
+        (cooked--feed cooked--session "\e]11;?\a")
+        (cooked--ready cooked--session)
+        (should (cooked-tests--settle
+                 (lambda () (string-match-p "]11;rgb:ffff/0000/0000" (cooked-tests--text)))))
+        (should (eql reached 1))))))
 
 (ert-deftest cooked-osc-4-answers-palette-queries-and-ignores-sets ()
   "Each entry is answered in xterm's form from the colour a cell is drawn in, and

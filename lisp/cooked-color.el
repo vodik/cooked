@@ -146,6 +146,69 @@ output, so nothing would ever wake one; see `cooked--set-color-scheme\\='."
 
 (add-hook 'cooked-theme-change-hook #'cooked--sync-color-scheme)
 
+;;;; The palette the core answers from
+;;
+;; A query has one true answer and Lisp is the only one who knows it, but knowing it is
+;; not the same as having to be woken for it.  So the answers are pushed down to the
+;; core -- the sixteen ANSI colours, the xterm cube above them, and the two defaults --
+;; and it replies to `OSC 4 ; N ; ?', `OSC 10 ; ?' and `OSC 11 ; ?' where the query
+;; arrives, as it already replies to `CSI ? 996 n' from the colour scheme.  A start-up
+;; probe then costs the child nothing but the reply, instead of a wake, a drain and a
+;; reply batch behind `cooked-min-redisplay-interval'.
+;;
+;; Everything that *changes* a colour stays here, because all of it is policy or faces:
+;; a set is `cooked-allow-color-set', the cursor is the frame's, and the selection
+;; colours are the theme's.  See `cooked--set-palette' for what the core does with this
+;; and which queries still reach `cooked--osc-color'.
+
+(defvar cooked--palette-cube nil
+  "The rgb triples of xterm colour indices 16 to 255, built on first use.
+
+Those are a pure function of the index -- see `cooked--xterm-256' -- so, unlike
+the sixteen below them, they follow no theme and are worth building once for
+every session and every theme change that follows.")
+
+(defun cooked--palette-colors ()
+  "The 256 palette entries a child may ask for, index 0 first.
+
+Each is `color-values' of what `cooked--color' answers, which is the function
+that paints cells: what a query is told is the colour a cell in that index is
+actually drawn in, rather than a second table that could disagree with it.
+
+An entry that resolves to nothing falls back to `cooked-color-names', as
+`cooked--osc-palette' does -- a tty frame can leave an `ansi-color-' face
+reading as `unspecified-fg', which has no value to report -- and is nil only if
+that fails too, which leaves the core nothing to answer with and the query with
+Lisp."
+  (append (cl-loop for index below 16
+                   collect (or (color-values (cooked--color index))
+                               (color-values (aref cooked-color-names index))))
+          (or cooked--palette-cube
+              (setq cooked--palette-cube
+                    (cl-loop for index from 16 below 256
+                             collect (color-values (cooked--xterm-256 index)))))))
+
+(defun cooked--sync-palette ()
+  "Tell this buffer\\='s child the colours Emacs draws it with.
+
+On `cooked-theme-change-hook\\=', and that covers every way an answer can move:
+a theme runs the hook in each session buffer, and so does an OSC 10, 11 or 12
+set or reset, `cooked--remap-default-color\\=' and `cooked--reset-default-color\\='
+both reaching it through `cooked--flush-face-cache\\='.  Which is what keeps a
+query from being answered with the colour that has just been replaced.
+
+The two defaults are the colours the buffer draws, `cooked--screen-color\\=', with
+no DECSCNM swap applied: reverse video is the child\\='s own mode, and the core
+exchanges the pair for a query itself rather than trusting a level that may have
+moved since this ran."
+  (when-let* ((session (cooked--live-session)))
+    (cooked--set-palette session
+                         (color-values (cooked--screen-color 'foreground))
+                         (color-values (cooked--screen-color 'background))
+                         (cooked--palette-colors))))
+
+(add-hook 'cooked-theme-change-hook #'cooked--sync-palette)
+
 (defun cooked--color-to-osc (color)
   "Format COLOR as xterm's `rgb:RRRR/GGGG/BBBB', 16 bits per channel.
 That is exactly what `color-values' returns, so no rescaling is involved."
@@ -176,7 +239,15 @@ A `?' is a query and is answered from the buffer's own faces.  Anything else is
 a set, which needs `cooked-allow-color-set' and is only ever honoured for the
 kinds in `cooked--osc-settable-colors'.  Several may be chained — `ESC ] 10 ; ?
 ; ? ST' asks for the foreground and then the background — so each part advances
-the code."
+the code.
+
+A query for the foreground or the background ordinarily never arrives here: the
+core holds both and answers where the query lands, which is what
+`cooked--sync-palette' is for.  What still arrives is every other code — the
+cursor is the frame's colour and the selection is the theme's, neither being
+this buffer's to report from a snapshot — every set, and the two defaults
+themselves while a set of them is still unhandled, so that a chained set and
+query in one sequence is answered in order and from the colour the set left."
   (let ((code cooked--osc-code))
     (dolist (part parts)
       (when-let* ((kind (alist-get code cooked--osc-color-sources)))
@@ -340,7 +411,13 @@ out-of-range index is skipped without disturbing the pairs after it.
 
 The colour comes from `cooked--color', the function that paints cells, so the
 answer is whatever a cell in that colour is actually drawn in rather than a
-second table that could disagree with it."
+second table that could disagree with it.
+
+Ordinarily nothing reaches here either: `cooked--sync-palette' hands the core
+all 256 entries, from this same function, and a query for one it holds is
+answered where it arrives.  This is what answers a query the core declines —
+one whose pairs it cannot read, or that came in behind a set — and it is where
+the colours themselves are still decided."
   (while parts
     (let ((index (pop parts))
           (spec (pop parts)))
