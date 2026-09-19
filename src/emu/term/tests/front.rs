@@ -134,7 +134,12 @@ fn edit_of(t: &mut Term, index: usize) -> Option<Option<(usize, Option<usize>, u
     let row = t.drain().rows.into_iter().find(|r| r.index == index)?;
     Some(row.edit.map(|e| {
         let text = e.runs.iter().map(|r| r.text).collect();
-        (e.char_start, e.char_end, e.chars, text)
+        (
+            e.char_start.get(),
+            e.char_end.map(Chars::get),
+            e.chars.get(),
+            text,
+        )
     }))
 }
 
@@ -151,7 +156,9 @@ fn neighbouring_rows_changing_a_little_are_edits_on_the_primary_screen() {
         .map(|row| {
             (
                 row.index,
-                row.edit.as_ref().map(|e| (e.char_start, e.char_end)),
+                row.edit
+                    .as_ref()
+                    .map(|e| (e.char_start.get(), e.char_end.map(Chars::get))),
             )
         })
         .collect();
@@ -406,7 +413,10 @@ fn a_row_with_an_image_is_sent_whole() {
 fn row_zero_continuing_the_scrollback_is_sent_whole() {
     // Row 0 begins mid-line in the buffer when the row that scrolled off above it wrapped.
     let mut t = settled(2, 10, b"0123456789abcdefghijklmnopqrs");
-    assert!(t.screen().head() > 0, "the fixture must leave a seam");
+    assert!(
+        !t.screen().head().is_zero(),
+        "the fixture must leave a seam"
+    );
     t.feed(b"\x1b[1;2HX\x1b[2;1H");
     assert_eq!(edit_of(&mut t, 0), Some(None));
 }

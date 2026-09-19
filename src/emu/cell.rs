@@ -8,6 +8,7 @@ use super::glyph::{self, BoxGlyph};
 use super::image::Placement;
 use super::link::LinkId;
 use super::style::StyleId;
+use super::units::{Bytes, Chars, Cols};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Hash)]
 pub enum Color {
@@ -210,9 +211,9 @@ pub(crate) fn draws_nothing(ch: char) -> bool {
 pub(crate) fn chars_before<'a>(
     cells: &[Cell],
     extras: impl Iterator<Item = &'a (u16, Extra)>,
-    cols: usize,
-) -> usize {
-    let mut cols = cols.min(cells.len());
+    cols: Cols,
+) -> Chars {
+    let mut cols = cols.get().min(cells.len());
     while cols < cells.len() && cols > 0 && cells[cols].is_continuation() {
         cols -= 1;
     }
@@ -229,7 +230,7 @@ pub(crate) fn chars_before<'a>(
             _ => 0,
         })
         .sum();
-    base + marks
+    Chars::new(base + marks)
 }
 
 impl Default for Cell {
@@ -596,7 +597,7 @@ pub struct Run {
     /// by `Block::push_runs` so Emacs need not call `string-width' on every rendered row;
     /// see `cooked--row-mismeasured-p'. It is also how an `OSC 66` declared width reaches
     /// Emacs.
-    pub cols: usize,
+    pub cols: Cols,
     /// The rendition, named in the store of whatever built the run.
     pub style: StyleId,
     /// One decoration per character in `text`, index-aligned with `text.chars()`;
@@ -650,14 +651,14 @@ pub struct Runs {
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct Span {
     /// Byte offset into [`Runs::text`] of this run's first character.
-    start: usize,
+    start: Bytes,
     /// Characters of this run's text, counted as they were pushed.
     ///
     /// The count `Block` needs for every style span and every offset it emits, which it
     /// used to rescan the string for.
-    chars: usize,
+    chars: Chars,
     /// Columns this run occupies on the grid; see [`Run::cols`].
-    cols: usize,
+    cols: Cols,
     style: StyleId,
     deco: Option<Deco>,
     link: Option<LinkId>,
@@ -674,8 +675,8 @@ pub struct RunRef<'a> {
     /// Characters of `text`. Not `text.len()`, which counts bytes, nor `cols`, which
     /// counts grid columns: a wide character is one character on two columns and a
     /// combining mark one character on none.
-    pub chars: usize,
-    pub cols: usize,
+    pub chars: Chars,
+    pub cols: Cols,
     pub style: StyleId,
     pub deco: Option<&'a Deco>,
     pub link: Option<LinkId>,
@@ -687,6 +688,31 @@ impl RunRef<'_> {
     #[doc(hidden)]
     pub fn deco_at(&self, index: usize) -> Option<String> {
         self.deco.and_then(|deco| deco.at(index))
+    }
+
+    /// Bytes `text` occupies, which is neither its characters nor its columns.
+    pub fn bytes(&self) -> Bytes {
+        Bytes::of(self.text)
+    }
+
+    /// Whether every character of this run stands on exactly one cell.
+    ///
+    /// Two units meet here, so it is a *question* about the run rather than arithmetic
+    /// on it: false says the run holds a wide character, a combining mark, or an `OSC 66`
+    /// declared width, any of which breaks a column-per-character reading of the text.
+    /// `wire`'s `Uniformity` asks it of every run of a damaged row, and
+    /// [`Row::absorb_blank_runs`] asks it of a gap it is about to swallow.
+    pub fn one_cell_per_char(&self) -> bool {
+        self.cols.get() == self.chars.get()
+    }
+
+    /// Whether every character of this run is a single byte, so that a byte offset into
+    /// the text is also a character offset.
+    ///
+    /// The other side of the same question: it is what tells `wire`'s `Uniformity` that
+    /// Emacs may read the row a byte per column.
+    pub fn one_byte_per_char(&self) -> bool {
+        self.bytes().get() == self.chars.get()
     }
 }
 
@@ -717,7 +743,7 @@ impl Runs {
     }
 
     /// Characters over every run: what this puts in an Emacs buffer.
-    pub fn chars(&self) -> usize {
+    pub fn chars(&self) -> Chars {
         self.runs.iter().map(|run| run.chars).sum()
     }
 
@@ -725,7 +751,7 @@ impl Runs {
     pub fn get(&self, index: usize) -> Option<RunRef<'_>> {
         let run = self.runs.get(index)?;
         Some(RunRef {
-            text: &self.text[run.start..self.end_of(index)],
+            text: self.text_between(run.start, self.end_of(index)),
             chars: run.chars,
             cols: run.cols,
             style: run.style,
@@ -790,12 +816,12 @@ impl Runs {
         let at = self
             .runs
             .iter()
-            .rposition(|run| run.chars > 0)
+            .rposition(|run| !run.chars.is_zero())
             .expect("text with no run holding it");
-        self.runs[at].chars -= 1;
+        self.runs[at].chars -= Chars::ONE;
         // Every run after it begins that many bytes earlier now.
         for run in &mut self.runs[at + 1..] {
-            run.start -= ch.len_utf8();
+            run.start -= Bytes::new(ch.len_utf8());
         }
         Some(ch)
     }
@@ -814,10 +840,17 @@ impl Runs {
     }
 
     /// Where run INDEX's text ends: where the next begins, or the end of the text.
-    fn end_of(&self, index: usize) -> usize {
+    fn end_of(&self, index: usize) -> Bytes {
         self.runs
             .get(index + 1)
-            .map_or(self.text.len(), |next| next.start)
+            .map_or(Bytes::of(&self.text), |next| next.start)
+    }
+
+    /// The stretch of the text between two byte offsets, which are the only offsets that
+    /// index it: the spans tile the text, so FROM and TO are always run boundaries and
+    /// so always fall on character boundaries.
+    fn text_between(&self, from: Bytes, to: Bytes) -> &str {
+        &self.text[from.get()..to.get()]
     }
 
     /// Drop every run but keep the buffers, for a producer that fills one per round; see
@@ -853,9 +886,9 @@ impl Runs {
     /// not the text before it was in the same rendition.
     pub(crate) fn start(&mut self, style: StyleId, link: Option<LinkId>, deco: Option<DecoCell>) {
         self.runs.push(Span {
-            start: self.text.len(),
-            chars: 0,
-            cols: 0,
+            start: Bytes::of(&self.text),
+            chars: Chars::ZERO,
+            cols: Cols::ZERO,
             style,
             deco: deco.map(Deco::start),
             link,
@@ -866,7 +899,7 @@ impl Runs {
     pub(crate) fn push_char(&mut self, ch: char) {
         self.text.push(ch);
         if let Some(run) = self.runs.last_mut() {
-            run.chars += 1;
+            run.chars += Chars::ONE;
         }
     }
 
@@ -877,7 +910,7 @@ impl Runs {
     pub(crate) fn push_str(&mut self, text: &str) {
         self.text.push_str(text);
         if let Some(run) = self.runs.last_mut() {
-            run.chars += text.chars().count();
+            run.chars += Chars::new(text.chars().count());
         }
     }
 
@@ -889,7 +922,7 @@ impl Runs {
     fn push_text(
         &mut self,
         chars: impl Iterator<Item = char>,
-        cols: usize,
+        cols: Cols,
         style: StyleId,
         link: Option<LinkId>,
     ) {
@@ -900,7 +933,7 @@ impl Runs {
         let run = runs.last_mut().expect("a run is open either way");
         for ch in chars {
             text.push(ch);
-            run.chars += 1;
+            run.chars += Chars::ONE;
         }
         run.cols += cols;
     }
@@ -909,7 +942,7 @@ impl Runs {
     ///
     /// The continuation cells of a wide character, which belong to the column count of
     /// the run that owns the character; see [`Run::cols`].
-    pub(crate) fn add_cols(&mut self, count: usize) {
+    pub(crate) fn add_cols(&mut self, count: Cols) {
         if let Some(run) = self.runs.last_mut() {
             run.cols += count;
         }
@@ -936,13 +969,13 @@ impl Runs {
             records.push(cell);
         }
         text.push(cell.ch);
-        run.chars += 1;
-        run.cols += 1;
+        run.chars += Chars::ONE;
+        run.cols += Cols::ONE;
         // A cell carrying marks is undecorated (see `decoration`), so the marks never land
         // inside a decorated run, whose records are one per character.
         if let Some(marks) = marks {
             text.push_str(marks);
-            run.chars += marks.chars().count();
+            run.chars += Chars::new(marks.chars().count());
         }
     }
 }
@@ -1193,14 +1226,14 @@ impl<'a> RowRef<'a> {
 
     /// [`RowOf::marks`] for a borrowed grid row, living as long as the grid rather than
     /// as long as this view of it, so that an iterator over rows can yield them.
-    pub fn into_marks(self) -> impl Iterator<Item = (usize, MarkId)> + 'a {
+    pub fn into_marks(self) -> impl Iterator<Item = (Cols, MarkId)> + 'a {
         self.meta
             .extras
             .as_deref()
             .map_or(&[][..], Extras::entries)
             .iter()
             .filter_map(|(at, extra)| match extra {
-                Extra::Mark(id) => Some((usize::from(*at), *id)),
+                Extra::Mark(id) => Some((Cols::new(usize::from(*at)), *id)),
                 _ => None,
             })
     }
@@ -1278,9 +1311,9 @@ impl<C: Borrow<[Cell]>, M: Borrow<RowMeta>> RowOf<C, M> {
     }
 
     /// Every semantic mark on this row, in column order.
-    pub fn marks(&self) -> impl Iterator<Item = (usize, MarkId)> + '_ {
+    pub fn marks(&self) -> impl Iterator<Item = (Cols, MarkId)> + '_ {
         self.extras().iter().filter_map(|(at, extra)| match extra {
-            Extra::Mark(id) => Some((usize::from(*at), *id)),
+            Extra::Mark(id) => Some((Cols::new(usize::from(*at)), *id)),
             _ => None,
         })
     }
@@ -1349,7 +1382,7 @@ impl<C: Borrow<[Cell]>, M: Borrow<RowMeta>> RowOf<C, M> {
 
     /// Characters of this row's text before the character at column COL; see
     /// [`chars_before`].
-    pub fn chars_before(&self, col: usize) -> usize {
+    pub fn chars_before(&self, col: Cols) -> Chars {
         chars_before(self.cells(), self.extras().iter(), col)
     }
 
@@ -1396,7 +1429,7 @@ impl<C: Borrow<[Cell]>, M: Borrow<RowMeta>> RowOf<C, M> {
                 // The column still belongs to the wide character before it, and so to
                 // that character's run: `cols` counts columns, not characters.
                 if let Some(run) = runs.last_mut() {
-                    run.cols += 1;
+                    run.cols += Cols::ONE;
                 }
                 continue;
             }
@@ -1425,14 +1458,14 @@ impl<C: Borrow<[Cell]>, M: Borrow<RowMeta>> RowOf<C, M> {
             if joins {
                 let run = runs.last_mut().expect("joins implies a last run");
                 run.text.push(cell.ch);
-                run.cols += 1;
+                run.cols += Cols::ONE;
                 if let (Some(d), Some(c)) = (&mut run.deco, deco) {
                     d.push(c);
                 }
             } else {
                 runs.push(Run {
                     text: String::from(cell.ch),
-                    cols: 1,
+                    cols: Cols::ONE,
                     style: cell.style,
                     deco: deco.map(Deco::start),
                     link: cell.link,
@@ -1452,9 +1485,9 @@ impl<C: Borrow<[Cell]>, M: Borrow<RowMeta>> RowOf<C, M> {
     /// caller chooses START and END on whole cells and outside any box-glyph run, so the
     /// runs here are the same characters, renditions and decorations the full row's runs
     /// carry over those columns; only where a run happens to be cut differs.
-    pub(crate) fn runs_between(&self, start: usize, end: usize) -> Runs {
-        let end = end.min(self.len());
-        self.runs_from(start.min(end), end)
+    pub(crate) fn runs_between(&self, start: Cols, end: Cols) -> Runs {
+        let end = end.get().min(self.len());
+        self.runs_from(start.get().min(end), end)
     }
 
     fn runs_to(&self, end: usize) -> Runs {
@@ -1513,8 +1546,8 @@ impl<C: Borrow<[Cell]>, M: Borrow<RowMeta>> RowOf<C, M> {
                 // Combining marks push characters onto a run's text that stand on no
                 // column, so a run with more characters than columns is carrying something
                 // other than the blanks it looks like.
-                && run.chars == run.cols
-                && run.chars != 0
+                && run.one_cell_per_char()
+                && !run.chars.is_zero()
                 && run.text.chars().all(draws_nothing)
         };
         let mut i = 0;
@@ -1545,7 +1578,7 @@ impl<C: Borrow<[Cell]>, M: Borrow<RowMeta>> RowOf<C, M> {
             else {
                 unreachable!("the match above admitted only two glyph runs");
             };
-            glyphs.extend(std::iter::repeat_n(BoxGlyph::BLANK, tail.cols));
+            glyphs.extend(std::iter::repeat_n(BoxGlyph::BLANK, tail.cols.get()));
             glyphs.extend(more);
         }
     }
@@ -1573,7 +1606,7 @@ impl<C: Borrow<[Cell]>, M: Borrow<RowMeta>> RowOf<C, M> {
                 // and so does not absorb the continuations the bulk scan below does.
                 // Credited to the run that owns the character regardless, so that this
                 // and `Row::runs_to_reference` count the same columns.
-                runs.add_cols(1);
+                runs.add_cols(Cols::ONE);
                 col += 1;
                 continue;
             }
@@ -1604,7 +1637,7 @@ impl<C: Borrow<[Cell]>, M: Borrow<RowMeta>> RowOf<C, M> {
                     .map(|c| c.ch),
                 // Every cell of the span, continuations included: the scan above ran to
                 // `col` over columns, and that span is the run's width.
-                col - start,
+                Cols::new(col - start),
                 pen.style,
                 pen.link,
             );
@@ -1624,7 +1657,7 @@ impl<C: Borrow<[Cell]>, M: Borrow<RowMeta>> RowOf<C, M> {
         for (col, cell) in cells.iter().enumerate() {
             if cell.is_continuation() {
                 // A column of the wide character that opened it, hence of its run.
-                runs.add_cols(1);
+                runs.add_cols(Cols::ONE);
                 continue;
             }
             let mut marks = None;
@@ -1725,7 +1758,8 @@ impl<C: BorrowMut<[Cell]>, M: BorrowMut<RowMeta>> RowOf<C, M> {
     /// a mark is never retired by what is drawn over it, so a child emitting `OSC 133'
     /// without moving off the row would grow the table without limit and turn a linear
     /// feed quadratic, as the `osc_dispatch' benchmark does.
-    pub fn mark(&mut self, col: usize, id: MarkId) {
+    pub fn mark(&mut self, col: Cols, id: MarkId) {
+        let col = col.get();
         if col >= self.cells().len() {
             return;
         }
@@ -2094,8 +2128,8 @@ mod tests {
             runs.run(0),
             RunRef {
                 text: "hi",
-                chars: 2,
-                cols: 2,
+                chars: Chars::new(2),
+                cols: Cols::new(2),
                 style: red,
                 deco: None,
                 link: None,
@@ -2233,7 +2267,7 @@ mod tests {
         let mut row = Row::new(6);
         row.set(0, Cell::new('a', StyleId::DEFAULT));
         row.combine(0, '\u{0301}');
-        row.mark(0, MarkId::from_index(1));
+        row.mark(Cols::ZERO, MarkId::from_index(1));
 
         row.insert_blank(0, 2, StyleId::DEFAULT);
 
@@ -2302,7 +2336,7 @@ mod tests {
             runs.run(0).text,
             "\u{2502}   \u{2502}   \u{251c}\u{2500}\u{2500}"
         );
-        assert_eq!(runs.run(0).cols, 11);
+        assert_eq!(runs.run(0).cols, Cols::new(11));
         assert_eq!(runs.run(0).deco.map(Deco::len), Some(11));
         assert_eq!(runs.run(1).text, " f");
         assert!(runs.run(1).deco.is_none());
@@ -2449,8 +2483,8 @@ mod tests {
 
         let runs = row.runs();
         assert_eq!(
-            runs.iter().map(|r| r.cols).sum::<usize>(),
-            5,
+            runs.iter().map(|r| r.cols).sum::<Cols>(),
+            Cols::new(5),
             "a, a wide character on two cells, a box glyph, and an accented e"
         );
         assert_eq!(
@@ -2471,7 +2505,7 @@ mod tests {
     /// padding baked into a bitmap rather than a gap between two glyphs.
     fn assert_absorbed_only_blanks(unabsorbed: &[Run], absorbed: &[Run], context: &str) {
         let text = |runs: &[Run]| runs.iter().map(|r| r.text.as_str()).collect::<String>();
-        let cols = |runs: &[Run]| runs.iter().map(|r| r.cols).sum::<usize>();
+        let cols = |runs: &[Run]| runs.iter().map(|r| r.cols).sum::<Cols>();
         assert_eq!(text(absorbed), text(unabsorbed), "{context}: text");
         assert_eq!(cols(absorbed), cols(unabsorbed), "{context}: columns");
         for run in absorbed {
@@ -2637,7 +2671,7 @@ mod tests {
                     u64::MAX
                 } {
                     0..=2 => row.combine(col, '\u{301}'),
-                    3 => row.mark(col, MarkId::from_index(((r >> 40) % 4) as u32)),
+                    3 => row.mark(Cols::new(col), MarkId::from_index(((r >> 40) % 4) as u32)),
                     4 => row.place(
                         col,
                         Placement {
@@ -2732,7 +2766,7 @@ mod tests {
     #[test]
     fn a_mark_outlives_what_is_drawn_over_it() {
         let mut row = Row::new(4);
-        row.mark(1, MarkId::from_index(7));
+        row.mark(Cols::ONE, MarkId::from_index(7));
         row.combine(1, '\u{301}');
         row.set(1, Cell::new('a', StyleId::DEFAULT));
         // The combining mark went with the character it rode; the semantic mark is a
@@ -2741,7 +2775,7 @@ mod tests {
         // character.
         assert_eq!(
             row.marks().collect::<Vec<_>>(),
-            vec![(1, MarkId::from_index(7))]
+            vec![(Cols::ONE, MarkId::from_index(7))]
         );
         assert!(
             !row.extras()
@@ -2754,19 +2788,19 @@ mod tests {
         row.fill(0..4, StyleId::DEFAULT);
         assert_eq!(
             row.marks().collect::<Vec<_>>(),
-            vec![(1, MarkId::from_index(7))]
+            vec![(Cols::ONE, MarkId::from_index(7))]
         );
         row.erase_all(StyleId::DEFAULT);
         assert_eq!(
             row.marks().collect::<Vec<_>>(),
-            vec![(1, MarkId::from_index(7))]
+            vec![(Cols::ONE, MarkId::from_index(7))]
         );
 
         // The row ceasing to be what it was does take it: recycled at the bottom of a
         // scroll, or with the column it sat on gone.
         row.clear(StyleId::DEFAULT);
         assert!(row.marks().next().is_none());
-        row.mark(1, MarkId::from_index(8));
+        row.mark(Cols::ONE, MarkId::from_index(8));
         row.resize(1, StyleId::DEFAULT);
         assert!(row.marks().next().is_none());
     }
@@ -2775,7 +2809,7 @@ mod tests {
     fn marks_on_one_row_are_bounded() {
         let mut row = Row::new(4);
         for i in 0..(MARKS_PER_ROW as u32 * 3) {
-            row.mark(1, MarkId::from_index(i));
+            row.mark(Cols::ONE, MarkId::from_index(i));
         }
         let marks: Vec<_> = row.marks().collect();
         assert_eq!(marks.len(), MARKS_PER_ROW, "the bound holds");
@@ -2786,7 +2820,7 @@ mod tests {
             marks.last().map(|(_, id)| *id),
             Some(MarkId::from_index(MARKS_PER_ROW as u32 * 3 - 1))
         );
-        assert!(marks.iter().all(|(at, _)| *at == 1));
+        assert!(marks.iter().all(|(at, _)| *at == Cols::ONE));
     }
 
     #[test]
@@ -2794,15 +2828,15 @@ mod tests {
         let mut row = Row::new(4);
         // `OSC 133;B` and `;C` land on the same cell whenever an empty line is submitted,
         // and each names a different record in Emacs.
-        row.mark(0, MarkId::from_index(1));
-        row.mark(0, MarkId::from_index(2));
-        row.mark(3, MarkId::from_index(3));
+        row.mark(Cols::ZERO, MarkId::from_index(1));
+        row.mark(Cols::ZERO, MarkId::from_index(2));
+        row.mark(Cols::new(3), MarkId::from_index(3));
         assert_eq!(
             row.marks().collect::<Vec<_>>(),
             vec![
-                (0, MarkId::from_index(1)),
-                (0, MarkId::from_index(2)),
-                (3, MarkId::from_index(3))
+                (Cols::ZERO, MarkId::from_index(1)),
+                (Cols::ZERO, MarkId::from_index(2)),
+                (Cols::new(3), MarkId::from_index(3))
             ]
         );
     }

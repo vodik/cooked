@@ -36,7 +36,8 @@
 //! class of miss a text-only oracle waves through.
 
 use cooked::emu::{
-    Deco, Delta, Direction, Edit, ImageId, Levels, Run, Runs, Scrolled, Shift, StyleId, Term,
+    Chars, Cols, Deco, Delta, Direction, Edit, ImageId, Levels, Run, Runs, Scrolled, Shift,
+    StyleId, Term,
 };
 use proptest::prelude::*;
 use std::collections::HashMap;
@@ -678,7 +679,7 @@ struct Replay {
     woken: bool,
     /// The levels and the cursor's character offset as the last drain stated them, which
     /// is what Emacs is drawing from until the next.
-    levels: (Levels, usize),
+    levels: (Levels, Chars),
     /// Whether the buffer is hidden, so a drain is `Term::drain_hidden`'s.
     hidden: bool,
     /// Whether a hidden drain has left the screen out since the last whole one, which is
@@ -837,7 +838,7 @@ impl Replay {
     fn check_promoted(&self, delta: &Delta) {
         let space = drawn(&Runs::from_runs(&[Run {
             text: " ".into(),
-            cols: 1,
+            cols: Cols::ONE,
             style: StyleId::DEFAULT,
             deco: None,
             link: None,
@@ -872,23 +873,23 @@ impl Replay {
     /// however right the characters are.
     fn check_edit(index: usize, old: &Runs, edit: &Edit, full: &Runs) {
         let before = drawn(old);
+        // `drawn` is one entry per character, so the row's length is a character count.
+        let held = Chars::new(before.len());
         let start = edit.char_start;
         assert!(
-            start <= before.len(),
-            "row {index}: an edit from character {start} of a {}-character row",
-            before.len()
+            start <= held,
+            "row {index}: an edit from character {start} of a {held}-character row"
         );
-        let mut after = before[..start].to_vec();
+        let mut after = before[..start.get()].to_vec();
         after.extend(drawn(&edit.runs));
         if let Some(end) = edit.char_end {
             assert!(
-                (start..=before.len()).contains(&end),
-                "row {index}: an edit of characters {start}..{end} of {}",
-                before.len()
+                (start..=held).contains(&end),
+                "row {index}: an edit of characters {start}..{end} of {held}"
             );
-            after.extend_from_slice(&before[end..]);
+            after.extend_from_slice(&before[end.get()..]);
         }
-        after.truncate(edit.chars);
+        after.truncate(edit.chars.get());
         assert_eq!(
             after,
             drawn(full),
@@ -896,7 +897,7 @@ impl Replay {
         );
         // The old text is cut at START and END, the new text at START and wherever the
         // replacement ends in it.
-        let replaced = drawn(&edit.runs).len();
+        let replaced = Chars::new(drawn(&edit.runs).len());
         let cuts = [
             (old, Some(start)),
             (old, edit.char_end),
@@ -1119,8 +1120,8 @@ fn drawn(runs: &Runs) -> Vec<String> {
 
 /// Whether character offset AT falls strictly inside a run of RUNS that carries box
 /// glyphs.
-fn inside_glyph_run(runs: &Runs, at: usize) -> bool {
-    let mut start = 0;
+fn inside_glyph_run(runs: &Runs, at: Chars) -> bool {
+    let mut start = Chars::ZERO;
     for run in runs {
         let len = run.chars;
         if run.deco_at(0).is_some() && start < at && at < start + len {

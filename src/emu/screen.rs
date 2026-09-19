@@ -3,6 +3,7 @@
 use super::cell::{CONTINUATION, Cell, Extra, MarkId, Pen, Row, RowMeta, RowMut, RowRef, Runs};
 use super::image::{CellSize, ImageId, Placement};
 use super::style::StyleId;
+use super::units::{Chars, Cols};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct Cursor {
@@ -221,7 +222,7 @@ pub struct Departed {
     ///
     /// Empty for essentially every row, and an empty `Vec` does not allocate, so the
     /// ordinary line pays nothing to carry this.
-    pub marks: Vec<(usize, MarkId)>,
+    pub marks: Vec<(Chars, MarkId)>,
     /// The row itself, cells and attachments, for the few rows that leave while
     /// [`Screen::witness`] asks for them.
     ///
@@ -234,7 +235,7 @@ pub struct Departed {
 
 impl Departed {
     /// Characters this row puts in the buffer, which is what a head is counted in.
-    fn chars(&self) -> usize {
+    fn chars(&self) -> Chars {
         self.runs.chars()
     }
 
@@ -355,7 +356,7 @@ pub struct Screen {
     /// Not `carried * cols`: a wide character is one character on two columns and a
     /// combining mark a character on none, so `日本` handed over as a row of four columns
     /// is two characters in the buffer, and `e\u{301}` on one column is two.
-    carried_chars: usize,
+    carried_chars: Chars,
     /// How many more rows leaving the top keep a copy of themselves in [`Departed::row`].
     ///
     /// Set at a drain to as many rows as Emacs holds, and cleared once a row that leaves
@@ -405,7 +406,7 @@ impl Screen {
             touches: 0,
             tabs: default_tabs(cols),
             carried: 0,
-            carried_chars: 0,
+            carried_chars: Chars::ZERO,
             witness: 0,
             autowrap: true,
             insert_mode: false,
@@ -433,7 +434,7 @@ impl Screen {
     /// Drop the carry: nothing of the top row's line is in Emacs any more.
     pub fn forget_carry(&mut self) {
         self.carried = 0;
-        self.carried_chars = 0;
+        self.carried_chars = Chars::ZERO;
     }
 
     /// DECAWM. Off means the cursor pins to the last column and overwrites in place,
@@ -467,7 +468,7 @@ impl Screen {
             return;
         }
         let run = evicted.iter().rev().take_while(|row| row.wrapped).count();
-        let chars: usize = evicted[evicted.len() - run..]
+        let chars: Chars = evicted[evicted.len() - run..]
             .iter()
             .map(Departed::chars)
             .sum();
@@ -548,7 +549,7 @@ impl Screen {
     /// Not `touch`: a mark changes nothing about how the row is drawn, so damaging it
     /// would send Emacs a row it already has in order to say something the row does not
     /// carry.
-    pub fn mark(&mut self, row: usize, col: usize, id: MarkId) {
+    pub fn mark(&mut self, row: usize, col: Cols, id: MarkId) {
         if let Some(mut row) = self.row_mut(row) {
             row.mark(col, id);
         }
@@ -1496,7 +1497,7 @@ impl Screen {
     /// See [`Screen::carried`](Self#structfield.carried). Reported in characters rather
     /// than rows so the other end never has to reconstruct it from a width, and so it
     /// stays meaningful if a departed row is ever not exactly `cols` wide.
-    pub fn head(&self) -> usize {
+    pub fn head(&self) -> Chars {
         self.carried_chars
     }
 
@@ -1623,7 +1624,7 @@ impl Screen {
                 // The line ended inside the fragment, so a newline follows it and row 0
                 // starts a buffer line of its own.
                 head = 0;
-                self.carried_chars = 0;
+                self.carried_chars = Chars::ZERO;
             }
         }
 
@@ -1762,7 +1763,7 @@ impl Logical {
         // Unfiltered by `len`, unlike everything else on the row: a mark on a column past
         // the text is the common case rather than a corner one.
         self.marks
-            .extend(row.marks().map(|(at, id)| (base + at, id)));
+            .extend(row.marks().map(|(at, id)| (base + at.get(), id)));
         base
     }
 
@@ -1801,7 +1802,7 @@ impl Logical {
         if let Some(last) = rows.last_mut() {
             let end = last.len().saturating_sub(1);
             for (_, id) in self.marks.iter().filter(|(at, _)| *at >= start + cols) {
-                last.mark(end, *id);
+                last.mark(Cols::new(end), *id);
             }
         }
         rows
@@ -2008,10 +2009,14 @@ mod tests {
         write(&mut screen, "aaaa");
         write(&mut screen, "bb");
         screen.scroll_up(1, Pen::default()).discard();
-        assert_ne!(screen.head(), 0, "precondition: something was carried");
+        assert_ne!(
+            screen.head(),
+            Chars::ZERO,
+            "precondition: something was carried"
+        );
 
         screen.remove_rows(0, 1);
-        assert_eq!(screen.head(), 0);
+        assert_eq!(screen.head(), Chars::ZERO);
     }
 
     #[test]
@@ -2376,7 +2381,7 @@ mod tests {
         write(&mut screen, "e\u{301}e\u{301}日abx");
         screen.linefeed(Pen::default()).discard();
         assert_eq!(screen.carried, 1);
-        assert_eq!(screen.head(), 7);
+        assert_eq!(screen.head(), Chars::new(7));
     }
 
     #[test]

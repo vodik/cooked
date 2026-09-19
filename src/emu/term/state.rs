@@ -47,6 +47,22 @@ impl<'a> MarkIndex<'a> {
     }
 }
 
+/// The cursor's column as characters of its row's text, which is [`Delta::cursor_chars`].
+///
+/// The one conversion the cursor needs, and it is written once here because the whole
+/// drain and the hidden drain both want it and used to spell it out separately.
+///
+/// A cursor with no row under it does not happen: every move clamps it inside the grid
+/// and a resize brings it down with the rows. There are then no cells to count, and the
+/// column is the only number available -- the same answer for a row of single-cell
+/// characters, which is what an empty grid's row would be.
+fn cursor_chars(screen: &Screen, cursor: Cursor) -> Chars {
+    screen.row(cursor.row).map_or_else(
+        || Chars::new(cursor.col),
+        |row| row.chars_before(Cols::new(cursor.col)),
+    )
+}
+
 impl Levels {
     /// Read every level off the emulator as it stands.
     pub(super) fn of(state: &State) -> Self {
@@ -194,7 +210,7 @@ impl State {
                         id,
                         Anchor {
                             row: base + index,
-                            col,
+                            col: col.get(),
                         },
                     )
                 }));
@@ -497,10 +513,7 @@ impl State {
             }
         }
         let levels = Levels::of(self);
-        let cursor_chars = self
-            .screen()
-            .row(levels.cursor.row)
-            .map_or(levels.cursor.col, |row| row.chars_before(levels.cursor.col));
+        let cursor_chars = cursor_chars(self.screen(), levels.cursor);
         let rows = self.damaged_rows(damaged, promoted, &shifts, levels.cursor);
         // Last, after everything that could have named a new id: the rows, edits and
         // scrollback above were all built from cells written before this drain began.
@@ -522,7 +535,11 @@ impl State {
             used: screen.used(),
             // The seam is a property of the primary: the alt screen contributes no
             // scrollback, and its row 0 begins a buffer line of its own.
-            head: if levels.alt { 0 } else { screen.head() },
+            head: if levels.alt {
+                Chars::ZERO
+            } else {
+                screen.head()
+            },
             levels,
             cursor_chars,
             events,
@@ -557,9 +574,7 @@ impl State {
         let fonts = self.styles.font_bits().to_vec();
         let levels = Levels::of(self);
         let screen = self.screen();
-        let cursor_chars = screen
-            .row(levels.cursor.row)
-            .map_or(levels.cursor.col, |row| row.chars_before(levels.cursor.col));
+        let cursor_chars = cursor_chars(screen, levels.cursor);
         Delta {
             images,
             links,
@@ -568,7 +583,11 @@ impl State {
             height: screen.height(),
             width: screen.width(),
             used: screen.used(),
-            head: if levels.alt { 0 } else { screen.head() },
+            head: if levels.alt {
+                Chars::ZERO
+            } else {
+                screen.head()
+            },
             scrolled,
             scrolled_base,
             levels,
@@ -594,7 +613,7 @@ impl State {
                 col: self
                     .screen()
                     .row(index)
-                    .map_or(at.col, |row| row.chars_before(at.col)),
+                    .map_or(at.col, |row| row.chars_before(Cols::new(at.col)).get()),
                 ..at
             },
             None => moved.get(id).unwrap_or(at),
@@ -680,7 +699,7 @@ impl State {
         let screen = &self.screens[self.shown];
         // Row 0 of the primary screen continues the scrollback above it when the head is
         // not empty, so its text in the buffer begins mid-line.
-        let seam = !self.shown.is_alternate() && screen.head() > 0;
+        let seam = !self.shown.is_alternate() && !screen.head().is_zero();
         let alternate = self.shown.is_alternate();
         let front = &mut self.front;
         let at = |index: usize| (cursor.row == index).then_some(cursor.col as u16);

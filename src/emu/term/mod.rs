@@ -16,6 +16,7 @@ use super::screen::{Cursor, Erase, Evicted, Resize, Screen, Shift};
 use super::sixel;
 use super::style::{StyleId, StyleStore};
 use super::text::{self, Segmenter, Step, Width};
+use super::units::{Chars, Cols};
 use super::utf8::{Decoder, Piece};
 use csi::{Handover, PushedPen, SavedMode};
 pub(crate) use keypress::{Assumed, Key, Modifiers, NamedKey};
@@ -462,7 +463,7 @@ pub struct Delta {
     pub height: usize,
     pub width: usize,
     pub used: usize,
-    pub head: usize,
+    pub head: Chars,
     /// Everything else a drain restates in full every time; see [`Levels`].
     pub levels: Levels,
     /// The cursor's column as characters of its row's text, which is how Emacs finds it:
@@ -472,7 +473,7 @@ pub struct Delta {
     /// Beside [`Levels`] rather than in it, because the levels are read on every parse to
     /// decide whether there is anything to draw, and this has to walk the row. It cannot
     /// change unless the cursor or its row did, which the levels and the damage see.
-    pub cursor_chars: usize,
+    pub cursor_chars: Chars,
     pub events: Vec<Event>,
     /// Semantic marks whose position changed during this drain, as `(ID, ANCHOR)`.
     ///
@@ -586,15 +587,15 @@ pub struct DamagedRow {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Edit {
     /// Characters of the row before the replaced text.
-    pub char_start: usize,
+    pub char_start: Chars,
     /// Where the replaced text ends, or `None` for the end of the line, which is how a
     /// change that reaches the row's old last character is spelled: it also takes any
     /// spaces Lisp padded the row with.
-    pub char_end: Option<usize>,
+    pub char_end: Option<Chars>,
     /// Characters of the whole row once the edit is made. Text past it in the buffer is
     /// padding Lisp added for a cursor that has since moved on, which rewriting the row
     /// would have removed, and so does an edit.
-    pub chars: usize,
+    pub chars: Chars,
     /// What replaces it.
     pub runs: Runs,
 }

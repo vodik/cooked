@@ -181,25 +181,33 @@ fn the_primary_keeps_its_head_through_the_alternate_screen() {
     // Two rows of `=` wrap onto a third and scroll the first away, so row 0 continues a
     // line whose head is in Emacs.
     let mut t = term(2, 4, b"==========");
-    assert_eq!(t.drain().head, 4, "precondition: row 0 continues a line");
+    assert_eq!(
+        t.drain().head,
+        Chars::new(4),
+        "precondition: row 0 continues a line"
+    );
 
     // The alternate screen's row 0 begins a buffer line, and the primary's continues the
     // same line again once it is back.
     t.feed(b"\x1b[?1049h");
-    assert_eq!(t.drain().head, 0);
+    assert_eq!(t.drain().head, Chars::ZERO);
     t.feed(b"\x1b[?1049l");
-    assert_eq!(t.drain().head, 4, "the primary's row 0 continues its line");
+    assert_eq!(
+        t.drain().head,
+        Chars::new(4),
+        "the primary's row 0 continues its line"
+    );
 
     // The same through a drain that leaves the screen out, and through a switch there
     // and back that no drain saw.
     let mut t = term(2, 4, b"==========");
     t.drain();
     t.feed(b"\x1b[?1049h");
-    assert_eq!(t.drain_hidden().head, 0);
+    assert_eq!(t.drain_hidden().head, Chars::ZERO);
     t.feed(b"\x1b[?1049l");
-    assert_eq!(t.drain().head, 4);
+    assert_eq!(t.drain().head, Chars::new(4));
     t.feed(b"\x1b[?1049h\x1b[?1049l");
-    assert_eq!(t.drain().head, 4);
+    assert_eq!(t.drain().head, Chars::new(4));
 }
 
 #[test]
@@ -212,7 +220,11 @@ fn a_resize_under_the_alternate_screen_carries_the_primarys_head_on() {
     t.drain();
     t.resize(1, 4);
     let delta = t.drain();
-    assert_eq!(delta.head, 0, "the alternate screen begins its own line");
+    assert_eq!(
+        delta.head,
+        Chars::ZERO,
+        "the alternate screen begins its own line"
+    );
     assert_eq!(
         delta
             .scrolled_lines(true)
@@ -222,7 +234,7 @@ fn a_resize_under_the_alternate_screen_carries_the_primarys_head_on() {
         "the row joins the primary's row 0 and not the alternate screen's"
     );
     t.feed(b"\x1b[?1049l");
-    assert_eq!(t.drain().head, 8);
+    assert_eq!(t.drain().head, Chars::new(8));
 }
 
 #[test]
@@ -1055,11 +1067,11 @@ fn the_drain_counts_the_cursor_in_characters_of_its_row() {
     // On `本`, which is the second character and columns 2 and 3.
     let mut t = term(2, 20, "\u{65e5}\u{672c}X\x1b[1;3H".as_bytes());
     let delta = t.drain();
-    assert_eq!((delta.levels.cursor.col, delta.cursor_chars), (2, 1));
+    assert_eq!((delta.levels.cursor.col, delta.cursor_chars.get()), (2, 1));
     // On its second column the cursor is still on `本`.
     t.feed(b"\x1b[1;4H");
-    assert_eq!(t.drain().cursor_chars, 1);
+    assert_eq!(t.drain().cursor_chars, Chars::ONE);
     // Past a combining mark, which is a character of its own in the buffer.
     let mut t = term(2, 20, "e\u{301}x\x1b[1;2H".as_bytes());
-    assert_eq!(t.drain().cursor_chars, 2);
+    assert_eq!(t.drain().cursor_chars, Chars::new(2));
 }

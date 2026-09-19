@@ -23,6 +23,7 @@
 use super::super::cell::{BLANK, Cell, Extra, Row, RowRef, chars_before, draws_nothing};
 use super::super::glyph;
 use super::super::screen::{Departed, Direction, Shift};
+use super::super::units::{Chars, Cols};
 
 /// One row of Emacs' copy of the screen, besides its cells.
 #[derive(Debug, Clone, Default)]
@@ -401,15 +402,15 @@ impl Front {
                 }));
             }
         }
-        let length = chars_before(new, new_extras(), new_len);
+        let length = chars_before(new, new_extras(), Cols::new(new_len));
         let Some((mut lo, mut hi)) = span else {
             // Nothing drawn differs, only the wrap flag: an empty replacement still has
             // Lisp mark the row's newline afresh.
             return Some(Span {
-                start: 0,
-                end: 0,
-                char_start: 0,
-                char_end: Some(0),
+                start: Cols::ZERO,
+                end: Cols::ZERO,
+                char_start: Chars::ZERO,
+                char_end: Some(Chars::ZERO),
                 length,
             });
         };
@@ -446,15 +447,18 @@ impl Front {
         let (char_end, end) = if hi >= old_len {
             (None, new_len.max(lo))
         } else {
-            (Some(chars_before(old, old_extras.iter(), hi)), hi)
+            (
+                Some(chars_before(old, old_extras.iter(), Cols::new(hi))),
+                hi,
+            )
         };
         if (end - lo) * 2 > cols {
             return None;
         }
         Some(Span {
-            start: lo,
-            end,
-            char_start: chars_before(old, old_extras.iter(), lo),
+            start: Cols::new(lo),
+            end: Cols::new(end),
+            char_start: chars_before(old, old_extras.iter(), Cols::new(lo)),
             char_end,
             length,
         })
@@ -509,15 +513,15 @@ impl Front {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) struct Span {
     /// The first column replaced.
-    pub(super) start: usize,
+    pub(super) start: Cols,
     /// One past the last column the replacement is rendered from.
-    pub(super) end: usize,
+    pub(super) end: Cols,
     /// Characters of the old text before the replacement.
-    pub(super) char_start: usize,
+    pub(super) char_start: Chars,
     /// Where the replaced text ends, or `None` for the end of the line.
-    pub(super) char_end: Option<usize>,
+    pub(super) char_end: Option<Chars>,
     /// Characters of the new text for the whole row.
-    pub(super) length: usize,
+    pub(super) length: Chars,
 }
 
 /// Columns up to the last one holding something, for cells and EXTRAS that are not a

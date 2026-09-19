@@ -129,6 +129,7 @@ pub(crate) mod style;
 pub(crate) mod term;
 pub(crate) mod terminfo;
 pub(crate) mod text;
+pub(crate) mod units;
 pub(crate) mod utf8;
 
 pub(crate) use cell::{Color, MarkId, Style};
@@ -161,3 +162,5 @@ pub use style::StyleId;
 pub use term::{
     BACKLOG_HIGH_WATER, DamagedRow, Delta, Edit, Feed, Levels, Progress, ReplyKind, Scrolled, Term,
 };
+// The units every offset and width in the drain protocol is measured in; see `units`.
+pub use units::{Bytes, Chars, Cols};

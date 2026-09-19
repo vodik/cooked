@@ -67,6 +67,7 @@ use super::sgr;
 use super::style::{StyleId, StyleStore};
 use super::term::osc::{hyperlink_uri, validated_text};
 use super::text::{Segmenter, Step, Width};
+use super::units::{Chars, Cols};
 use super::utf8::{Decoder, Piece};
 
 /// Columns one logical line may reach before it is retired to keep it bounded.
@@ -115,11 +116,11 @@ impl Column {
     /// marks contributes one per mark on top of its base. Every offset the wire format
     /// carries is a *character* offset into a multibyte Emacs string, so this is the
     /// count that has to be right -- see `Block::push_style'.
-    fn chars(&self) -> usize {
+    fn chars(&self) -> Chars {
         if self.is_continuation() {
-            0
+            Chars::ZERO
         } else {
-            1 + self.marks.as_ref().map_or(0, |m| m.chars().count())
+            Chars::new(1 + self.marks.as_ref().map_or(0, |m| m.chars().count()))
         }
     }
 
@@ -134,7 +135,7 @@ impl Column {
 pub(crate) struct Emission {
     /// Characters to delete immediately before the insertion point before inserting
     /// [`Emission::runs`]. Always zero when the caller passed `retract: false`.
-    pub(crate) retract: usize,
+    pub(crate) retract: Chars,
     /// The styled text, in the shape the grid's renderer already takes.
     ///
     /// Kept across feeds and cleared rather than rebuilt, so a chunk an interactive
@@ -151,7 +152,7 @@ pub(crate) struct Emission {
 
 impl Emission {
     fn clear(&mut self) {
-        self.retract = 0;
+        self.retract = Chars::ZERO;
         self.runs.clear();
         self.styles.clear();
         self.directory = None;
@@ -161,7 +162,7 @@ impl Emission {
     pub(crate) fn is_empty(&self) -> bool {
         // The styles too: a table the consumer never receives would leave a later run
         // naming an id it cannot resolve.
-        self.retract == 0
+        self.retract.is_zero()
             && self.runs.is_empty()
             && self.styles.is_empty()
             && self.directory.is_none()
@@ -490,14 +491,14 @@ impl Stream {
         let retract = self.emitted[common..]
             .iter()
             .map(Column::chars)
-            .sum::<usize>();
+            .sum::<Chars>();
         // Only the first flush of a feed can retract, and this is the invariant that
         // says so rather than a comment hoping it holds. The count is measured against
         // the buffer as it stood *before* this feed, so a second flush retracting
         // anything would be deleting text the first flush is in the middle of adding --
         // and the first flush is what empties `emitted', which is why it cannot.
         debug_assert!(
-            !self.flushed || retract == 0,
+            !self.flushed || retract.is_zero(),
             "a retraction after the first flush would be measured against the wrong text"
         );
         self.out.retract += retract;
@@ -537,7 +538,7 @@ impl Stream {
                     self.out.runs.push_str(marks);
                 }
             }
-            self.out.runs.add_cols(columns.len());
+            self.out.runs.add_cols(Cols::new(columns.len()));
         }
     }
 
@@ -784,7 +785,7 @@ mod tests {
         fn feed(&mut self, bytes: &str) -> &str {
             self.filter.feed(bytes.as_bytes(), true);
             let emission = self.filter.emission();
-            let keep = self.text.chars().count() - emission.retract;
+            let keep = self.text.chars().count() - emission.retract.get();
             self.text = self.text.chars().take(keep).collect();
             for run in &emission.runs {
                 self.text.push_str(run.text);
@@ -797,7 +798,11 @@ mod tests {
         fn feed_unsynced(&mut self, bytes: &str) -> &str {
             self.filter.feed(bytes.as_bytes(), false);
             let emission = self.filter.emission();
-            assert_eq!(emission.retract, 0, "an unsynced feed must not retract");
+            assert_eq!(
+                emission.retract,
+                Chars::ZERO,
+                "an unsynced feed must not retract"
+            );
             for run in &emission.runs {
                 self.text.push_str(run.text);
             }
@@ -847,7 +852,7 @@ mod tests {
         filter.feed(b"[###   ] 42%", true);
         filter.feed(b"\r[####  ] 51%", true);
         let emission = filter.emission();
-        assert_eq!(emission.retract, 8);
+        assert_eq!(emission.retract, Chars::new(8));
         let text: String = emission.runs.text().to_owned();
         assert_eq!(text, "#  ] 51%");
     }
@@ -1053,7 +1058,7 @@ mod tests {
     fn a_combining_mark_rides_the_character_before_it() {
         let runs = runs("e\u{301}\n");
         assert_eq!(runs.run(0).text, "e\u{301}");
-        assert_eq!(runs.run(0).cols, 1);
+        assert_eq!(runs.run(0).cols, Cols::ONE);
     }
 
     #[test]
@@ -1071,7 +1076,7 @@ mod tests {
         filter.feed("漢e\u{301}".as_bytes(), true);
         filter.feed(b"\rx", true);
         let emission = filter.emission();
-        assert_eq!(emission.retract, 3);
+        assert_eq!(emission.retract, Chars::new(3));
     }
 
     #[test]
@@ -1246,10 +1251,11 @@ mod tests {
                     return;
                 }
                 assert!(
-                    intact || emission.retract == 0,
+                    intact || emission.retract.is_zero(),
                     "an unsynced feed retracted"
                 );
-                self.shown.truncate(self.shown.len() - emission.retract);
+                self.shown
+                    .truncate(self.shown.len() - emission.retract.get());
                 let mut text = String::new();
                 for run in &emission.runs {
                     let style = self.filter.style(run.style);
@@ -1265,7 +1271,7 @@ mod tests {
                 if text.contains('\n') || !intact {
                     self.open = tail.to_string();
                 } else {
-                    let keep = self.open.chars().count() - emission.retract;
+                    let keep = self.open.chars().count() - emission.retract.get();
                     self.open = self.open.chars().take(keep).collect::<String>() + tail;
                 }
                 // `cooked-comint--place-open-start', once the text is in.

@@ -228,7 +228,7 @@ fn a_mark_survives_the_prompt_printed_over_it() {
     let marks: Vec<_> = t.screen().row(0).unwrap().marks().collect();
     assert_eq!(
         marks,
-        vec![(0, MarkId::from_index(0))],
+        vec![(Cols::ZERO, MarkId::from_index(0))],
         "the mark is still on column 0"
     );
     assert_eq!(text(&t, 0), "$", "and the prompt is still drawn");
@@ -245,7 +245,11 @@ fn a_rewrap_reports_where_each_mark_moved_to() {
     let mut t = term(4, 10, b"0123456789ab\x1b]133;A\x07");
     t.drain();
     assert!(
-        t.screen().row(1).unwrap().marks().any(|(col, _)| col == 2),
+        t.screen()
+            .row(1)
+            .unwrap()
+            .marks()
+            .any(|(col, _)| col == Cols::new(2)),
         "the mark starts on row 1, column 2"
     );
 

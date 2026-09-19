@@ -8,8 +8,8 @@
 use crate::emu::stream::Filter;
 use crate::emu::style::StyleId;
 use crate::emu::{
-    self, Anchor, Color, CursorShape, DamagedRow, Deco, Event, ImageData, ImageFormat, ImageId,
-    KeyEncoding, LinkId, Mark, MarkId, RunRef, Runs, Style,
+    self, Anchor, Bytes, Chars, Color, Cols, CursorShape, DamagedRow, Deco, Event, ImageData,
+    ImageFormat, ImageId, KeyEncoding, LinkId, Mark, MarkId, RunRef, Runs, Style,
 };
 use crate::env::{self, Env, Result, Value, lisp_enum, list, plist, sym};
 use crate::pty::Mode;
@@ -228,7 +228,7 @@ pub(crate) fn update_to_lisp<'e>(env: Env<'e>, update: &Update, rejoin: bool) ->
             let mut block = Block::new(&update.delta.fonts);
             block.push_runs(env, &edit.runs)?;
             block.rows.push(BlockRow {
-                start: 0,
+                start: Chars::ZERO,
                 ..Block::measure(&update.delta.fonts, &row.runs, row.wrapped)
             });
             env.cons(
@@ -349,7 +349,7 @@ pub(crate) struct Block<'a, 'e> {
     text: String,
     styles: Vec<u8>,
     decos: Vec<Value<'e>>,
-    offset: usize,
+    offset: Chars,
     /// The font bits of every rendition id the runs may name, indexed by id; see
     /// `StyleStore::font_bits`. Read only for the layout hash, which is why an empty
     /// table -- scrollback, the comint filter -- costs nothing but a hash that ignores
@@ -370,14 +370,14 @@ pub(crate) struct Block<'a, 'e> {
     ///
     /// Accumulated for the row being built and banked by [`Block::end_row`]. Scrollback
     /// never calls `end_row`, and nothing reads its sum.
-    cols: usize,
+    cols: Cols,
     /// The worst [`Uniformity`] of any run pushed into the row being built.
     ///
     /// Per row and reset by [`Block::end_row`], so one mixed row neither slows a coalesced
     /// run nor hides behind a neighbour.
     uniformity: Uniformity,
     /// Where the row being built begins in `text`, in bytes, for hashing its text.
-    row_start_byte: usize,
+    row_start_byte: Bytes,
     /// The font-changing renditions pushed into the row being built, folded together with
     /// where they fall; see [`BlockRow::hash`].
     fonts: u64,
@@ -386,7 +386,7 @@ pub(crate) struct Block<'a, 'e> {
     /// Moved by [`Block::end_row`] and by [`Block::push_newline`], which are the two
     /// ways a row can end: a damaged run puts a newline between its rows but not after
     /// the last one, so neither call alone can keep this right.
-    row_start: usize,
+    row_start: Chars,
     /// One entry per screen row closed with [`Block::end_row`], in order. Empty for
     /// scrollback, which closes none.
     rows: Vec<BlockRow>,
@@ -402,8 +402,8 @@ pub(crate) struct Block<'a, 'e> {
 /// has to decide whether its own layout of the row disagrees with the grid's.
 #[derive(Clone, Copy)]
 struct BlockRow {
-    start: usize,
-    cols: usize,
+    start: Chars,
+    cols: Cols,
     uniform: Uniformity,
     /// [`Row::wrapped`](crate::emu::cell::Row::wrapped): the row below continues this
     /// row's logical line, so the newline between them is a soft wrap the child never
@@ -455,9 +455,9 @@ enum Uniformity {
 impl Uniformity {
     /// What one run contributes.
     fn of(run: RunRef<'_>) -> Self {
-        if run.cols != run.chars {
+        if !run.one_cell_per_char() {
             Self::Mixed
-        } else if run.text.len() == run.chars {
+        } else if run.one_byte_per_char() {
             Self::Ascii
         } else if matches!(run.deco, Some(Deco::Glyphs(_))) {
             Self::Glyphs
@@ -513,10 +513,10 @@ impl<'a, 'e> Block<'a, 'e> {
     /// A span whose offsets do not fit is dropped rather than clamped. It takes 4.29
     /// billion characters between two drains, but dropping loses the colour of text far
     /// off screen, while clamping would paint it over text that is on screen.
-    fn push_style(&mut self, chars: usize, style: StyleId, link: Option<LinkId>) {
+    fn push_style(&mut self, chars: Chars, style: StyleId, link: Option<LinkId>) {
         let (Ok(start), Ok(end)) = (
-            u32::try_from(self.offset),
-            u32::try_from(self.offset + chars),
+            u32::try_from(self.offset.get()),
+            u32::try_from((self.offset + chars).get()),
         ) else {
             return;
         };
@@ -570,10 +570,10 @@ impl<'a, 'e> Block<'a, 'e> {
             .copied()
             .unwrap_or(0);
         if font != 0 {
-            let at = (self.offset - self.row_start) as u64;
+            let at = (self.offset - self.row_start).get() as u64;
             self.fonts = emu::mix(
                 self.fonts,
-                (at << 32) | ((chars as u64) << 8) | u64::from(font),
+                (at << 32) | ((chars.get() as u64) << 8) | u64::from(font),
             );
         }
         if !run.style.is_default() || run.link.is_some() {
@@ -598,11 +598,13 @@ impl<'a, 'e> Block<'a, 'e> {
 
     fn push_newline(&mut self) {
         self.text.push('\n');
-        self.offset += 1;
+        // The newline Emacs holds between two rows is a character of the block's text
+        // like any other, and every offset after it counts it.
+        self.offset += Chars::ONE;
         // The text of whatever comes next starts after this newline. Scrollback does not
         // need it, and one store is cheaper than a second `push_newline`.
         self.row_start = self.offset;
-        self.row_start_byte = self.text.len();
+        self.row_start_byte = Bytes::of(&self.text);
     }
 
     /// Close the screen row being built: bank where it began and what it measured, and
@@ -611,7 +613,7 @@ impl<'a, 'e> Block<'a, 'e> {
     /// Called once per damaged row and never for scrollback: a live row is a fixed-width
     /// slot whose layout Emacs can get wrong, while a scrollback line may wrap.
     fn end_row(&mut self, wrapped: bool) {
-        let text = emu::fast_hash(&self.text.as_bytes()[self.row_start_byte..]);
+        let text = emu::fast_hash(&self.text.as_bytes()[self.row_start_byte.get()..]);
         self.rows.push(BlockRow {
             start: self.row_start,
             cols: self.cols,
@@ -619,11 +621,11 @@ impl<'a, 'e> Block<'a, 'e> {
             wrapped,
             hash: emu::mix(text, self.fonts) & ((1 << 60) - 1),
         });
-        self.cols = 0;
+        self.cols = Cols::ZERO;
         self.uniformity = Uniformity::Ascii;
         self.fonts = 0;
         self.row_start = self.offset;
-        self.row_start_byte = self.text.len();
+        self.row_start_byte = Bytes::of(&self.text);
     }
 
     fn into_lisp(self, env: &Env<'e>) -> Result<Value<'e>> {
@@ -657,8 +659,8 @@ impl<'a, 'e> Block<'a, 'e> {
 /// wrapped row to the line above instead of starting a new one.
 #[derive(Clone, Copy, Default)]
 struct RowSpan {
-    start: usize,
-    chars: usize,
+    start: Chars,
+    chars: Chars,
 }
 
 impl Update {
@@ -685,13 +687,15 @@ impl Update {
         let mut promoted = Vec::with_capacity(promotion);
         let mut rows: Vec<RowSpan> = Vec::with_capacity(self.delta.scrolled.len());
         // Characters, newlines included, of the promoted rows before the block's text.
-        let mut kept = 0;
+        let mut kept = Chars::ZERO;
 
         for (i, (line, ends)) in self.delta.scrolled_lines(rejoin).enumerate() {
             if i < promotion {
                 let chars = line.runs.chars();
                 rows.push(RowSpan { start: kept, chars });
-                kept += chars + usize::from(ends);
+                // The newline after a promoted row is a character of the buffer's text
+                // too, so the next row starts one further along.
+                kept += chars + Chars::new(usize::from(ends));
                 promoted.push(env.cons(env.into_lisp(chars)?, env.into_lisp(ends)?)?);
                 continue;
             }
@@ -741,11 +745,13 @@ impl Update {
             );
         }
         match at.row.checked_sub(base).and_then(|i| rows.get(i)) {
-            // Trailing blanks are trimmed out of the runs, so an offset past the end of
-            // what the row actually kept is clamped rather than run off the line.
+            // The drain has already turned the anchor's column into characters, so
+            // naming the unit is the whole of the conversion left here. Trailing blanks
+            // are trimmed out of the runs, so an offset past the end of what the row
+            // actually kept is clamped rather than run off the line.
             Some(row) => env.cons(
                 sym!(env, "scrolled")?,
-                env.into_lisp(row.start + at.col.min(row.chars))?,
+                env.into_lisp(row.start + Chars::new(at.col).min(row.chars))?,
             ),
             None => Ok(env.nil()),
         }
@@ -1002,7 +1008,7 @@ mod tests {
     /// The record a `Block` holding exactly one span would have.
     fn record(style: StyleId, link: Option<LinkId>) -> Vec<u8> {
         let mut block = Block::default();
-        block.push_style(1, style, link);
+        block.push_style(Chars::ONE, style, link);
         block.styles
     }
 
@@ -1039,7 +1045,11 @@ mod tests {
             unlinked: true,
             ..Block::default()
         };
-        block.push_style(1, StyleId::from_raw(7), Some(LinkId::from_index(2)));
+        block.push_style(
+            Chars::ONE,
+            StyleId::from_raw(7),
+            Some(LinkId::from_index(2)),
+        );
         assert_eq!(u32_at(&block.styles, 12), 0);
     }
 
@@ -1051,10 +1061,10 @@ mod tests {
     #[test]
     fn an_offset_past_a_u16_packs_at_full_width_rather_than_wrapping() {
         let mut block = Block {
-            offset: 70_000,
+            offset: Chars::new(70_000),
             ..Default::default()
         };
-        block.push_style(5, StyleId::DEFAULT, None);
+        block.push_style(Chars::new(5), StyleId::DEFAULT, None);
         assert_eq!(u32_at(&block.styles, 0), 70_000, "start");
         assert_eq!(u32_at(&block.styles, 4), 70_005, "end");
     }
@@ -1126,7 +1136,7 @@ mod tests {
     fn each_row_of_a_block_carries_its_own_width_and_uniformity() {
         let row = |text: &str, cols: usize| Run {
             text: text.to_string(),
-            cols,
+            cols: Cols::new(cols),
             ..Run::default()
         };
         let mut block = Block::default();
@@ -1147,7 +1157,7 @@ mod tests {
         let table: Vec<(usize, usize, Uniformity, bool)> = block
             .rows
             .iter()
-            .map(|r| (r.start, r.cols, r.uniform, r.wrapped))
+            .map(|r| (r.start.get(), r.cols.get(), r.uniform, r.wrapped))
             .collect();
         assert_eq!(
             table,
@@ -1171,13 +1181,13 @@ mod tests {
     fn a_row_of_box_glyphs_is_uniform_only_while_nothing_else_needs_the_font() {
         let glyphs = |text: &str| Run {
             text: text.to_string(),
-            cols: text.chars().count(),
+            cols: Cols::new(text.chars().count()),
             deco: Some(Deco::Glyphs(Vec::new())),
             ..Run::default()
         };
         let plain = |text: &str, cols: usize| Run {
             text: text.to_string(),
-            cols,
+            cols: Cols::new(cols),
             ..Run::default()
         };
         let mut block = Block::default();
@@ -1216,7 +1226,7 @@ mod tests {
         };
         let run = |text: &str, style: StyleId| Run {
             text: text.to_string(),
-            cols: text.chars().count(),
+            cols: Cols::new(text.chars().count()),
             style,
             ..Run::default()
         };
@@ -1238,10 +1248,10 @@ mod tests {
     #[test]
     fn a_span_whose_offsets_do_not_fit_is_dropped_and_never_clamped() {
         let mut block = Block {
-            offset: usize::try_from(u32::MAX).unwrap(),
+            offset: Chars::new(usize::try_from(u32::MAX).unwrap()),
             ..Default::default()
         };
-        block.push_style(2, StyleId::DEFAULT, None);
+        block.push_style(Chars::new(2), StyleId::DEFAULT, None);
         assert!(
             block.styles.is_empty(),
             "an unrepresentable span leaves no record: {:?}",

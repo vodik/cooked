@@ -38,8 +38,8 @@ fn a_declared_width_overrides_what_a_width_table_would_say() {
     let runs = t.screen().row(0).unwrap().runs();
     assert_eq!(runs.iter().map(|r| r.text).collect::<String>(), "Half");
     assert_eq!(
-        runs.iter().map(|r| r.cols).sum::<usize>(),
-        2,
+        runs.iter().map(|r| r.cols).sum::<Cols>(),
+        Cols::new(2),
         "four characters standing on the two cells the child declared"
     );
     assert_eq!(t.screen().cursor().col, 2);
@@ -56,7 +56,7 @@ fn a_declared_width_lays_down_continuation_cells_like_any_wide_character() {
     assert_eq!(cells[3].ch, 'y');
     // One run: the `y` shares the pen, so it joins the block's run and the column count
     // covers both — three declared cells plus the one the `y` stands on.
-    assert_eq!(t.screen().row(0).unwrap().runs().run(0).cols, 4);
+    assert_eq!(t.screen().row(0).unwrap().runs().run(0).cols, Cols::new(4));
 }
 
 #[test]
@@ -148,7 +148,7 @@ fn a_zwj_emoji_family_stands_on_two_cells_and_not_on_six() {
     assert!(cells[1].is_continuation());
     assert_eq!(cells[2].ch, '|');
     let runs = t.screen().row(0).unwrap().runs();
-    assert_eq!(runs.iter().map(|r| r.cols).sum::<usize>(), 3);
+    assert_eq!(runs.iter().map(|r| r.cols).sum::<Cols>(), Cols::new(3));
     assert_eq!(
         runs.iter().map(|r| r.text).collect::<String>(),
         "\u{1F468}\u{200D}\u{1F469}\u{200D}\u{1F467}|",
@@ -286,7 +286,8 @@ fn cell_clusters(t: &Term, cols: usize) -> Vec<String> {
     starts
         .windows(2)
         .map(|pair| {
-            text[row.chars_before(pair[0])..row.chars_before(pair[1])]
+            text[row.chars_before(Cols::new(pair[0])).get()
+                ..row.chars_before(Cols::new(pair[1])).get()]
                 .iter()
                 .collect()
         })
@@ -352,7 +353,7 @@ fn a_mark_after_a_declared_block_joins_the_block() {
     assert_eq!(t.screen().cursor().col, 3);
     let runs = t.screen().row(0).unwrap().runs();
     assert_eq!(runs.run(0).text, "x\u{301}");
-    assert_eq!(runs.run(0).cols, 3);
+    assert_eq!(runs.run(0).cols, Cols::new(3));
 }
 
 /// Row 0 cell by cell, a continuation spelled `+`, so a torn wide character shows as a

@@ -319,7 +319,7 @@ impl State {
         let id = MarkId::from_index(self.next_mark);
         self.next_mark = self.next_mark.wrapping_add(1);
         if let Some(row) = at.row.checked_sub(self.evicted_total) {
-            self.screens.primary.mark(row, at.col, id);
+            self.screens.primary.mark(row, Cols::new(at.col), id);
         }
         id
     }
@@ -359,7 +359,7 @@ impl State {
                     id,
                     Anchor {
                         row: base + index,
-                        col: row.chars_before(col),
+                        col: row.chars_before(col).get(),
                     },
                 )
             })
