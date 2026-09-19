@@ -304,6 +304,10 @@ symbols! {
     SymbolValue => "symbol-value",
     LastInputEvent => "last-input-event",
     Consp => "consp",
+    // How `to_key` and `symbol_name` read the key Lisp named, on the same keystroke:
+    // once for the key itself and once more for each of its modifiers.
+    Symbolp => "symbolp",
+    SymbolName => "symbol-name",
     // Every `plist!` key in the module. They are interned once each here instead of once
     // each per drain, which is where fifteen of them were being rebuilt sixty times a
     // second. `sym_index` makes leaving one out a compile error rather than a silent

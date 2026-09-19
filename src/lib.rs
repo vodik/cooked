@@ -871,7 +871,7 @@ fn send_mouse_report<'e>(env: Env<'e>, args: &[Value<'e>]) -> Result<Value<'e>> 
 fn to_key<'e>(env: Env<'e>, value: Value<'e>) -> Result<Option<Key>> {
     // `symbolp' first, as `to_signal' asks it: a failed `from_lisp' leaves a non-local
     // exit pending, so there is no extracting the integer and falling back to the name.
-    if !env.is_nil(env.call("symbolp", &[value])?) {
+    if !env.is_nil(env.funcall(sym!(env, "symbolp")?, &[value])?) {
         return Ok(Key::parse_name(&symbol_name(env, value)?));
     }
     Ok(Key::parse_char(env.from_lisp::<i64>(value)?))
@@ -884,7 +884,7 @@ fn to_key<'e>(env: Env<'e>, value: Value<'e>) -> Result<Option<Key>> {
 /// seventy symbols kept in step with the one in `keypress.rs' would be a second place for
 /// a key to go missing from.
 fn symbol_name<'e>(env: Env<'e>, value: Value<'e>) -> Result<String> {
-    env.from_lisp::<String>(env.call("symbol-name", &[value])?)
+    env.from_lisp::<String>(env.funcall(sym!(env, "symbol-name")?, &[value])?)
 }
 
 /// The modifiers a list of `event-modifiers' symbols names.
@@ -1132,8 +1132,8 @@ fn to_signal(env: Env, value: Value) -> Result<Signal> {
     // Asked before `from_lisp`, not after: a failed conversion leaves a non-local exit
     // pending on the Emacs side, and everything after it is a no-op until Lisp unwinds.
     // So there is no trying the number first and falling back to the name.
-    if !env.is_nil(env.call("symbolp", &[value])?) {
-        let name = env.from_lisp::<String>(env.call("symbol-name", &[value])?)?;
+    if !env.is_nil(env.funcall(sym!(env, "symbolp")?, &[value])?) {
+        let name = env.from_lisp::<String>(env.funcall(sym!(env, "symbol-name")?, &[value])?)?;
         return name
             .to_uppercase()
             .parse()
