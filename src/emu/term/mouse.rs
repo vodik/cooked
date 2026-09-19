@@ -67,6 +67,10 @@ impl Button {
     const MOTION: u8 = 32;
     /// The bit moving the low two bits into the wheel's notches, 64 to 67.
     const WHEEL: u8 = 64;
+    /// The three bits xterm's tables call shift (4), meta (8) and control (16): the only
+    /// ones a release still carries, because they describe the keyboard rather than the
+    /// gesture.
+    const MODIFIERS: u8 = 4 | 8 | 16;
 
     /// RAW as a button byte, or `None` for a number that cannot be one.
     ///
@@ -83,17 +87,23 @@ impl Button {
         u32::from(self.0)
     }
 
-    /// The number an X10 report names, which is the byte for a press and
-    /// [`Button::NONE`] for a release.
+    /// The number an X10 report names, which is the byte for a press and, for a release,
+    /// [`Button::NONE`] with whatever of [`Button::MODIFIERS`] was held.
     ///
-    /// The original form has no field for the button being let go of, so every release is
-    /// button 3 -- which is why a wheel notch released cannot say which way the wheel
-    /// turned, and why `Mouse` prefers 1006 wherever the child has offered it.
+    /// The original form has no field for the button being let go of, so every release
+    /// names no button -- which is why a wheel notch released cannot say which way the
+    /// wheel turned, and why `Mouse` prefers 1006 wherever the child has offered it. xterm's
+    /// ctlseqs still has the modifiers surviving a release, so shift, meta and control are
+    /// kept; the motion bit, the wheel bit and 128 are not, since none of them describes the
+    /// keyboard and a wheel byte kept whole would report a release as a notch. Lisp sets
+    /// none of the three today -- `cooked--mouse-buttons` and `cooked--report-motion` never
+    /// add a modifier bit -- so no byte cooked currently emits changes; this only stops
+    /// being true once one is added.
     fn x10(self, pressed: bool) -> u32 {
         if pressed {
             self.get()
         } else {
-            u32::from(Self::NONE)
+            u32::from((self.0 & Self::MODIFIERS) | Self::NONE)
         }
     }
 
@@ -305,6 +315,27 @@ mod tests {
         assert_ne!(
             m.report(b(64), 3, 5, true, None, None),
             m.report(b(65), 3, 5, true, None, None)
+        );
+    }
+
+    #[test]
+    fn an_x10_release_keeps_the_modifiers_and_nothing_else() {
+        let m = mouse(MouseFormat::X10);
+        // A plain release still names no button.
+        assert_eq!(m.report(b(0), 0, 0, false, None, None), b"\x1b[M#!!");
+        // A control-click released keeps the control bit.
+        assert_eq!(m.report(b(16), 0, 0, false, None, None), b"\x1b[M3!!");
+        // Shift and meta together released keep both.
+        assert_eq!(m.report(b(12), 0, 0, false, None, None), b"\x1b[M/!!");
+        // A wheel notch released names no button, not a notch: 64 through 67 all become 3.
+        assert_eq!(
+            m.report(b(65), 0, 0, false, None, None),
+            b"\x1b[M#!!".as_slice()
+        );
+        // A drag released is the same as a plain release: the motion bit does not survive.
+        assert_eq!(
+            m.report(b(32), 0, 0, false, None, None),
+            b"\x1b[M#!!".as_slice()
         );
     }
 
