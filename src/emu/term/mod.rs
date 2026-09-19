@@ -985,8 +985,12 @@ impl Term {
     /// Drop what a child has stopped sending: a chunked picture with no chunk for
     /// [`crate::emu::kitty::TRANSFER_TIMEOUT`]. For the reader's tick, which is the one
     /// thing that runs while the child is quiet.
-    pub fn sweep(&mut self) {
-        self.state.kitty.abandon_stale(std::time::Instant::now());
+    ///
+    /// NOW comes from the caller rather than the clock here, because the session has one
+    /// clock and it is the notifier's; see `Shared::now`. Abandonment is then a deadline a
+    /// test can step to like any other.
+    pub fn sweep(&mut self, now: std::time::Instant) {
+        self.state.kitty.abandon_stale(now);
     }
 
     /// Send replies to [`Term::take_outbound`] from now on, rather than with the drain,

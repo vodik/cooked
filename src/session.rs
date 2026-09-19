@@ -1312,7 +1312,8 @@ impl Session {
             self.shared.notifier.expect_echo();
         }
         self.shared.interacted();
-        let wait = Wait::new(std::time::Instant::now() + WRITE_TIMEOUT, stop);
+        let now = || self.shared.now();
+        let wait = Wait::new(WRITE_TIMEOUT, &now, stop);
         // Taken before the writer mutex, so a second sender waiting for that one does not
         // let the first sender's exemption lapse; see [`Sending`].
         let _sending = Sending::on(&self.shared);
@@ -1794,7 +1795,7 @@ impl Shared {
             let full = {
                 let mut term = self.term.held();
                 // Once a tick, while the lock is held anyway: see `Term::sweep`.
-                term.sweep();
+                term.sweep(self.now());
                 term.backlog() >= self.backlog_limit.load(Ordering::Relaxed)
             };
             // Not while a send is blocked on the child, which the throttle would
@@ -2040,6 +2041,18 @@ impl Shared {
         // byte goes out regardless of the throttle.
         self.notifier.acknowledge();
         self.notify();
+    }
+
+    /// The instant every deadline in this session is measured from; see [`Clock`].
+    ///
+    /// The notifier owns the clock because the pacing rules are what it exists for, and
+    /// the two deadlines outside it -- the write timeout in [`Session::send`] and the
+    /// kitty transfer sweep in [`Term::sweep`] -- read it through here rather than calling
+    /// `Instant::now` past it. One clock per session is what lets a test drive all of
+    /// them, and a session with two notions of now would have rules that cannot be
+    /// related to each other.
+    fn now(&self) -> std::time::Instant {
+        self.notifier.clock.now()
     }
 
     /// The emulator, locked, for a thread that is not the reader.
@@ -3406,6 +3419,57 @@ mod tests {
             start.elapsed() < WRITE_TIMEOUT / 2,
             "took {:?}, which is the deadline and not the stop",
             start.elapsed()
+        );
+    }
+
+    /// A write the child never takes ends at the deadline, and the deadline is the
+    /// session's clock rather than the wall.
+    ///
+    /// The write timeout used to be the one rule in this module that could only be
+    /// watched by sitting through it: `Session::send` built its deadline from
+    /// `Instant::now` and `Wait::check` compared against `Instant::now` again, both past
+    /// the injected [`Clock`]. Both now read the session's clock, so this steps the
+    /// deadline past instead -- a ticker thread winding the clock on while Emacs' thread
+    /// is blocked in `Pty::write`, which is the one shape a test for this can take, since
+    /// the thread under test is the one that would otherwise do the stepping.
+    ///
+    /// Raw mode with no echo and a child that reads nothing, so the pty's input queue
+    /// fills and the write has to wait; `stop` says no, so the deadline is the only way
+    /// out. Real time elapsed is what says the clock drove it: with `Wait` reading the
+    /// wall again this takes the full [`WRITE_TIMEOUT`].
+    #[test]
+    fn a_write_the_child_never_takes_ends_at_the_stepped_deadline() {
+        let clock = TestClock::new();
+        let (session, _read) = session_with(
+            &["/bin/sh", "-c", "stty raw -echo; sleep 300"],
+            Options {
+                clock: clock.clock(),
+                ..Options::default()
+            },
+        );
+        let winding = AtomicBool::new(true);
+        let (result, elapsed) = std::thread::scope(|scope| {
+            // Wound from the start, not just around the write: the reader thread reads
+            // this clock too, and a frozen one leaves it polling on deadlines that never
+            // retire.
+            scope.spawn(|| {
+                while winding.load(Ordering::SeqCst) {
+                    clock.advance(WRITE_TIMEOUT / 4);
+                    std::thread::sleep(Duration::from_millis(1));
+                }
+            });
+            wait_for(&session, |u| u.mode == Mode::Raw);
+            let start = Instant::now();
+            let result = session.send(&vec![b'x'; 1 << 20], Input::Other, &|| false);
+            let elapsed = start.elapsed();
+            winding.store(false, Ordering::SeqCst);
+            (result, elapsed)
+        });
+        assert_eq!(result, Err(crate::error::Error::WriteTimeout));
+        assert!(
+            elapsed < WRITE_TIMEOUT / 2,
+            "the write took {elapsed:?} of real time, so it waited on the wall and not \
+             on the clock the test stepped"
         );
     }
 

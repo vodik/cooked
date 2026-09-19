@@ -235,22 +235,35 @@ const STOP_CHECK: std::time::Duration = std::time::Duration::from_millis(50);
 /// passed. The question is for the thread holding the `emacs_env`: `should_quit` says the
 /// user pressed `C-g`, and a paste into a stopped job should stop then rather than three
 /// seconds later. A caller with nothing to ask passes `&|| false`.
+///
+/// The time is asked for the same way, and for the same reason the deadlines in
+/// `session.rs` are read through a `Clock`: a test that waits out real seconds to watch
+/// this one fire is a test that can be wrong about time. NOW is the session's clock, so
+/// `a_write_the_child_never_takes_ends_at_the_deadline` steps the deadline past rather
+/// than sitting through [`WRITE_TIMEOUT`].
 pub(crate) struct Wait<'a> {
     deadline: std::time::Instant,
+    now: &'a dyn Fn() -> std::time::Instant,
     stop: &'a dyn Fn() -> bool,
 }
 
 impl<'a> Wait<'a> {
-    /// Wait until DEADLINE, asking STOP along the way.
-    pub(crate) fn new(deadline: std::time::Instant, stop: &'a dyn Fn() -> bool) -> Self {
-        Self { deadline, stop }
+    /// Wait BUDGET from NOW's reading of the clock, asking NOW and STOP along the way.
+    pub(crate) fn new(
+        budget: std::time::Duration,
+        now: &'a dyn Fn() -> std::time::Instant,
+        stop: &'a dyn Fn() -> bool,
+    ) -> Self {
+        Self {
+            deadline: now() + budget,
+            now,
+            stop,
+        }
     }
 
     /// The error to give up with now, if any: the deadline has passed, or STOP says so.
     fn check(&self) -> Result<std::time::Duration> {
-        let remaining = self
-            .deadline
-            .saturating_duration_since(std::time::Instant::now());
+        let remaining = self.deadline.saturating_duration_since((self.now)());
         if remaining.is_zero() {
             return Err(Error::WriteTimeout);
         }
