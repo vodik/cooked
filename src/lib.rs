@@ -231,6 +231,52 @@ pub unsafe extern "C" fn emacs_module_init(runtime: *mut Runtime) -> std::ffi::c
         /// region and where the pointer is.
         "cooked--send-mouse-report" 5..=7 => send_mouse_report;
 
+        /// Hand TEXT to SESSION's child as a paste.
+        ///
+        /// Control bytes are taken out of it, the child's DEC mode 2004 is read, and the
+        /// text is bracketed or its newlines turned into carriage returns accordingly --
+        /// all of that here, so the mode that decides cannot change between being read
+        /// and being acted on. See `cooked--strip-paste-controls' for what is taken out
+        /// and why it is taken out whether or not the paste is bracketed.
+        ///
+        /// Whether to paste at all is still Lisp's: `cooked--send-paste' confirms a
+        /// multi-line paste that an unbracketing child would run a line at a time, which
+        /// is a question for the user rather than for the terminal.
+        "cooked--send-paste-text" 2..=2 => send_paste_text;
+
+        /// TEXT with the control bytes a paste may not carry turned into spaces.
+        ///
+        /// NUL, BS, ENQ, EOT, ESC and DEL, plus the tty driver's own special characters
+        /// -- C-c, C-\\, C-u, C-z, C-q, C-s, C-w, C-v, C-r and C-o. That is xterm's
+        /// `disallowedPasteControls' default, and cooked's reason for it is xterm's: a
+        /// copied escape sequence pasted into a shell can arrive as key presses, and a
+        /// copied C-c can kill the command it was meant to be pasted into, neither of
+        /// them visible in the text that was copied.
+        ///
+        /// TAB, LF and CR are deliberately left alone: a paste is expected to contain
+        /// lines and indentation.
+        ///
+        /// Spaces rather than deletions, again as xterm does, so the byte count survives
+        /// and a paste that was tampered with looks wrong rather than looking like
+        /// something shorter that was pasted on purpose.
+        ///
+        /// `cooked--send-paste' does this on its way to the child; this is for the
+        /// caller that must strip part of a string rather than the whole of it, which is
+        /// `cooked--strip-pasted-controls' over the yanked parts of a line being edited.
+        "cooked--strip-paste-controls" 1..=1 => strip_paste_controls;
+
+        /// TEXT wrapped in the bracketed-paste markers, made safe to wrap.
+        ///
+        /// Any end marker inside TEXT is dropped, to a fixed point: one left in would
+        /// close the bracket early and hand whatever followed it to the child as if it
+        /// had been typed, which is how a copied line runs something nobody read.
+        ///
+        /// `cooked--send-paste' does this itself when the child has asked for mode 2004.
+        /// This is for `cooked--send-input-string', which brackets a multi-line
+        /// submission -- so that a shell's line editor reads it as one edit rather than
+        /// running each line as it arrives -- and appends the Return itself.
+        "cooked--bracketed-paste" 1..=1 => bracketed_paste;
+
         /// Owe SESSION's child STRING, a reply, without waiting for it to be read.
         /// Queued behind earlier replies and written as far as the pty has room for now;
         /// the rest follows once the child reads. Never blocks and never signals: a child
@@ -738,6 +784,37 @@ fn send_mouse_report(env: Env, args: &[Value]) -> Result<Value> {
     };
     write_input(env, args[0], &mut bytes)?;
     env.into_lisp(true)
+}
+
+/// Compose a paste against the mode the child holds now; see `cooked--send-paste-text'.
+fn send_paste_text(env: Env, args: &[Value]) -> Result<Value> {
+    let mut text = env.from_lisp::<String>(args[1])?;
+    let mut bytes = {
+        let session = handle(env, args[0])?;
+        // The lock covers the strip, the mode and the framing, and is let go before the
+        // write, which can wait out a child that is not reading.
+        session.term().paste(&text)
+    };
+    let result = write_input(env, args[0], &mut bytes);
+    // A paste out of a password manager is the ordinary way a password is typed, so the
+    // copy of the text this made is zeroed alongside the bytes `write_input` zeroes. A
+    // `\0` is valid UTF-8, so the string is still a string while this runs.
+    for b in unsafe { text.as_bytes_mut() } {
+        unsafe { std::ptr::write_volatile(b, 0) };
+    }
+    std::sync::atomic::compiler_fence(std::sync::atomic::Ordering::SeqCst);
+    result?;
+    Ok(env.nil())
+}
+
+fn strip_paste_controls(env: Env, args: &[Value]) -> Result<Value> {
+    let text = env.from_lisp::<String>(args[0])?;
+    env.into_lisp(emu::strip_paste_controls(&text).as_str())
+}
+
+fn bracketed_paste(env: Env, args: &[Value]) -> Result<Value> {
+    let text = env.from_lisp::<String>(args[0])?;
+    env.into_lisp(emu::bracket_paste(&text).as_str())
 }
 
 fn reply(env: Env, args: &[Value]) -> Result<Value> {

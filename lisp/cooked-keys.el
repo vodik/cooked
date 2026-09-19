@@ -775,61 +775,14 @@ point of the protocol."
   :type 'boolean
   :group 'cooked)
 
-(defun cooked--bracketed-paste (text)
-  "TEXT wrapped in the bracketed-paste markers, made safe to wrap.
-
-Any end marker inside TEXT is dropped.  One left in would close the bracket
-early and hand whatever followed it to the child as if it had been typed —
-which is how a copied line runs something you never read.  The child is told
-where the paste ends; nothing in the middle gets to say otherwise.
-
-Kept even though `cooked--strip-paste-controls' has already turned every ESC
-in a paste into a space, which leaves no marker for this to find: the two
-guards answer to different callers, and a marker assembled without an ESC --
-or a future caller that skips the strip -- must still not close the bracket."
-  (let ((end (cooked--csi "~" 201)))
-    (concat (cooked--csi "~" 200) (string-replace end "" text) end)))
-
-(defconst cooked--paste-strip-regexp
-  "[\000\010\005\004\033\177\003\034\025\032\021\023\027\026\022\017]"
-  "Bytes replaced by a space in anything pasted to the child.
-
-This is xterm's list, whose `disallowedPasteControls' resource defaults to
-`BS,DEL,ENQ,EOT,ESC,NUL,STTY' (xterm's own \\=`main.h\\=',
-`DEF_DISALLOWED_PASTE_CONTROLS'): NUL, BS, ENQ, EOT, ESC and DEL, plus --
-that is what the `STTY' keyword means -- the tty driver's own special
-characters, which xterm reads live with `tcgetattr'.
-
-Those are spelled out here at their conventional values rather than read
-from the child's termios: VINTR C-c, VQUIT C-\\, VKILL C-u, VSUSP C-z,
-VSTART C-q, VSTOP C-s, VWERASE C-w, VLNEXT C-v, VREPRINT C-r, VDISCARD
-C-o.  cooked's core samples the child's termios but exposes only the mode
-it implies, not `c_cc', and a program that has remapped its interrupt key
-is rare enough not to be worth the plumbing -- ghostty made the same call
-and wrote the same caveat down.
-
-What is deliberately *not* here is as important: TAB, LF and CR go through
-untouched, because a paste is expected to contain lines and indentation.
-LF is dealt with separately by `cooked--send-paste', and is the one byte a
-paste can carry that runs something -- which is why it is confirmed rather
-than mangled.")
-
-(defun cooked--strip-paste-controls (text)
-  "TEXT with the bytes in `cooked--paste-strip-regexp' turned into spaces.
-
-Unconditional, and in particular not conditional on bracketed paste, which
-is the same posture as xterm.  Bracketing tells a *cooperating* reader
-where the paste ends; it does nothing about a byte the tty driver acts on
-before any reader sees it, and nothing at all about a program that does
-not implement the protocol but is being pasted into anyway.  A copied ESC
-sequence pasted into a shell can arrive as key presses, a copied C-c can
-kill the command the user meant to paste into, and neither is visible in
-the text they copied.
-
-Turned into spaces rather than dropped, again as xterm does: the byte
-count survives, so a paste that was tampered with looks wrong rather than
-looking like something shorter that was pasted on purpose."
-  (replace-regexp-in-string cooked--paste-strip-regexp " " text t t))
+;; The strip list, the bracketing and the mode that chooses between them are the
+;; core's, in src/emu/term/paste.rs: `cooked--strip-paste-controls',
+;; `cooked--bracketed-paste' and `cooked--send-paste-text'.  What is stripped is
+;; security-relevant and what brackets is mode-dependent, and both were spelled
+;; out here while the mode they answer to lived there -- one list to keep in step
+;; across two languages, and a window between reading the mode and writing the
+;; bytes.  This file keeps the parts that are questions about Emacs: which parts
+;; of a line were pasted, and whether to ask the user first.
 
 (defun cooked--strip-pasted-controls (text)
   "TEXT with control bytes stripped from the parts that were pasted.
@@ -858,27 +811,34 @@ The result carries no properties, since it is on its way to the child."
 (defun cooked--send-paste (text)
   "Hand TEXT to the child as a paste.
 
-The control bytes go first and unconditionally -- see
-`cooked--strip-paste-controls' -- so everything below is about newlines,
-which are the one thing a paste is expected to contain and the one thing
-that makes it run."
-  (let ((text (cooked--strip-paste-controls text)))
-    (cond
-     ((cooked--bracketed-paste-p cooked--session)
-      (cooked--snap-to-cursor)
-      (cooked--send-to-child (cooked--bracketed-paste text)))
-     ((and cooked-paste-confirm-lines
+The stripping, the bracketing and the choice between them are
+`cooked--send-paste-text's, made together against the mode the child holds at
+the moment of the write.  What is left here is the one question the core cannot
+answer: whether to paste at all.
+
+A child that has not asked for bracketed paste cannot tell a paste from typing,
+so a line editor reads every embedded newline as Enter and runs the lines one
+after another with no chance to read them first.  That is a question for the
+user, and `cooked-paste-confirm-lines' is where the answer is configured.  The
+line count is taken before the strip because the strip leaves newlines alone,
+which is what makes a paste worth confirming in the first place.
+
+The mode is asked twice -- here, and again under the lock when the bytes are
+written -- and the second answer is the one that decides how the text is
+framed.  A child that turns bracketing off in between gets an unbracketed paste
+the user was not asked about, which is the same small window this had when the
+framing was on this side too; a child that turns it on gets a bracketed paste
+that was confirmed unnecessarily, which costs a question and nothing else."
+  (if (and cooked-paste-confirm-lines
+           (not (cooked--bracketed-paste-p (cooked--require-session)))
            (string-search "\n" text)
            (not (y-or-n-p
                  (format "Paste %d lines, which %s will run as each arrives?"
                          (1+ (cl-count ?\n text))
                          (or cooked-title "The child")))))
-      (message "Paste cancelled"))
-     (t
-      (cooked--snap-to-cursor)
-      ;; Newlines go as carriage returns because that is what the Return key
-      ;; transmits, and a line editor bound to CR is what is reading them.
-      (cooked--send-to-child (string-replace "\n" "\r" text))))))
+      (message "Paste cancelled")
+    (cooked--snap-to-cursor)
+    (cooked--send-paste-text (cooked--require-session) text)))
 
 (defun cooked-paste ()
   "Paste the most recent kill.

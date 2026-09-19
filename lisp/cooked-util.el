@@ -26,7 +26,8 @@
 
 (eval-and-compile
   (defconst cooked--core-functions
-    '(cooked--alt-scroll-p cooked--bracketed-paste-p cooked--clear-to-prompt
+    '(cooked--alt-scroll-p cooked--bracketed-paste cooked--bracketed-paste-p
+      cooked--clear-to-prompt
       cooked--core-version cooked--drain cooked--feed cooked--filter-feed
       cooked--focus-events-p cooked--foreground-pid cooked--forget-history
       cooked--image-forget cooked--job-control cooked--kill
@@ -34,9 +35,10 @@
       cooked--osc-reply cooked--prompt-text cooked--ready cooked--redraw
       cooked--remove-rows cooked--reply cooked--resize cooked--row-unsent
       cooked--sample-mode cooked--send cooked--send-mouse-report
-      cooked--set-attended
+      cooked--send-paste-text cooked--set-attended
       cooked--set-color-scheme cooked--set-graphics-shown cooked--set-hidden
-      cooked--set-tuning cooked--signal cooked--spawn)
+      cooked--set-tuning cooked--signal cooked--spawn
+      cooked--strip-paste-controls)
     "Every function the native core defines, by name.
 
 The core registers these when `cooked--load-module' loads it, so the

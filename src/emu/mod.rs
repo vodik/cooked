@@ -136,7 +136,7 @@ pub(crate) use image::{CellMetrics, ImageData, ImageFormat, ShownFormats};
 pub(crate) use link::LinkId;
 pub(crate) use term::{
     Anchor, ColorScheme, CursorShape, Event, KeyEncoding, Mark, StackOp, Terminator, Unit,
-    osc_reply,
+    bracket_paste, osc_reply, strip_paste_controls,
 };
 
 // What the integration tests are allowed to see, and no more. `tests/throughput.rs` needs
