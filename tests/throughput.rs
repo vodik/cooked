@@ -21,6 +21,16 @@ fn timed(label: &str, bytes: usize, work: impl FnOnce()) {
     );
 }
 
+/// Whether `COOKED_BENCH_ONLY` asks for a case other than this one.
+///
+/// `COOKED_BENCH_ONLY=wide` runs only the case whose label contains "wide", which is what
+/// makes `perf record` on the binary a profile of that case rather than of all of them.
+/// The whole label is matched, so `COOKED_BENCH_ONLY="full screen"` picks "scroll 200x400,
+/// full screen" and leaves the region case out.
+fn skipped(label: &str) -> bool {
+    std::env::var("COOKED_BENCH_ONLY").is_ok_and(|only| !label.contains(&only))
+}
+
 /// Plain text, the `cat a big file` case.
 fn plain(lines: usize) -> Vec<u8> {
     (0..lines)
@@ -109,9 +119,7 @@ fn feed_only() {
         ("styled, parse only", styled(200_000)),
         ("wide, parse only", wide(200_000)),
     ] {
-        // `COOKED_BENCH_ONLY=wide` runs the one case, which is what makes a profile of it
-        // a profile of it rather than of all three.
-        if std::env::var("COOKED_BENCH_ONLY").is_ok_and(|only| !label.contains(&only)) {
+        if skipped(label) {
             continue;
         }
         let mut term = Term::new(50, 200);
@@ -256,6 +264,9 @@ fn scroll_region() {
             b"\x1b[2;199r\x1b[199;1H".to_vec(),
         ),
     ] {
+        if skipped(label) {
+            continue;
+        }
         let mut term = Term::new(200, 400);
         term.feed(&setup);
         let mut scrolled = 0usize;
