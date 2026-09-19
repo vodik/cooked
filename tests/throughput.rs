@@ -281,6 +281,51 @@ fn scroll_region() {
     }
 }
 
+/// The two things that touch every cell of the grid and nothing else: filling it and
+/// resizing it.
+///
+/// Neither is driven by throughput -- a `clear` is one sequence and a resize is one
+/// window drag -- so the MB/s column means nothing here. What the rows are for is
+/// `perf stat` on the cell layout: the fill row is `Cell::fill` over 80k cells a frame
+/// with no parsing worth counting, and the resize row is the row-by-row copy into the
+/// reallocated grid. A change to the size of a cell shows up here before it shows up
+/// anywhere a child can drive.
+#[test]
+#[ignore = "benchmark"]
+fn grid_work() {
+    let (rows, cols) = (200, 400);
+    let fills = 20_000;
+    if !skipped("fill 200x400, erase the screen") {
+        // `ED 2` in a coloured pen, so the fill writes a cell the row cannot shortcut as
+        // already blank, and the cursor addressing keeps the erase from being elided.
+        let data: Vec<u8> = (0..fills)
+            .flat_map(|i| format!("\x1b[4{}m\x1b[H\x1b[2J", i % 8).into_bytes())
+            .collect();
+        let mut term = Term::new(rows, cols);
+        timed("fill 200x400, erase the screen", data.len(), || {
+            for piece in data.chunks(READ_CHUNK) {
+                term.feed(piece);
+                term.drain();
+            }
+        });
+        println!("{:>44}({fills} screens erased)", "");
+    }
+    if !skipped("resize 200x400, alternating") {
+        let resizes = 2_000;
+        let mut term = Term::new(rows, cols);
+        term.feed(&plain(rows));
+        term.drain();
+        timed("resize 200x400, alternating", 0, || {
+            for i in 0..resizes {
+                let wider = i % 2 == 0;
+                term.resize(rows, if wider { cols + 40 } else { cols });
+                term.drain();
+            }
+        });
+        println!("{:>44}({resizes} resizes)", "");
+    }
+}
+
 /// A region scrolled a few lines between drains, the way holding a key in vim scrolls its
 /// text area above the status line.
 ///
