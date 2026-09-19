@@ -56,6 +56,22 @@ const PARSE_SLICE: usize = 8 * 1024;
 /// would otherwise hold the pty unread. Sixteen yields is far more than the handoff
 /// takes when the waiter is runnable -- one or two in practice -- and is over in
 /// microseconds when it is not.
+///
+/// Measured rather than assumed, because a bounded spin against a futex wake invites the
+/// suspicion that the reader wins the race and Lisp waits another slice. With
+/// `yes "line 000000 the quick brown fox jumps over the lazy dog"` flooding a real pty
+/// and Emacs' cycle -- drain, then `Session::ready` -- repeated every 8ms, the wait timed
+/// inside [`Shared::term_for_lisp`] is 140ns at the median, 31 to 34us at the 99th
+/// percentile of the acquisitions that contend at all, and 140 to 240us at the 99th
+/// percentile overall, against 86 to 91us for one slice of that stream. `hand_over` is
+/// entered about fifteen times a second and gives up with a waiter still queued one to
+/// three per cent of the time, spending about four of its sixteen yields when it does
+/// win. A `Condvar` rendezvous in place of the spin -- the reader blocking until
+/// `Waiting::drop` notifies -- was measured beside it in interleaved windows and moved no
+/// percentile: what is left of the wait is the remainder of the slice already in flight,
+/// which no handoff can shorten, and the same runs with [`PARSE_SLICE`] cut to 1KB show
+/// it, taking the contended 99th percentile from 33us to 12us. So the lever here is the
+/// slice, whose size is argued above, and not the fairness of the handoff.
 const HANDOFF_YIELDS: usize = 16;
 /// How long the reader may sit in `poll` with nothing else to wait for.
 ///
