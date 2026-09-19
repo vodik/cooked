@@ -753,9 +753,8 @@ fn input_kind(env: Env) -> Result<session::Input> {
 /// makes them serve, and the zeroing -- and a second copy of that is a second place for a
 /// pasted password to be left behind in.
 ///
-/// Only BYTES is zeroed here. Extracting a Lisp string does not otherwise copy it (see
-/// `Vec<u8>'s `FromLisp' impl), so the one Lisp string BYTES may have come from is left
-/// exactly as its caller passed it in: `cooked-secret.el' `clear-string's its own copy
+/// Only BYTES is zeroed here. BYTES is the copy `Vec<u8>'s `FromLisp' impl made, and
+/// the Lisp string it was copied out of is left exactly as its caller passed it in: `cooked-secret.el' `clear-string's its own copy
 /// once the write here returns, and a paste's is the kill ring's entry, which stays the
 /// user's to keep or forget.
 fn write_input(env: Env, session: Value, bytes: &mut [u8]) -> Result<()> {

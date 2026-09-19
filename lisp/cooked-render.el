@@ -675,17 +675,17 @@ really has fewer used rows than before rather than every time
 pixels.  That disagreement is permanent on a window whose rows differ in height,
 and correcting for it once per drain is the oscillation itself.
 
-Reading `window-end' with no UPDATE for that check is deliberate, not a stale
-read a reviewer should chase.  Without UPDATE it answers Z minus a count fixed
+Reading `window-end' with no UPDATE for that check is deliberate.  Without
+UPDATE it answers Z minus a count fixed
 at the last redisplay that actually ran to completion, and that subtraction is
 exact through any inserts or deletes since, wherever in the buffer they land,
 because the count itself does not move -- so it still answers exactly the
 question asked, whether the window was at the buffer's end as of the last real
 redisplay, no matter how many drains without one came between.  Forcing UPDATE
 would lay out the window again here for a question arithmetic already answers,
-and `cooked-a-moving-buffer-end-does-not-move-the-transcript' already exercises
-the case: it grows and shrinks the tail across two drains with no redisplay run
-between them and would fail if this read a redisplay behind."
+and `cooked-pin-follows-a-tail-that-grows-and-shrinks-with-no-redisplay-between'
+holds it to that: it grows and shrinks the tail across two drains with no
+redisplay run between them and fails if this reads a redisplay behind."
   (let* ((target (or pos (point-max)))
          (foot (or bottom target)))
     (cooked--dolist-windows w windows
