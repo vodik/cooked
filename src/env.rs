@@ -21,14 +21,40 @@ pub(crate) struct ValueTag {
     _opaque: [u8; 0],
 }
 
-/// An opaque handle to a Lisp object. Transparent over the pointer Emacs hands us, but a
-/// distinct type so it cannot be dereferenced or confused with a real pointer.
+/// An opaque handle to a Lisp object, borrowed from the [`Env`] that produced it.
+///
+/// Transparent over the pointer Emacs hands us, but a distinct type so it cannot be
+/// dereferenced or confused with a real pointer.
+///
+/// The lifetime is the environment's. Emacs roots the objects a module call sees for the
+/// length of that call and no longer, so a handle kept past the call names whatever the
+/// collector has since put there; the pointer itself says nothing about that, and the
+/// lifetime is what makes the compiler say it instead. A defun is therefore written
+/// `fn(Env<'e>, &[Value<'e>]) -> Result<Value<'e>>`, with `'e` fresh per call, and a
+/// `Value` has nowhere to go but back to Emacs.
+///
+/// The one handle that really does outlive its call is a global reference, and
+/// [`Value::promote`] is the single place that says so.
+///
+/// `PhantomData` rather than a field of substance, so this stays `#[repr(transparent)]`
+/// over the pointer: `funcall` is handed `&[Value]` as the array of `emacs_value` it
+/// expects, and [`trampoline`] reads Emacs' argument array back as one.
 #[repr(transparent)]
 #[derive(Clone, Copy, PartialEq, Eq)]
-pub struct Value(*mut ValueTag);
+pub struct Value<'e>(*mut ValueTag, PhantomData<&'e ValueTag>);
 
-impl Value {
-    const NULL: Self = Self(std::ptr::null_mut());
+impl<'e> Value<'e> {
+    const NULL: Self = Self(std::ptr::null_mut(), PhantomData);
+
+    /// Claim that this handle outlives the call that produced it.
+    ///
+    /// # Safety
+    /// Emacs must hold a reference to the object for the whole of `'f`, which is true of
+    /// a global reference and of nothing else a module is handed. [`Env::global_ref`] is
+    /// the only caller, and the table it fills is never freed.
+    unsafe fn promote<'f>(self) -> Value<'f> {
+        Value(self.0, PhantomData)
+    }
 }
 
 type Slot = *const c_void;
@@ -62,36 +88,64 @@ impl Runtime {
     }
 }
 
-type FnPtr = unsafe extern "C" fn(*mut Raw, isize, *mut Value, *mut c_void) -> Value;
+type FnPtr =
+    for<'a> unsafe extern "C" fn(*mut Raw, isize, *mut Value<'a>, *mut c_void) -> Value<'a>;
 
+/// A handle Emacs has just made, not yet tied to the environment that asked for it.
+///
+/// The slots that *make* a value are handed none, so the mirror has no input lifetime to
+/// borrow the answer from and C offers nothing in its place. Spelling those returns
+/// `Value<'static>` would put the module's one claim that has to be earned into forty
+/// slots that have not earned it; they answer this instead, and [`Fresh::in_env`] is the
+/// one step that ties such a handle to the call that asked for it.
+#[repr(transparent)]
+struct Fresh(*mut ValueTag);
+
+impl Fresh {
+    /// Tie this handle to `env`, which is the environment Emacs made it in.
+    fn in_env<'e>(self, _: &Env<'e>) -> Value<'e> {
+        Value(self.0, PhantomData)
+    }
+}
+
+/// Emacs' `struct emacs_env_28`, slot for slot.
+///
+/// A slot that is handed an `emacs_value` is written `for<'a>`: which environment a
+/// handle belongs to is the caller's to say, and C says nothing either way, so
+/// instantiating `'a` is how each [`Env`] method below hands its own `'e` to the values
+/// it passes and takes back. A slot that only makes one -- `intern`, `make_integer` --
+/// has no handle to borrow from and answers a [`Fresh`] instead.
 #[repr(C)]
 pub struct Raw {
     size: isize,
     private: *mut c_void,
-    make_global_ref: unsafe extern "C" fn(*mut Raw, Value) -> Value,
-    free_global_ref: unsafe extern "C" fn(*mut Raw, Value),
+    make_global_ref: for<'a> unsafe extern "C" fn(*mut Raw, Value<'a>) -> Value<'a>,
+    free_global_ref: for<'a> unsafe extern "C" fn(*mut Raw, Value<'a>),
     non_local_exit_check: unsafe extern "C" fn(*mut Raw) -> c_int,
     non_local_exit_clear: unsafe extern "C" fn(*mut Raw),
-    non_local_exit_get: unsafe extern "C" fn(*mut Raw, *mut Value, *mut Value) -> c_int,
-    non_local_exit_signal: unsafe extern "C" fn(*mut Raw, Value, Value),
-    non_local_exit_throw: unsafe extern "C" fn(*mut Raw, Value, Value),
+    non_local_exit_get:
+        for<'a> unsafe extern "C" fn(*mut Raw, *mut Value<'a>, *mut Value<'a>) -> c_int,
+    non_local_exit_signal: for<'a> unsafe extern "C" fn(*mut Raw, Value<'a>, Value<'a>),
+    non_local_exit_throw: for<'a> unsafe extern "C" fn(*mut Raw, Value<'a>, Value<'a>),
     make_function:
-        unsafe extern "C" fn(*mut Raw, isize, isize, FnPtr, *const c_char, *mut c_void) -> Value,
-    funcall: unsafe extern "C" fn(*mut Raw, Value, isize, *const Value) -> Value,
-    intern: unsafe extern "C" fn(*mut Raw, *const c_char) -> Value,
+        unsafe extern "C" fn(*mut Raw, isize, isize, FnPtr, *const c_char, *mut c_void) -> Fresh,
+    funcall:
+        for<'a> unsafe extern "C" fn(*mut Raw, Value<'a>, isize, *const Value<'a>) -> Value<'a>,
+    intern: unsafe extern "C" fn(*mut Raw, *const c_char) -> Fresh,
     type_of: Slot,
-    is_not_nil: unsafe extern "C" fn(*mut Raw, Value) -> bool,
-    eq: unsafe extern "C" fn(*mut Raw, Value, Value) -> bool,
-    extract_integer: unsafe extern "C" fn(*mut Raw, Value) -> i64,
-    make_integer: unsafe extern "C" fn(*mut Raw, i64) -> Value,
+    is_not_nil: for<'a> unsafe extern "C" fn(*mut Raw, Value<'a>) -> bool,
+    eq: for<'a> unsafe extern "C" fn(*mut Raw, Value<'a>, Value<'a>) -> bool,
+    extract_integer: for<'a> unsafe extern "C" fn(*mut Raw, Value<'a>) -> i64,
+    make_integer: unsafe extern "C" fn(*mut Raw, i64) -> Fresh,
     extract_float: Slot,
     make_float: Slot,
-    copy_string_contents: unsafe extern "C" fn(*mut Raw, Value, *mut c_char, *mut isize) -> bool,
-    make_string: unsafe extern "C" fn(*mut Raw, *const c_char, isize) -> Value,
-    make_user_ptr: unsafe extern "C" fn(*mut Raw, Option<Finalizer>, *mut c_void) -> Value,
-    get_user_ptr: unsafe extern "C" fn(*mut Raw, Value) -> *mut c_void,
+    copy_string_contents:
+        for<'a> unsafe extern "C" fn(*mut Raw, Value<'a>, *mut c_char, *mut isize) -> bool,
+    make_string: unsafe extern "C" fn(*mut Raw, *const c_char, isize) -> Fresh,
+    make_user_ptr: unsafe extern "C" fn(*mut Raw, Option<Finalizer>, *mut c_void) -> Fresh,
+    get_user_ptr: for<'a> unsafe extern "C" fn(*mut Raw, Value<'a>) -> *mut c_void,
     set_user_ptr: Slot,
-    get_user_finalizer: unsafe extern "C" fn(*mut Raw, Value) -> Option<Finalizer>,
+    get_user_finalizer: for<'a> unsafe extern "C" fn(*mut Raw, Value<'a>) -> Option<Finalizer>,
     set_user_finalizer: Slot,
     vec_get: Slot,
     vec_set: Slot,
@@ -104,9 +158,9 @@ pub struct Raw {
     make_big_integer: Slot,
     get_function_finalizer: Slot,
     set_function_finalizer: Slot,
-    open_channel: unsafe extern "C" fn(*mut Raw, Value) -> c_int,
+    open_channel: for<'a> unsafe extern "C" fn(*mut Raw, Value<'a>) -> c_int,
     make_interactive: Slot,
-    make_unibyte_string: unsafe extern "C" fn(*mut Raw, *const c_char, isize) -> Value,
+    make_unibyte_string: unsafe extern "C" fn(*mut Raw, *const c_char, isize) -> Fresh,
 }
 
 /// A borrowed Emacs environment. Valid only for the duration of one module call.
@@ -156,8 +210,11 @@ pub(crate) use sym;
 macro_rules! lisp_enum {
     ($( $(#[doc = $doc:literal])* $t:ty { $($variant:ident => $name:literal),* $(,)? } )*) => {
         $($(#[doc = $doc])*
-        impl $crate::env::IntoLisp for $t {
-            fn into_lisp(self, env: &$crate::env::Env) -> $crate::env::Result<$crate::env::Value> {
+        impl<'e> $crate::env::IntoLisp<'e> for $t {
+            fn into_lisp(
+                self,
+                env: &$crate::env::Env<'e>,
+            ) -> $crate::env::Result<$crate::env::Value<'e>> {
                 match self {
                     $(Self::$variant => $crate::env::sym!(env, $name)),*
                 }
@@ -368,7 +425,12 @@ pub(crate) const fn sym_index(name: &str) -> usize {
 }
 
 /// The interned symbols, as global references.
-struct Symbols([Value; Sym::NAMES.len()]);
+///
+/// `Value<'static>` is the exception the lifetime on [`Value`] otherwise rules out, and
+/// this is the only place in the module that holds one. It is earned rather than
+/// asserted: [`Env::global_ref`] promotes a handle only after Emacs has rooted it, and
+/// nothing here ever frees it.
+struct Symbols([Value<'static>; Sym::NAMES.len()]);
 
 /// SAFETY: `Value` is a raw pointer, so `Symbols` is neither `Send` nor `Sync` on its
 /// own, and a `static OnceLock<T>` needs both. Each is sound here for its own reason.
@@ -416,9 +478,9 @@ impl<'e> Env<'e> {
         }
     }
 
-    pub fn intern(&self, name: &str) -> Result<Value> {
+    pub fn intern(&self, name: &str) -> Result<Value<'e>> {
         let c = CString::new(name).map_err(|_| Error)?;
-        ffi!(self, intern, c.as_ptr())
+        ffi!(self, intern, c.as_ptr()).map(|v| v.in_env(self))
     }
 
     /// A symbol from the load-time table; no allocation and no FFI call.
@@ -427,12 +489,12 @@ impl<'e> Env<'e> {
     /// through any path a user can reach -- `emacs_module_init` fills it before it
     /// registers a single defun -- but the fallback is one line and costs nothing on the
     /// path that matters, and the alternative is a panic in FFI code.
-    pub fn sym(&self, s: Sym) -> Result<Value> {
+    pub fn sym(&self, s: Sym) -> Result<Value<'e>> {
         self.sym_at(s as usize)
     }
 
     /// [`Env::sym`] by raw index, for [`plist!`]'s compile-time lookup.
-    pub fn sym_at(&self, index: usize) -> Result<Value> {
+    pub fn sym_at(&self, index: usize) -> Result<Value<'e>> {
         match SYMBOLS.get() {
             Some(table) => Ok(table.0[index]),
             None => self.intern(Sym::NAMES[index]),
@@ -440,8 +502,15 @@ impl<'e> Env<'e> {
     }
 
     /// Promote a value to one that outlives the call that produced it.
-    fn global_ref(&self, v: Value) -> Result<Value> {
-        ffi!(self, make_global_ref, v)
+    ///
+    /// The only source of a `Value<'static>` in the module. A global reference is rooted
+    /// until `free_global_ref`, which this module never calls, so the handle really does
+    /// live as long as the process -- see [`SYMBOLS`].
+    fn global_ref(&self, v: Value<'e>) -> Result<Value<'static>> {
+        let global = ffi!(self, make_global_ref, v)?;
+        // SAFETY: Emacs roots a global reference until it is freed, and nothing frees
+        // this one.
+        Ok(unsafe { global.promote() })
     }
 
     /// Fill [`SYMBOLS`]. Called once, from `emacs_module_init`.
@@ -459,19 +528,19 @@ impl<'e> Env<'e> {
         Ok(())
     }
 
-    pub fn nil(&self) -> Value {
+    pub fn nil(&self) -> Value<'e> {
         self.sym(Sym::Nil).unwrap_or(Value::NULL)
     }
 
-    pub fn is_nil(&self, v: Value) -> bool {
+    pub fn is_nil(&self, v: Value<'_>) -> bool {
         !unsafe { ((*self.raw).is_not_nil)(self.raw, v) }
     }
 
-    pub fn eq(&self, a: Value, b: Value) -> bool {
+    pub fn eq(&self, a: Value<'_>, b: Value<'_>) -> bool {
         unsafe { ((*self.raw).eq)(self.raw, a, b) }
     }
 
-    pub fn call(&self, func: &str, args: &[Value]) -> Result<Value> {
+    pub fn call(&self, func: &str, args: &[Value<'e>]) -> Result<Value<'e>> {
         self.funcall(self.intern(func)?, args)
     }
 
@@ -480,38 +549,40 @@ impl<'e> Env<'e> {
     /// The one to use with [`sym!`] -- `env.funcall(sym!(env, "consp")?, &[v])` -- which
     /// is how a call site on a hot path names a function without interning it and without
     /// naming a [`Sym`] variant.
-    pub fn funcall(&self, func: Value, args: &[Value]) -> Result<Value> {
+    pub fn funcall(&self, func: Value<'e>, args: &[Value<'e>]) -> Result<Value<'e>> {
         ffi!(self, funcall, func, args.len() as isize, args.as_ptr())
     }
 
     /// [`Env::call`] for a function named in the symbol table, which is every function
     /// this module calls often enough for the name lookup to show.
-    fn call_sym(&self, func: Sym, args: &[Value]) -> Result<Value> {
+    fn call_sym(&self, func: Sym, args: &[Value<'e>]) -> Result<Value<'e>> {
         self.funcall(self.sym(func)?, args)
     }
 
-    pub fn list(&self, items: &[Value]) -> Result<Value> {
+    pub fn list(&self, items: &[Value<'e>]) -> Result<Value<'e>> {
         self.call_sym(Sym::List, items)
     }
 
-    pub fn cons(&self, car: Value, cdr: Value) -> Result<Value> {
+    pub fn cons(&self, car: Value<'e>, cdr: Value<'e>) -> Result<Value<'e>> {
         self.call_sym(Sym::Cons, &[car, cdr])
     }
 
-    pub fn car(&self, cell: Value) -> Result<Value> {
+    pub fn car(&self, cell: Value<'e>) -> Result<Value<'e>> {
         self.call_sym(Sym::Car, &[cell])
     }
 
-    pub fn cdr(&self, cell: Value) -> Result<Value> {
+    pub fn cdr(&self, cell: Value<'e>) -> Result<Value<'e>> {
         self.call_sym(Sym::Cdr, &[cell])
     }
 
     /// Wrap `data` in an opaque Lisp user-pointer; Emacs' GC runs the destructor.
-    pub fn user_ptr<T: 'static>(&self, data: T) -> Result<Value> {
+    pub fn user_ptr<T: 'static>(&self, data: T) -> Result<Value<'e>> {
         let boxed = Tagged::into_raw(data);
-        ffi!(self, make_user_ptr, Some(finalizer_of::<T>()), boxed).inspect_err(|_| {
-            drop(unsafe { Box::from_raw(boxed.cast::<Tagged<T>>()) });
-        })
+        ffi!(self, make_user_ptr, Some(finalizer_of::<T>()), boxed)
+            .map(|v| v.in_env(self))
+            .inspect_err(|_| {
+                drop(unsafe { Box::from_raw(boxed.cast::<Tagged<T>>()) });
+            })
     }
 
     /// Borrow a user-pointer *this module* created for `T`.
@@ -526,7 +597,7 @@ impl<'e> Env<'e> {
     /// answered by reading the pointed-at memory: whether this module made the
     /// allocation at all. Only once it has is the [`Tagged`] header there to read, and
     /// the header is what says which of our own types the allocation holds.
-    pub fn get_user_ptr<T: 'static>(&self, v: Value) -> Result<&'e T> {
+    pub fn get_user_ptr<T: 'static>(&self, v: Value<'e>) -> Result<&'e T> {
         // Propagate first: for a non-user-ptr this is already a pending
         // `wrong-type-argument`, which must not be overwritten with ours.
         //
@@ -552,7 +623,7 @@ impl<'e> Env<'e> {
     /// says so. The `unsafe` sits three lines from the FFI call that establishes the
     /// contract, rather than at a caller who has to be told about it -- which is what
     /// leaves `session.rs` with no `unsafe` at all outside its tests.
-    pub fn open_channel(&self, pipe_process: Value) -> Result<OwnedFd> {
+    pub fn open_channel(&self, pipe_process: Value<'e>) -> Result<OwnedFd> {
         let raw: RawFd = ffi!(self, open_channel, pipe_process)?;
         // SAFETY: `open_channel` returns a descriptor the module owns and must close.
         Ok(unsafe { OwnedFd::from_raw_fd(raw) })
@@ -563,7 +634,7 @@ impl<'e> Env<'e> {
     }
 
     pub fn signal(&self, symbol: &str, message: &str) -> Error {
-        let build = || -> Result<(Value, Value)> {
+        let build = || -> Result<(Value<'e>, Value<'e>)> {
             Ok((
                 self.intern(symbol)?,
                 self.list(&[message.into_lisp(self)?])?,
@@ -576,8 +647,8 @@ impl<'e> Env<'e> {
     }
 
     /// `wrong-type-argument`, whose conventional data is `(PREDICATE VALUE)`.
-    pub fn signal_wrong_type(&self, predicate: &str, value: Value) -> Error {
-        let build = || -> Result<(Value, Value)> {
+    pub fn signal_wrong_type(&self, predicate: &str, value: Value<'e>) -> Error {
+        let build = || -> Result<(Value<'e>, Value<'e>)> {
             Ok((
                 self.intern("wrong-type-argument")?,
                 self.list(&[self.intern(predicate)?, value])?,
@@ -602,12 +673,12 @@ impl<'e> Env<'e> {
     pub const MINIMAL_ABI: isize = std::mem::offset_of!(Raw, should_quit) as isize;
 
     #[allow(clippy::wrong_self_convention, reason = "converts `v`, not `self`")]
-    pub fn into_lisp<T: IntoLisp>(&self, v: T) -> Result<Value> {
+    pub fn into_lisp<T: IntoLisp<'e>>(&self, v: T) -> Result<Value<'e>> {
         v.into_lisp(self)
     }
 
     #[allow(clippy::wrong_self_convention, reason = "converts `v`, not `self`")]
-    pub fn from_lisp<T: FromLisp>(&self, v: Value) -> Result<T> {
+    pub fn from_lisp<T: FromLisp>(&self, v: Value<'e>) -> Result<T> {
         T::from_lisp(self, v)
     }
 
@@ -616,7 +687,7 @@ impl<'e> Env<'e> {
     /// A `&optional` Lisp argument can be absent or present-and-nil, and both mean the
     /// same thing to every caller here. Written out, that was five combinators --
     /// `.get(i).copied().map(..).transpose()?.flatten()` -- at each of four call sites.
-    pub fn opt<T: FromLisp>(&self, args: &[Value], index: usize) -> Result<Option<T>> {
+    pub fn opt<T: FromLisp>(&self, args: &[Value<'e>], index: usize) -> Result<Option<T>> {
         match args.get(index) {
             Some(&v) if !self.is_nil(v) => T::from_lisp(self, v).map(Some),
             _ => Ok(None),
@@ -641,12 +712,15 @@ impl<'e> Env<'e> {
             trampoline,
             doc.as_ptr(),
             std::ptr::from_ref(registered).cast_mut().cast::<c_void>(),
-        )?;
+        )?
+        .in_env(self);
         self.call("defalias", &[self.intern(name)?, func]).map(drop)
     }
 }
 
-pub(crate) type Defun = fn(Env, &[Value]) -> Result<Value>;
+/// A Lisp entry point. `'e` is the call's, universally quantified, which is what leaves
+/// the body no way to put a [`Value`] anywhere but back into Emacs.
+pub(crate) type Defun = for<'e> fn(Env<'e>, &[Value<'e>]) -> Result<Value<'e>>;
 
 /// What Emacs hands back to [`trampoline`]: the function to call, and the name to put in
 /// the signal if it fails without leaving one pending.
@@ -717,12 +791,12 @@ impl<T: 'static> Tagged<T> {
     }
 }
 
-unsafe extern "C" fn trampoline(
+unsafe extern "C" fn trampoline<'e>(
     raw: *mut Raw,
     n: isize,
-    args: *mut Value,
+    args: *mut Value<'e>,
     data: *mut c_void,
-) -> Value {
+) -> Value<'e> {
     let env = unsafe { Env::from_raw(raw) };
     // SAFETY: `data` is the `Registered` `defun` leaked for this function, and a leaked
     // one outlives every call Emacs can make through it.
@@ -764,28 +838,33 @@ unsafe extern "C" fn trampoline(
     }
 }
 
-pub trait IntoLisp {
-    fn into_lisp(self, env: &Env) -> Result<Value>;
+/// Conversion into a handle belonging to the environment doing the converting.
+///
+/// Parametric in `'e` rather than generic per method, because the identity conversion
+/// below -- a [`Value`] that is already Lisp -- can only answer for the environment it
+/// came from.
+pub trait IntoLisp<'e> {
+    fn into_lisp(self, env: &Env<'e>) -> Result<Value<'e>>;
 }
 
 pub trait FromLisp: Sized {
     fn from_lisp(env: &Env, v: Value) -> Result<Self>;
 }
 
-impl IntoLisp for Value {
-    fn into_lisp(self, _: &Env) -> Result<Value> {
+impl<'e> IntoLisp<'e> for Value<'e> {
+    fn into_lisp(self, _: &Env<'e>) -> Result<Value<'e>> {
         Ok(self)
     }
 }
 
-impl IntoLisp for i64 {
-    fn into_lisp(self, env: &Env) -> Result<Value> {
-        ffi!(env, make_integer, self)
+impl<'e> IntoLisp<'e> for i64 {
+    fn into_lisp(self, env: &Env<'e>) -> Result<Value<'e>> {
+        ffi!(env, make_integer, self).map(|v| v.in_env(env))
     }
 }
 
-impl IntoLisp for usize {
-    fn into_lisp(self, env: &Env) -> Result<Value> {
+impl<'e> IntoLisp<'e> for usize {
+    fn into_lisp(self, env: &Env<'e>) -> Result<Value<'e>> {
         (self as i64).into_lisp(env)
     }
 }
@@ -797,8 +876,8 @@ impl IntoLisp for usize {
 /// accessor whose method did not already return something the trait covered.
 macro_rules! into_lisp_via_i64 {
     ($($t:ty),* $(,)?) => {
-        $(impl IntoLisp for $t {
-            fn into_lisp(self, env: &Env) -> Result<Value> {
+        $(impl<'e> IntoLisp<'e> for $t {
+            fn into_lisp(self, env: &Env<'e>) -> Result<Value<'e>> {
                 i64::from(self).into_lisp(env)
             }
         })*
@@ -807,44 +886,45 @@ macro_rules! into_lisp_via_i64 {
 
 into_lisp_via_i64!(u8, u16, i32);
 
-impl IntoLisp for u32 {
-    fn into_lisp(self, env: &Env) -> Result<Value> {
+impl<'e> IntoLisp<'e> for u32 {
+    fn into_lisp(self, env: &Env<'e>) -> Result<Value<'e>> {
         i64::from(self).into_lisp(env)
     }
 }
 
-impl IntoLisp for bool {
-    fn into_lisp(self, env: &Env) -> Result<Value> {
+impl<'e> IntoLisp<'e> for bool {
+    fn into_lisp(self, env: &Env<'e>) -> Result<Value<'e>> {
         if self { sym!(env, "t") } else { Ok(env.nil()) }
     }
 }
 
-impl IntoLisp for &str {
-    fn into_lisp(self, env: &Env) -> Result<Value> {
-        ffi!(env, make_string, self.as_ptr().cast(), self.len() as isize)
+impl<'e> IntoLisp<'e> for &str {
+    fn into_lisp(self, env: &Env<'e>) -> Result<Value<'e>> {
+        ffi!(env, make_string, self.as_ptr().cast(), self.len() as isize).map(|v| v.in_env(env))
     }
 }
 
-impl IntoLisp for String {
-    fn into_lisp(self, env: &Env) -> Result<Value> {
+impl<'e> IntoLisp<'e> for String {
+    fn into_lisp(self, env: &Env<'e>) -> Result<Value<'e>> {
         self.as_str().into_lisp(env)
     }
 }
 
 /// Byte strings become unibyte Lisp strings — no decoding, no corruption.
-impl IntoLisp for &[u8] {
-    fn into_lisp(self, env: &Env) -> Result<Value> {
+impl<'e> IntoLisp<'e> for &[u8] {
+    fn into_lisp(self, env: &Env<'e>) -> Result<Value<'e>> {
         ffi!(
             env,
             make_unibyte_string,
             self.as_ptr().cast(),
             self.len() as isize
         )
+        .map(|v| v.in_env(env))
     }
 }
 
-impl<T: IntoLisp> IntoLisp for Option<T> {
-    fn into_lisp(self, env: &Env) -> Result<Value> {
+impl<'e, T: IntoLisp<'e>> IntoLisp<'e> for Option<T> {
+    fn into_lisp(self, env: &Env<'e>) -> Result<Value<'e>> {
         self.map_or_else(|| Ok(env.nil()), |v| v.into_lisp(env))
     }
 }
@@ -858,14 +938,14 @@ impl<T: IntoLisp> IntoLisp for Option<T> {
 /// would quietly become a Lisp *list of integers* instead of the unibyte string the
 /// `&[u8]` impl makes; with no impl for `Vec<u8>`, forgetting `.as_slice()` is a compile
 /// error.
-impl IntoLisp for Vec<Value> {
-    fn into_lisp(self, env: &Env) -> Result<Value> {
+impl<'e> IntoLisp<'e> for Vec<Value<'e>> {
+    fn into_lisp(self, env: &Env<'e>) -> Result<Value<'e>> {
         env.list(&self)
     }
 }
 
-impl IntoLisp for () {
-    fn into_lisp(self, env: &Env) -> Result<Value> {
+impl<'e> IntoLisp<'e> for () {
+    fn into_lisp(self, env: &Env<'e>) -> Result<Value<'e>> {
         Ok(env.nil())
     }
 }

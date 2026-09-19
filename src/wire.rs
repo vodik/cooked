@@ -21,8 +21,8 @@ use nix::unistd::Pid;
 /// So an id crosses the boundary without reaching past the newtype to its field.
 macro_rules! into_lisp_id {
     ($($t:ty),* $(,)?) => {
-        $(impl env::IntoLisp for $t {
-            fn into_lisp(self, env: &Env) -> Result<Value> {
+        $(impl<'e> env::IntoLisp<'e> for $t {
+            fn into_lisp(self, env: &Env<'e>) -> Result<Value<'e>> {
                 self.get().into_lisp(env)
             }
         })*
@@ -57,8 +57,8 @@ lisp_enum! {
 
 /// What the child negotiated, as the symbol `:keys' carries. The flags or the level the
 /// encoding holds cross beside it as `:kitty-flags' and `:modify-other-keys'.
-impl env::IntoLisp for KeyEncoding {
-    fn into_lisp(self, env: &Env) -> Result<Value> {
+impl<'e> env::IntoLisp<'e> for KeyEncoding {
+    fn into_lisp(self, env: &Env<'e>) -> Result<Value<'e>> {
         match self {
             KeyEncoding::Legacy => sym!(env, "legacy"),
             KeyEncoding::ModifyOtherKeys(_) => sym!(env, "modify-other"),
@@ -67,8 +67,8 @@ impl env::IntoLisp for KeyEncoding {
     }
 }
 
-impl env::IntoLisp for Pid {
-    fn into_lisp(self, env: &Env) -> Result<Value> {
+impl<'e> env::IntoLisp<'e> for Pid {
+    fn into_lisp(self, env: &Env<'e>) -> Result<Value<'e>> {
         self.as_raw().into_lisp(env)
     }
 }
@@ -88,7 +88,7 @@ impl env::IntoLisp for Pid {
 /// taking back, nonzero only when the caller said its provisional text was still there.
 /// The reconciliation is [`Stream::flush`](emu::stream); the caller's half is
 /// `cooked-comint--emit'.
-pub(crate) fn emission_to_lisp(env: Env, filter: &Filter) -> Result<Value> {
+pub(crate) fn emission_to_lisp<'e>(env: Env<'e>, filter: &Filter) -> Result<Value<'e>> {
     let emission = filter.emission();
     // Nothing to say, which is a real and common case rather than a defensive check: a
     // chunk can be nothing but escape sequences -- the bracketed-paste mode set that
@@ -156,7 +156,7 @@ fn contiguous_runs(rows: &[DamagedRow]) -> impl Iterator<Item = &[DamagedRow]> {
 /// `(:scrolled ROWS :promoted (BOTTOM (CHARS . ENDS)...) :rows ((FIRST . BLOCK)...)
 /// :height N :width N :used N :head N :cursor (ROW COL VISIBLE SHAPE CHARS)
 /// :marks ((ID . ANCHOR)...) ...)`
-pub(crate) fn update_to_lisp(env: Env, update: &Update, rejoin: bool) -> Result<Value> {
+pub(crate) fn update_to_lisp<'e>(env: Env<'e>, update: &Update, rejoin: bool) -> Result<Value<'e>> {
     // The scrollback is assembled first because the events are resolved against it: a
     // mark on a row that scrolled away during this very drain is spelled as an offset
     // into the text about to be inserted, which only exists once that text is built.
@@ -311,10 +311,10 @@ pub(crate) fn update_to_lisp(env: Env, update: &Update, rejoin: bool) -> Result<
 /// A decoration span needs no END: its packed records account for every character it
 /// covers.
 #[derive(Default)]
-pub(crate) struct Block<'a> {
+pub(crate) struct Block<'a, 'e> {
     text: String,
     styles: Vec<u8>,
-    decos: Vec<Value>,
+    decos: Vec<Value<'e>>,
     offset: usize,
     /// The font bits of every rendition id the runs may name, indexed by id; see
     /// `StyleStore::font_bits`. Read only for the layout hash, which is why an empty
@@ -433,10 +433,10 @@ impl Uniformity {
     }
 }
 
-impl env::IntoLisp for Uniformity {
+impl<'e> env::IntoLisp<'e> for Uniformity {
     /// `t`, `glyph` and nil, so that the `t` a byte-uniform row always carried reads the
     /// same to anything testing it for truth.
-    fn into_lisp(self, env: &Env) -> Result<Value> {
+    fn into_lisp(self, env: &Env<'e>) -> Result<Value<'e>> {
         match self {
             Self::Ascii => true.into_lisp(env),
             Self::Glyphs => sym!(env, "glyph"),
@@ -448,7 +448,7 @@ impl env::IntoLisp for Uniformity {
 /// Bytes in one packed style span. See [`Block::push_style`] for the field layout.
 const STYLE_RECORD: usize = 16;
 
-impl<'a> Block<'a> {
+impl<'a, 'e> Block<'a, 'e> {
     /// A block whose layout hashes read font bits from FONT_BITS.
     fn new(font_bits: &'a [u8]) -> Self {
         Self {
@@ -505,7 +505,7 @@ impl<'a> Block<'a> {
     }
 
     /// Append RUNS, emitting spans only where there is something to say.
-    fn push_runs(&mut self, env: Env, runs: &Runs) -> Result<()> {
+    fn push_runs(&mut self, env: Env<'e>, runs: &Runs) -> Result<()> {
         for run in runs {
             // Taken before `push_run` advances the offset it is measured from.
             if run.deco.is_some() {
@@ -592,7 +592,7 @@ impl<'a> Block<'a> {
         self.row_start_byte = self.text.len();
     }
 
-    fn into_lisp(self, env: &Env) -> Result<Value> {
+    fn into_lisp(self, env: &Env<'e>) -> Result<Value<'e>> {
         let rows = self
             .rows
             .iter()
@@ -638,7 +638,11 @@ impl Update {
     /// because once Emacs has promoted it the text is there, just above the block: a mark
     /// at column 5 of a promoted row is `(scrolled . 5)` from where the promoted rows
     /// begin, as it would be from where resent rows began.
-    fn scrolled_rows(&self, env: Env, rejoin: bool) -> Result<(Value, Value, Vec<RowSpan>)> {
+    fn scrolled_rows<'e>(
+        &self,
+        env: Env<'e>,
+        rejoin: bool,
+    ) -> Result<(Value<'e>, Value<'e>, Vec<RowSpan>)> {
         if self.delta.scrolled.is_empty() {
             return Ok((env.nil(), env.nil(), Vec::new()));
         }
@@ -693,7 +697,7 @@ impl Update {
     ///
     /// `nil` when neither applies, which cannot happen while events and scrollback are
     /// taken by the same drain; Lisp then falls back to the cursor.
-    fn anchor_to_lisp(&self, env: Env, at: Anchor, rows: &[RowSpan]) -> Result<Value> {
+    fn anchor_to_lisp<'e>(&self, env: Env<'e>, at: Anchor, rows: &[RowSpan]) -> Result<Value<'e>> {
         let base = self.delta.scrolled_base;
         let on_grid = base + self.delta.scrolled.len();
         if at.row >= on_grid {
@@ -723,7 +727,7 @@ impl Update {
 ///
 /// No cell rectangle: that belongs to each *placement*, since the same image can be on
 /// screen at two sizes. It rides [`Placement`](crate::emu::image::Placement) with the rows.
-fn images_to_lisp(env: Env, images: &[ImageData]) -> Result<Vec<Value>> {
+fn images_to_lisp<'e>(env: Env<'e>, images: &[ImageData]) -> Result<Vec<Value<'e>>> {
     images
         .iter()
         .map(|image| {
@@ -746,7 +750,7 @@ fn images_to_lisp(env: Env, images: &[ImageData]) -> Result<Vec<Value>> {
 /// [`images_to_lisp`]'s much smaller sibling, and for the same reason: ids are
 /// content-addressed, so a URI crosses once however many cells name it, and Lisp
 /// installs the table before rendering rows that refer to it.
-fn links_to_lisp(env: Env, links: &[(LinkId, String)]) -> Result<Vec<Value>> {
+fn links_to_lisp<'e>(env: Env<'e>, links: &[(LinkId, String)]) -> Result<Vec<Value<'e>>> {
     links
         .iter()
         .map(|(id, uri)| env.cons(env.into_lisp(*id)?, env.into_lisp(uri.as_str())?))
@@ -760,8 +764,8 @@ fn links_to_lisp(env: Env, links: &[(LinkId, String)]) -> Result<Vec<Value>> {
 /// nil for the terminal default, an integer for a palette index, `(R G B)` for a direct
 /// colour -- so Lisp builds a face from them without decoding anything, and ATTRS is the
 /// [`Attrs`] bitmask.
-fn styles_to_lisp(env: Env, styles: &[(StyleId, Style)]) -> Result<Vec<Value>> {
-    let color = |color: Color| -> Result<Value> {
+fn styles_to_lisp<'e>(env: Env<'e>, styles: &[(StyleId, Style)]) -> Result<Vec<Value<'e>>> {
+    let color = |color: Color| -> Result<Value<'e>> {
         match color {
             Color::Default => Ok(env.nil()),
             Color::Indexed(index) => env.into_lisp(index),
@@ -805,8 +809,8 @@ fn styles_to_lisp(env: Env, styles: &[(StyleId, Style)]) -> Result<Vec<Value>> {
 ///
 /// A packed string rather than a list because a list would cons per character of every
 /// damaged row of every frame of box drawing. One unibyte allocation per run instead.
-impl env::IntoLisp for Option<&Deco> {
-    fn into_lisp(self, env: &Env) -> Result<Value> {
+impl<'e> env::IntoLisp<'e> for Option<&Deco> {
+    fn into_lisp(self, env: &Env<'e>) -> Result<Value<'e>> {
         let Some(deco) = self else {
             return Ok(env.nil());
         };
@@ -831,10 +835,15 @@ impl env::IntoLisp for Option<&Deco> {
 /// position once, here, and stops being true the next time a resize rewraps the grid, so
 /// `:marks` reports the same id with a fresh anchor and Lisp moves the marker it made.
 /// See `Delta::marks` and `cooked--relocate-marks'.
-fn event_to_lisp(env: Env, event: &Event, update: &Update, rows: &[RowSpan]) -> Result<Value> {
+fn event_to_lisp<'e>(
+    env: Env<'e>,
+    event: &Event,
+    update: &Update,
+    rows: &[RowSpan],
+) -> Result<Value<'e>> {
     // The tag arrives already resolved, because `sym!` needs the literal at its own
     // call site to do the lookup at compile time -- which is the point of it.
-    let mark = |name: Value, at: Anchor, id: MarkId| {
+    let mark = |name: Value<'e>, at: Anchor, id: MarkId| {
         list!(env, [name, update.anchor_to_lisp(env, at, rows)?, id])
     };
     match event {
@@ -1024,7 +1033,7 @@ mod tests {
     /// Owned [`Run`]s are still how a test says what it means, so they are gathered into
     /// the borrowed form the block takes. `Runs::from_runs` keeps each one its own run,
     /// whatever the pen, which is what a test naming three runs is asking for.
-    fn push(block: &mut Block<'_>, runs: &[Run]) {
+    fn push(block: &mut Block<'_, '_>, runs: &[Run]) {
         for run in &Runs::from_runs(runs) {
             block.push_run(run);
         }

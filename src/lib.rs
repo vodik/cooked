@@ -82,7 +82,7 @@ macro_rules! accessors {
         $( $(#[doc = $doc:literal])+ $name:literal => $call:expr; )*
     }) => {
         [ $( $env.defun($name, 1..=1, &docstring(&[$($doc),+]), {
-            fn accessor(env: Env, args: &[Value]) -> Result<Value> {
+            fn accessor<'e>(env: Env<'e>, args: &[Value<'e>]) -> Result<Value<'e>> {
                 env.into_lisp(on_session(handle(env, args[0])?, $call))
             }
             accessor
@@ -645,7 +645,7 @@ pub unsafe extern "C" fn emacs_module_init(runtime: *mut Runtime) -> std::ffi::c
     }
 }
 
-fn handle<'e>(env: Env<'e>, value: Value) -> Result<&'e Session> {
+fn handle<'e>(env: Env<'e>, value: Value<'e>) -> Result<&'e Session> {
     env.get_user_ptr::<Session>(value)
 }
 
@@ -662,7 +662,11 @@ const MAX_LIST_LEN: usize = 1 << 20;
 /// `car`/`cdr` rather than `nth` per index: `nth` restarts at the head every time, which
 /// makes reading a list quadratic in its length, and the environment alist is the
 /// child's to grow.
-fn each<T>(env: Env, mut list: Value, mut f: impl FnMut(Value) -> Result<T>) -> Result<Vec<T>> {
+fn each<'e, T>(
+    env: Env<'e>,
+    mut list: Value<'e>,
+    mut f: impl FnMut(Value<'e>) -> Result<T>,
+) -> Result<Vec<T>> {
     let mut out = Vec::new();
     while !env.is_nil(list) {
         if out.len() >= MAX_LIST_LEN {
@@ -674,11 +678,11 @@ fn each<T>(env: Env, mut list: Value, mut f: impl FnMut(Value) -> Result<T>) -> 
     Ok(out)
 }
 
-fn strings(env: Env, list: Value) -> Result<Vec<String>> {
+fn strings<'e>(env: Env<'e>, list: Value<'e>) -> Result<Vec<String>> {
     each(env, list, |item| env.from_lisp::<String>(item))
 }
 
-fn pairs(env: Env, alist: Value) -> Result<Vec<(String, String)>> {
+fn pairs<'e>(env: Env<'e>, alist: Value<'e>) -> Result<Vec<(String, String)>> {
     each(env, alist, |cell| {
         Ok((
             env.from_lisp::<String>(env.car(cell)?)?,
@@ -702,14 +706,14 @@ impl<T> OrSignal<T> for std::result::Result<T, crate::error::Error> {
     }
 }
 
-fn set_tuning(env: Env, args: &[Value]) -> Result<Value> {
+fn set_tuning<'e>(env: Env<'e>, args: &[Value<'e>]) -> Result<Value<'e>> {
     let ms = env.from_lisp::<i64>(args[1])?.max(0) as u64;
     let limit = env.from_lisp::<i64>(args[2])?.max(1) as usize;
     handle(env, args[0])?.set_tuning(std::time::Duration::from_millis(ms), limit);
     Ok(env.nil())
 }
 
-fn spawn(env: Env, args: &[Value]) -> Result<Value> {
+fn spawn<'e>(env: Env<'e>, args: &[Value<'e>]) -> Result<Value<'e>> {
     let argv = strings(env, args[0])?;
     let vars = pairs(env, args[1])?;
     let size = Winsize {
@@ -752,7 +756,7 @@ fn spawn(env: Env, args: &[Value]) -> Result<Value> {
     env.user_ptr(session)
 }
 
-fn drain(env: Env, args: &[Value]) -> Result<Value> {
+fn drain<'e>(env: Env<'e>, args: &[Value<'e>]) -> Result<Value<'e>> {
     let rejoin = args.get(1).is_none_or(|v| !env.is_nil(*v));
     let hidden = args.get(2).is_some_and(|v| !env.is_nil(*v));
     let promote = args.get(3).is_some_and(|v| !env.is_nil(*v));
@@ -801,7 +805,7 @@ fn input_kind(env: Env) -> Result<session::Input> {
 /// the Lisp string it was copied out of is left exactly as its caller passed it in: `cooked-secret.el' `clear-string's its own copy
 /// once the write here returns, and a paste's is the kill ring's entry, which stays the
 /// user's to keep or forget.
-fn write_input(env: Env, session: Value, bytes: &mut [u8]) -> Result<()> {
+fn write_input<'e>(env: Env<'e>, session: Value<'e>, bytes: &mut [u8]) -> Result<()> {
     // `should_quit` is asked while the write waits on a child that is not reading, so
     // `C-g` ends the wait. Emacs raises the quit itself once this returns; all that is
     // owed here is to return.
@@ -822,7 +826,7 @@ fn write_input(env: Env, session: Value, bytes: &mut [u8]) -> Result<()> {
     }
 }
 
-fn send(env: Env, args: &[Value]) -> Result<Value> {
+fn send<'e>(env: Env<'e>, args: &[Value<'e>]) -> Result<Value<'e>> {
     let mut bytes = env.from_lisp::<Vec<u8>>(args[1])?;
     write_input(env, args[0], &mut bytes)?;
     Ok(env.nil())
@@ -830,7 +834,7 @@ fn send(env: Env, args: &[Value]) -> Result<Value> {
 
 /// Spell one mouse report against the modes the child holds now; see
 /// `cooked--send-mouse-report'.
-fn send_mouse_report(env: Env, args: &[Value]) -> Result<Value> {
+fn send_mouse_report<'e>(env: Env<'e>, args: &[Value<'e>]) -> Result<Value<'e>> {
     // Refused rather than clamped: a number outside the byte xterm's encoding has room
     // for names no button, and a clamp would spell it as whichever button sits at the
     // edge. See [`Button`].
@@ -864,7 +868,7 @@ fn send_mouse_report(env: Env, args: &[Value]) -> Result<Value> {
 /// Refused rather than guessed at: a symbol no row carries -- `f30', the symbol a mouse
 /// event reduces to -- is a key this terminal has no spelling for, and `None' is how the
 /// caller is told there is nothing to send.
-fn to_key(env: Env, value: Value) -> Result<Option<Key>> {
+fn to_key<'e>(env: Env<'e>, value: Value<'e>) -> Result<Option<Key>> {
     // `symbolp' first, as `to_signal' asks it: a failed `from_lisp' leaves a non-local
     // exit pending, so there is no extracting the integer and falling back to the name.
     if !env.is_nil(env.call("symbolp", &[value])?) {
@@ -879,7 +883,7 @@ fn to_key(env: Env, value: Value) -> Result<Option<Key>> {
 /// seventy, they are read once per key press rather than once per drain, and a table of
 /// seventy symbols kept in step with the one in `keypress.rs' would be a second place for
 /// a key to go missing from.
-fn symbol_name(env: Env, value: Value) -> Result<String> {
+fn symbol_name<'e>(env: Env<'e>, value: Value<'e>) -> Result<String> {
     env.from_lisp::<String>(env.call("symbol-name", &[value])?)
 }
 
@@ -887,7 +891,7 @@ fn symbol_name(env: Env, value: Value) -> Result<String> {
 ///
 /// A modifier no protocol spells is dropped rather than refused: `event-modifiers' also
 /// reports Emacs' own `alt', which has a bit in neither xterm's parameter nor kitty's.
-fn to_modifiers(env: Env, list: Value) -> Result<Modifiers> {
+fn to_modifiers<'e>(env: Env<'e>, list: Value<'e>) -> Result<Modifiers> {
     let names = each(env, list, |item| symbol_name(env, item))?;
     Ok(names.iter().fold(Modifiers::NONE, |mods, name| {
         Modifiers::parse(name).map_or(mods, |one| mods.with(one))
@@ -895,7 +899,7 @@ fn to_modifiers(env: Env, list: Value) -> Result<Modifiers> {
 }
 
 /// The protocol Lisp assumes for a program that negotiated none, if it assumes one.
-fn to_assumed(env: Env, args: &[Value], index: usize) -> Result<Option<Assumed>> {
+fn to_assumed<'e>(env: Env<'e>, args: &[Value<'e>], index: usize) -> Result<Option<Assumed>> {
     match args.get(index) {
         Some(&value) if !env.is_nil(value) => Ok(Assumed::parse(&symbol_name(env, value)?)),
         _ => Ok(None),
@@ -904,7 +908,7 @@ fn to_assumed(env: Env, args: &[Value], index: usize) -> Result<Option<Assumed>>
 
 /// Spell one key press against the negotiation the child holds now; see
 /// `cooked--encode-key'.
-fn encode_key(env: Env, args: &[Value]) -> Result<Vec<u8>> {
+fn encode_key<'e>(env: Env<'e>, args: &[Value<'e>]) -> Result<Vec<u8>> {
     let Some(key) = to_key(env, args[1])? else {
         return Ok(Vec::new());
     };
@@ -920,7 +924,7 @@ fn encode_key(env: Env, args: &[Value]) -> Result<Vec<u8>> {
 }
 
 /// See `cooked--send-key'.
-fn send_key(env: Env, args: &[Value]) -> Result<Value> {
+fn send_key<'e>(env: Env<'e>, args: &[Value<'e>]) -> Result<Value<'e>> {
     let mut bytes = encode_key(env, args)?;
     if bytes.is_empty() {
         return Ok(env.nil());
@@ -930,7 +934,7 @@ fn send_key(env: Env, args: &[Value]) -> Result<Value> {
 }
 
 /// See `cooked--encode-key'.
-fn encode_key_to_lisp(env: Env, args: &[Value]) -> Result<Value> {
+fn encode_key_to_lisp<'e>(env: Env<'e>, args: &[Value<'e>]) -> Result<Value<'e>> {
     match encode_key(env, args)?.as_slice() {
         [] => Ok(env.nil()),
         bytes => env.into_lisp(bytes),
@@ -938,7 +942,7 @@ fn encode_key_to_lisp(env: Env, args: &[Value]) -> Result<Value> {
 }
 
 /// See `cooked--key-table'.
-fn key_table(env: Env, _args: &[Value]) -> Result<Value> {
+fn key_table<'e>(env: Env<'e>, _args: &[Value<'e>]) -> Result<Value<'e>> {
     let rows = NamedKey::ALL
         .iter()
         .map(|key| env.cons(env.intern(key.name())?, env.into_lisp(key.kitty_only())?))
@@ -947,7 +951,7 @@ fn key_table(env: Env, _args: &[Value]) -> Result<Value> {
 }
 
 /// Compose a paste against the mode the child holds now; see `cooked--send-paste-text'.
-fn send_paste_text(env: Env, args: &[Value]) -> Result<Value> {
+fn send_paste_text<'e>(env: Env<'e>, args: &[Value<'e>]) -> Result<Value<'e>> {
     let mut text = env.from_lisp::<String>(args[1])?;
     let mut bytes = {
         let session = handle(env, args[0])?;
@@ -970,23 +974,23 @@ fn send_paste_text(env: Env, args: &[Value]) -> Result<Value> {
     Ok(env.nil())
 }
 
-fn strip_paste_controls(env: Env, args: &[Value]) -> Result<Value> {
+fn strip_paste_controls<'e>(env: Env<'e>, args: &[Value<'e>]) -> Result<Value<'e>> {
     let text = env.from_lisp::<String>(args[0])?;
     env.into_lisp(emu::strip_paste_controls(&text).as_str())
 }
 
-fn bracketed_paste(env: Env, args: &[Value]) -> Result<Value> {
+fn bracketed_paste<'e>(env: Env<'e>, args: &[Value<'e>]) -> Result<Value<'e>> {
     let text = env.from_lisp::<String>(args[0])?;
     env.into_lisp(emu::bracket_paste(&text).as_str())
 }
 
-fn reply(env: Env, args: &[Value]) -> Result<Value> {
+fn reply<'e>(env: Env<'e>, args: &[Value<'e>]) -> Result<Value<'e>> {
     let bytes = env.from_lisp::<Vec<u8>>(args[1])?;
     handle(env, args[0])?.reply(&bytes);
     Ok(env.nil())
 }
 
-fn reply_focus(env: Env, args: &[Value]) -> Result<Value> {
+fn reply_focus<'e>(env: Env<'e>, args: &[Value<'e>]) -> Result<Value<'e>> {
     let focused = !env.is_nil(args[1]);
     let session = handle(env, args[0])?;
     // The lock goes before the queue rather than around it: what it has to cover is the
@@ -998,13 +1002,13 @@ fn reply_focus(env: Env, args: &[Value]) -> Result<Value> {
     env.into_lisp(true)
 }
 
-fn feed(env: Env, args: &[Value]) -> Result<Value> {
+fn feed<'e>(env: Env<'e>, args: &[Value<'e>]) -> Result<Value<'e>> {
     let bytes = env.from_lisp::<Vec<u8>>(args[1])?;
     handle(env, args[0])?.term().feed(&bytes);
     Ok(env.nil())
 }
 
-fn osc_reply(env: Env, args: &[Value]) -> Result<Value> {
+fn osc_reply<'e>(env: Env<'e>, args: &[Value<'e>]) -> Result<Value<'e>> {
     let code = env.from_lisp::<u16>(args[0])?;
     let payload = env.from_lisp::<String>(args[1])?;
     let terminator = emu::Terminator::from_bell(!env.is_nil(args[2]));
@@ -1017,7 +1021,7 @@ fn osc_reply(env: Env, args: &[Value]) -> Result<Value> {
     env.into_lisp(bytes.as_slice())
 }
 
-fn resize(env: Env, args: &[Value]) -> Result<Value> {
+fn resize<'e>(env: Env<'e>, args: &[Value<'e>]) -> Result<Value<'e>> {
     let cell = |i: usize| -> Result<u16> {
         args.get(i)
             .copied()
@@ -1035,14 +1039,14 @@ fn resize(env: Env, args: &[Value]) -> Result<Value> {
     Ok(env.nil())
 }
 
-fn remove_rows(env: Env, args: &[Value]) -> Result<Value> {
+fn remove_rows<'e>(env: Env<'e>, args: &[Value<'e>]) -> Result<Value<'e>> {
     let first = env.from_lisp::<i64>(args[1])?.max(0) as usize;
     let count = env.from_lisp::<i64>(args[2])?.max(0) as usize;
     handle(env, args[0])?.term().remove_rows(first, count);
     Ok(env.nil())
 }
 
-fn row_unsent(env: Env, args: &[Value]) -> Result<Value> {
+fn row_unsent<'e>(env: Env<'e>, args: &[Value<'e>]) -> Result<Value<'e>> {
     // A negative row names no row, which is the same no-op as one past the bottom.
     let row = if env.is_nil(args[1]) {
         None
@@ -1056,7 +1060,7 @@ fn row_unsent(env: Env, args: &[Value]) -> Result<Value> {
     Ok(env.nil())
 }
 
-fn image_forget(env: Env, args: &[Value]) -> Result<Value> {
+fn image_forget<'e>(env: Env<'e>, args: &[Value<'e>]) -> Result<Value<'e>> {
     // An id outside the module's own range, zero included, is one it cannot hold, so it
     // is the same no-op as an id already retired.
     if let Some(id) = u32::try_from(env.from_lisp::<i64>(args[1])?)
@@ -1068,7 +1072,7 @@ fn image_forget(env: Env, args: &[Value]) -> Result<Value> {
     Ok(env.nil())
 }
 
-fn set_color_scheme(env: Env, args: &[Value]) -> Result<Value> {
+fn set_color_scheme<'e>(env: Env<'e>, args: &[Value<'e>]) -> Result<Value<'e>> {
     // Two symbols compared by identity: the protocol has exactly these two answers, and
     // anything else is the caller passing the wrong thing.
     let scheme = if env.eq(args[1], sym!(env, "dark")?) {
@@ -1082,7 +1086,7 @@ fn set_color_scheme(env: Env, args: &[Value]) -> Result<Value> {
     env.into_lisp(owed.as_deref())
 }
 
-fn set_graphics_shown(env: Env, args: &[Value]) -> Result<Value> {
+fn set_graphics_shown<'e>(env: Env<'e>, args: &[Value<'e>]) -> Result<Value<'e>> {
     let shown = shown_formats(env, args[1])?;
     handle(env, args[0])?.term().set_graphics_shown(shown);
     Ok(env.nil())
@@ -1108,7 +1112,7 @@ fn shown_formats(env: Env, list: Value) -> Result<ShownFormats> {
     Ok(ShownFormats::of(formats.into_iter().flatten()))
 }
 
-fn signal(env: Env, args: &[Value]) -> Result<Value> {
+fn signal<'e>(env: Env<'e>, args: &[Value<'e>]) -> Result<Value<'e>> {
     let sig = to_signal(env, args[1])?;
     handle(env, args[0])?.signal(sig).or_signal(env)?;
     Ok(env.nil())
@@ -1146,7 +1150,7 @@ fn to_signal(env: Env, value: Value) -> Result<Signal> {
 }
 
 /// Not an `accessors!` entry: those take the handle alone, and this carries a flag.
-fn set_attended(env: Env, args: &[Value]) -> Result<Value> {
+fn set_attended<'e>(env: Env<'e>, args: &[Value<'e>]) -> Result<Value<'e>> {
     // `from_lisp::<bool>` is nil-or-not rather than a type check, which is what a Lisp
     // caller means by a boolean -- so anything non-nil reads as attended and there is no
     // wrong value to report.
@@ -1155,14 +1159,14 @@ fn set_attended(env: Env, args: &[Value]) -> Result<Value> {
 }
 
 /// Not an `accessors!` entry, for the reason `set_attended` is not.
-fn set_hidden(env: Env, args: &[Value]) -> Result<Value> {
+fn set_hidden<'e>(env: Env<'e>, args: &[Value<'e>]) -> Result<Value<'e>> {
     handle(env, args[0])?.set_hidden(env.from_lisp(args[1])?);
     Ok(env.nil())
 }
 
-fn job_control(env: Env, args: &[Value]) -> Result<Value> {
+fn job_control<'e>(env: Env<'e>, args: &[Value<'e>]) -> Result<Value<'e>> {
     let jc = handle(env, args[0])?.job_control().or_signal(env)?;
-    let ch = |env: Env, c: Option<u8>| match c {
+    let ch = |env: Env<'e>, c: Option<u8>| match c {
         Some(b) => env.into_lisp(b),
         None => Ok(env.nil()),
     };
@@ -1175,11 +1179,11 @@ fn job_control(env: Env, args: &[Value]) -> Result<Value> {
     })
 }
 
-fn core_version(env: Env, _args: &[Value]) -> Result<Value> {
+fn core_version<'e>(env: Env<'e>, _args: &[Value<'e>]) -> Result<Value<'e>> {
     env.into_lisp(env!("CARGO_PKG_VERSION"))
 }
 
-fn foreground_pid(env: Env, args: &[Value]) -> Result<Value> {
+fn foreground_pid<'e>(env: Env<'e>, args: &[Value<'e>]) -> Result<Value<'e>> {
     // nil rather than an error: `tcgetpgrp' has nothing to report between a shell putting
     // one job down and the next taking over, and once the session is gone it can answer 0.
     // Neither is a fault the caller can do anything about, and both are ordinary.
@@ -1198,12 +1202,12 @@ fn foreground_pid(env: Env, args: &[Value]) -> Result<Value> {
 /// the tag in it says `Session`. See [`Env::get_user_ptr`].
 type FilterCell = std::cell::RefCell<emu::stream::Filter>;
 
-fn make_filter(env: Env, _args: &[Value]) -> Result<Value> {
+fn make_filter<'e>(env: Env<'e>, _args: &[Value<'e>]) -> Result<Value<'e>> {
     env.user_ptr(FilterCell::new(emu::stream::Filter::new()))
 }
 
 /// Resolve one chunk of a comint child's output; see `cooked--filter-feed'.
-fn filter_feed(env: Env, args: &[Value]) -> Result<Value> {
+fn filter_feed<'e>(env: Env<'e>, args: &[Value<'e>]) -> Result<Value<'e>> {
     let filter = env.get_user_ptr::<FilterCell>(args[0])?;
     // The chunk arrives as an Emacs string rather than as bytes, because
     // `comint-preoutput-filter-functions' is handed output the process coding system has
