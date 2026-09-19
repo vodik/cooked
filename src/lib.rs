@@ -24,7 +24,10 @@ pub(crate) mod replies;
 pub(crate) mod session;
 mod wire;
 
-use emu::{Button, CellMetrics, ColorScheme, ImageFormat, ImageId, ShownFormats};
+use emu::{
+    Assumed, Button, CellMetrics, ColorScheme, ImageFormat, ImageId, Key, Modifiers, NamedKey,
+    ShownFormats,
+};
 use env::{Env, Result, Runtime, Value, plist, sym};
 use nix::sys::signal::Signal;
 use pty::Winsize;
@@ -236,6 +239,44 @@ pub unsafe extern "C" fn emacs_module_init(runtime: *mut Runtime) -> std::ffi::c
         /// is the child's is still Lisp's, since that is a question about windows, the
         /// region and where the pointer is.
         "cooked--send-mouse-report" 5..=7 => send_mouse_report;
+
+        /// Send KEY, held with MODS, to SESSION's child, and return t if it was sent.
+        ///
+        /// KEY is a character -- the key `event-basic-type' names, with no modifier
+        /// folded into it -- or one of the symbols `cooked--key-table' lists.  MODS is a
+        /// list of `event-modifiers' symbols.  ASSUMED is `kitty' or `modify-other' for
+        /// a program `cooked-key-protocol-overrides' guesses a protocol for, and nil
+        /// otherwise; a real negotiation is always believed over a guess.
+        ///
+        /// nil, with nothing sent, for a key this terminal has no spelling for: a symbol
+        /// no row carries, and Pause and Print Screen outside the kitty protocol.
+        ///
+        /// Which spelling the key gets -- the kitty keyboard protocol with the flags the
+        /// child pushed, xterm's modifyOtherKeys at the level it set, or the classical
+        /// bytes, and under DECCKM and DECKPAM or not -- is read here, under the terminal
+        /// lock, rather than from anything Lisp remembers: all of it is the child's to
+        /// change between one drain and the next, and a key spelled against the previous
+        /// answer is read by the child as a different key.  Which key was pressed is
+        /// still Lisp's, since that is a question about an Emacs event.
+        "cooked--send-key" 3..=4 => send_key;
+
+        /// The bytes `cooked--send-key' would send for KEY held with MODS, or nil.
+        ///
+        /// The arguments are `cooked--send-key''s, and so is the spelling.  For the two
+        /// callers that have to compose the key with other bytes and write them as one:
+        /// `cooked-delegate-this-key', which sends the pending line ahead of it, and
+        /// `cooked--override-bytes-for', which hands the bytes to
+        /// `cooked-send-override'.  Everything else should send the key.
+        "cooked--encode-key" 3..=4 => encode_key_to_lisp;
+
+        /// Every key cooked speaks for, as (SYMBOL . KITTY-ONLY).
+        ///
+        /// SYMBOL is the name Emacs gives the key, and KITTY-ONLY is t for a key with no
+        /// spelling outside the kitty keyboard protocol -- Pause and Print Screen, which
+        /// send nothing in xterm and have no terminfo capability.  `cooked--key-names'
+        /// carries the same list for the keymap builder, which runs before this module
+        /// is loaded; the two are held against each other by a test.
+        "cooked--key-table" 0..=0 => key_table;
 
         /// Hand TEXT to SESSION's child as a paste.
         ///
@@ -813,6 +854,93 @@ fn send_mouse_report(env: Env, args: &[Value]) -> Result<Value> {
     };
     write_input(env, args[0], &mut bytes)?;
     env.into_lisp(true)
+}
+
+/// The key Lisp named, as a character or as the symbol of a table row.
+///
+/// Refused rather than guessed at: a symbol no row carries -- `f30', the symbol a mouse
+/// event reduces to -- is a key this terminal has no spelling for, and `None' is how the
+/// caller is told there is nothing to send.
+fn to_key(env: Env, value: Value) -> Result<Option<Key>> {
+    // `symbolp' first, as `to_signal' asks it: a failed `from_lisp' leaves a non-local
+    // exit pending, so there is no extracting the integer and falling back to the name.
+    if !env.is_nil(env.call("symbolp", &[value])?) {
+        return Ok(Key::parse_name(&symbol_name(env, value)?));
+    }
+    Ok(Key::parse_char(env.from_lisp::<i64>(value)?))
+}
+
+/// The name of a Lisp symbol, which is how a symbol reaches Rust as data.
+///
+/// Compared as a string rather than against an interned `Sym': the key names alone are
+/// seventy, they are read once per key press rather than once per drain, and a table of
+/// seventy symbols kept in step with the one in `keypress.rs' would be a second place for
+/// a key to go missing from.
+fn symbol_name(env: Env, value: Value) -> Result<String> {
+    env.from_lisp::<String>(env.call("symbol-name", &[value])?)
+}
+
+/// The modifiers a list of `event-modifiers' symbols names.
+///
+/// A modifier no protocol spells is dropped rather than refused: `event-modifiers' also
+/// reports Emacs' own `alt', which has a bit in neither xterm's parameter nor kitty's.
+fn to_modifiers(env: Env, list: Value) -> Result<Modifiers> {
+    let names = each(env, list, |item| symbol_name(env, item))?;
+    Ok(names.iter().fold(Modifiers::NONE, |mods, name| {
+        Modifiers::parse(name).map_or(mods, |one| mods.with(one))
+    }))
+}
+
+/// The protocol Lisp assumes for a program that negotiated none, if it assumes one.
+fn to_assumed(env: Env, args: &[Value], index: usize) -> Result<Option<Assumed>> {
+    match args.get(index) {
+        Some(&value) if !env.is_nil(value) => Ok(Assumed::parse(&symbol_name(env, value)?)),
+        _ => Ok(None),
+    }
+}
+
+/// Spell one key press against the negotiation the child holds now; see
+/// `cooked--encode-key'.
+fn encode_key(env: Env, args: &[Value]) -> Result<Vec<u8>> {
+    let Some(key) = to_key(env, args[1])? else {
+        return Ok(Vec::new());
+    };
+    let mods = to_modifiers(env, args[2])?;
+    let assumed = to_assumed(env, args, 3)?;
+    // The lock covers the negotiation, the two keypad modes and the bytes built from
+    // them, and is let go before any write: a spelling taken from one of them as it was
+    // and another as it is names a chord neither end agrees on.
+    Ok(handle(env, args[0])?
+        .term()
+        .key_report(key, mods, assumed)
+        .unwrap_or_default())
+}
+
+/// See `cooked--send-key'.
+fn send_key(env: Env, args: &[Value]) -> Result<Value> {
+    let mut bytes = encode_key(env, args)?;
+    if bytes.is_empty() {
+        return Ok(env.nil());
+    }
+    write_input(env, args[0], &mut bytes)?;
+    env.into_lisp(true)
+}
+
+/// See `cooked--encode-key'.
+fn encode_key_to_lisp(env: Env, args: &[Value]) -> Result<Value> {
+    match encode_key(env, args)?.as_slice() {
+        [] => Ok(env.nil()),
+        bytes => env.into_lisp(bytes),
+    }
+}
+
+/// See `cooked--key-table'.
+fn key_table(env: Env, _args: &[Value]) -> Result<Value> {
+    let rows = NamedKey::ALL
+        .iter()
+        .map(|key| env.cons(env.intern(key.name())?, env.into_lisp(key.kitty_only())?))
+        .collect::<Result<Vec<_>>>()?;
+    env.into_lisp(rows)
 }
 
 /// Compose a paste against the mode the child holds now; see `cooked--send-paste-text'.

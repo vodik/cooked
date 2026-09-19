@@ -394,3 +394,357 @@ fn bracketed_paste_toggles() {
     t.feed(b"\x1b[?2004l");
     assert!(!t.bracketed_paste());
 }
+
+// Spelling a key press. The cases are xterm's and kitty's own tables, and they are the
+// cases the ERT key suite asserted while the encoder lived in Lisp; what is checked here
+// is the bytes, and what is left to that suite is the Emacs half -- which event names
+// which key.
+
+const NONE: Modifiers = Modifiers::NONE;
+const SHIFT: Modifiers = Modifiers::SHIFT;
+const META: Modifiers = Modifiers::META;
+const CONTROL: Modifiers = Modifiers::CONTROL;
+const SUPER: Modifiers = Modifiers::SUPER;
+const HYPER: Modifiers = Modifiers::HYPER;
+
+/// The text key CHAR, as `event-basic-type` names one.
+fn ch(c: char) -> Key {
+    Key::parse_char(c as i64).expect("a character is a key")
+}
+
+/// The table row NAME, as Lisp spells the symbol.
+fn named(name: &str) -> Key {
+    Key::parse_name(name).unwrap_or_else(|| panic!("{name} is a key cooked speaks for"))
+}
+
+/// What the child receives for KEY held with MODS, against the negotiation as it stands.
+fn spell(t: &Term, key: Key, mods: Modifiers) -> String {
+    guessing(t, key, mods, None).expect("this key has a spelling")
+}
+
+/// [`spell`] for a program Lisp guesses a protocol for; see `Assumed`.
+fn guessing(t: &Term, key: Key, mods: Modifiers, assumed: Option<Assumed>) -> Option<String> {
+    t.key_report(key, mods, assumed)
+        .map(|bytes| String::from_utf8(bytes).expect("a key is spelled in UTF-8"))
+}
+
+#[test]
+fn a_key_is_spelled_against_the_flags_the_child_pushed_a_moment_ago() {
+    // The whole point of spelling here: no drain sits between the child asking for the
+    // kitty protocol and the next key being spelled in it. While Lisp held the
+    // negotiation, this Shift+Return went out as a bare CR.
+    let mut t = term(4, 20, b"");
+    assert_eq!(spell(&t, named("return"), SHIFT), "\r");
+    t.feed(b"\x1b[>1u");
+    assert_eq!(spell(&t, named("return"), SHIFT), "\x1b[13;2u");
+    t.feed(b"\x1b[<1u");
+    assert_eq!(spell(&t, named("return"), SHIFT), "\r");
+}
+
+#[test]
+fn modified_arrows_use_xterm_parameters() {
+    let mut t = term(4, 20, b"");
+    assert_eq!(spell(&t, named("up"), NONE), "\x1b[A");
+    assert_eq!(spell(&t, named("up"), SHIFT), "\x1b[1;2A");
+    assert_eq!(spell(&t, named("up"), META), "\x1b[1;3A");
+    assert_eq!(spell(&t, named("up"), CONTROL), "\x1b[1;5A");
+    assert_eq!(spell(&t, named("right"), CONTROL.with(SHIFT)), "\x1b[1;6C");
+    // DECCKM only applies to the unmodified form.
+    t.feed(b"\x1b[?1h");
+    assert_eq!(spell(&t, named("up"), NONE), "\x1bOA");
+    assert_eq!(spell(&t, named("left"), NONE), "\x1bOD");
+    assert_eq!(spell(&t, named("up"), CONTROL), "\x1b[1;5A");
+    // Keys outside the cursor cluster are unaffected by the mode.
+    assert_eq!(spell(&t, named("next"), NONE), "\x1b[6~");
+}
+
+#[test]
+fn modified_special_keys_are_encoded() {
+    let t = term(4, 20, b"");
+    // Shift+Tab has a real terminfo entry, `kcbt', so it needs no negotiation.
+    assert_eq!(spell(&t, named("backtab"), SHIFT), "\x1b[Z");
+    // Tilde-style keys take the modifier as a second parameter.
+    assert_eq!(spell(&t, named("f5"), NONE), "\x1b[15~");
+    assert_eq!(spell(&t, named("f5"), SHIFT), "\x1b[15;2~");
+    assert_eq!(spell(&t, named("next"), SHIFT), "\x1b[6;2~");
+    // F1 to F4 are SS3 until modified, then CSI like everything else.
+    assert_eq!(spell(&t, named("f1"), NONE), "\x1bOP");
+    assert_eq!(spell(&t, named("f1"), SHIFT), "\x1b[1;2P");
+    // Return and friends have no classical modified form, so they send the bare byte
+    // until the child negotiates something.
+    assert_eq!(spell(&t, named("return"), NONE), "\r");
+    assert_eq!(spell(&t, named("return"), SHIFT), "\r");
+    assert_eq!(spell(&t, named("return"), META), "\x1b\r");
+    // A key with no spelling but kitty's has none at all here.
+    assert_eq!(t.key_report(named("pause"), NONE, None), None);
+    assert_eq!(t.key_report(named("print"), CONTROL, None), None);
+}
+
+#[test]
+fn legacy_control_chords_follow_x11() {
+    // Masking every character to five bits sent `C-;' as ESC and `C-/' as SI.
+    let t = term(4, 20, b"");
+    assert_eq!(spell(&t, ch(';'), CONTROL), ";");
+    assert_eq!(spell(&t, ch('.'), CONTROL), ".");
+    assert_eq!(spell(&t, ch('/'), CONTROL), "\x1f");
+    assert_eq!(spell(&t, ch('2'), CONTROL), "\0");
+    assert_eq!(spell(&t, ch('7'), CONTROL), "\x1f");
+    assert_eq!(spell(&t, ch('8'), CONTROL), "\x7f");
+    assert_eq!(spell(&t, ch('?'), CONTROL), "\x7f");
+    assert_eq!(spell(&t, ch('a'), CONTROL.with(SHIFT)), "\x01");
+    assert_eq!(spell(&t, ch('a'), CONTROL.with(META)), "\x1b\x01");
+    // Shift is the capital, and Emacs reports the letter unshifted.
+    assert_eq!(spell(&t, ch('s'), SHIFT), "S");
+    assert_eq!(spell(&t, ch('s'), NONE), "s");
+    assert_eq!(spell(&t, ch('!'), NONE), "!");
+    assert_eq!(spell(&t, ch('x'), META), "\x1bx");
+}
+
+#[test]
+fn the_keypad_sends_ss3_only_while_the_keypad_is_in_application_mode() {
+    let mut t = term(4, 20, b"");
+    // NumLock on, the key types what is on the cap.
+    assert_eq!(spell(&t, named("kp-1"), NONE), "1");
+    assert_eq!(spell(&t, named("kp-add"), NONE), "+");
+    // NumLock off, it is the editing key it stands in for, modifiers and all.
+    assert_eq!(spell(&t, named("kp-home"), NONE), "\x1b[H");
+    assert_eq!(spell(&t, named("kp-up"), CONTROL), "\x1b[1;5A");
+    // `smkx' is DECCKM and DECKPAM together, and DECKPAM is what the keypad follows.
+    t.feed(b"\x1b[?1h\x1b=");
+    assert_eq!(spell(&t, named("kp-1"), NONE), "\x1bOq");
+    assert_eq!(spell(&t, named("kp-home"), NONE), "\x1bOw");
+    assert_eq!(spell(&t, named("kp-enter"), NONE), "\x1bOM");
+    // A modifier leaves the application spelling, which terminfo has no capability for.
+    assert_eq!(spell(&t, named("kp-up"), CONTROL), "\x1b[1;5A");
+    t.feed(b"\x1b>");
+    assert_eq!(spell(&t, named("kp-1"), NONE), "1");
+    assert_eq!(spell(&t, named("kp-enter"), NONE), "\r");
+}
+
+#[test]
+fn f13_to_f24_are_the_shifted_function_keys_terminfo_names() {
+    let t = term(4, 20, b"");
+    assert_eq!(spell(&t, named("f13"), NONE), "\x1b[1;2P");
+    assert_eq!(spell(&t, named("f24"), NONE), "\x1b[24;2~");
+    assert_eq!(spell(&t, named("f13"), CONTROL), "\x1b[1;6P");
+}
+
+#[test]
+fn modify_other_keys_level_2_spells_every_modified_key() {
+    // Level 2 against xterm: `ModifyOtherKeys' in input.c, and the us-pc105 table in
+    // xterm's modified-keys FAQ, whose Mode 2 column every expected value here is read
+    // from. Before, only the literal keys were re-spelled, so `C-;' went out as a bare
+    // ESC -- the ambiguity the level exists to remove.
+    let t = term(4, 20, b"\x1b[>4;2m");
+    assert_eq!(spell(&t, ch(';'), CONTROL), "\x1b[27;5;59~");
+    assert_eq!(spell(&t, ch('.'), CONTROL), "\x1b[27;5;46~");
+    assert_eq!(spell(&t, ch(','), CONTROL), "\x1b[27;5;44~");
+    assert_eq!(spell(&t, ch('a'), CONTROL.with(META)), "\x1b[27;7;97~");
+    // Control and Meta re-spell anything, keys with a control byte included.
+    assert_eq!(spell(&t, ch('a'), CONTROL), "\x1b[27;5;97~");
+    assert_eq!(spell(&t, ch('a'), META), "\x1b[27;3;97~");
+    assert_eq!(spell(&t, ch('1'), CONTROL), "\x1b[27;5;49~");
+    assert_eq!(spell(&t, ch(' '), CONTROL), "\x1b[27;5;32~");
+    assert_eq!(spell(&t, ch('é'), CONTROL), "\x1b[27;5;233~");
+    // Shift alone re-spells a letter, sent as its capital, and the space bar ...
+    assert_eq!(spell(&t, ch('a'), SHIFT), "\x1b[27;2;65~");
+    assert_eq!(spell(&t, ch('a'), CONTROL.with(SHIFT)), "\x1b[27;6;65~");
+    assert_eq!(spell(&t, ch(' '), SHIFT), "\x1b[27;2;32~");
+    // ... but not a key that shifting already made unambiguous, and nothing unmodified.
+    assert_eq!(spell(&t, ch('!'), NONE), "!");
+    assert_eq!(spell(&t, ch('é'), SHIFT), "É");
+    assert_eq!(spell(&t, ch('a'), NONE), "a");
+    // The literal keys are as they were, but for Shift+Tab, which is `ESC [ Z' unless
+    // something besides Shift is held.
+    assert_eq!(spell(&t, named("backtab"), SHIFT), "\x1b[Z");
+    assert_eq!(spell(&t, named("backtab"), CONTROL.with(SHIFT)), "\x1b[27;6;9~");
+    assert_eq!(spell(&t, named("return"), SHIFT), "\x1b[27;2;13~");
+    assert_eq!(spell(&t, named("return"), CONTROL), "\x1b[27;5;13~");
+    assert_eq!(spell(&t, named("tab"), CONTROL), "\x1b[27;5;9~");
+    assert_eq!(spell(&t, named("escape"), META), "\x1b[27;3;27~");
+    assert_eq!(spell(&t, named("return"), NONE), "\r");
+    // Function and cursor keys are not the protocol's.
+    assert_eq!(spell(&t, named("up"), CONTROL), "\x1b[1;5A");
+    // A terminal frame's TAB and ESC are keys, not C-i and a Control chord.
+    assert_eq!(spell(&t, ch('\t'), NONE), "\t");
+    assert_eq!(spell(&t, Key::LooseEscape, NONE), "\x1b");
+}
+
+#[test]
+fn modify_other_keys_level_1_leaves_what_already_means_something() {
+    // Level 1 against xterm's `allowedCharModifiers' and the Mode 1 column of the same
+    // table, with Meta following metaSendsEscape as xterm's manual says it does here.
+    let t = term(4, 20, b"\x1b[>4;1m");
+    // The task's pair: a chord with a control byte keeps it, one without is re-spelled.
+    assert_eq!(spell(&t, ch('a'), CONTROL), "\x01");
+    assert_eq!(spell(&t, ch(';'), CONTROL), "\x1b[27;5;59~");
+    // X's table, not a five-bit mask: these have bytes and keep them.
+    assert_eq!(spell(&t, ch('2'), CONTROL), "\0");
+    assert_eq!(spell(&t, ch('3'), CONTROL), "\x1b");
+    assert_eq!(spell(&t, ch('/'), CONTROL), "\x1f");
+    assert_eq!(spell(&t, ch('a'), CONTROL.with(SHIFT)), "\x01");
+    assert_eq!(spell(&t, ch('1'), CONTROL), "\x1b[27;5;49~");
+    // Shift alone and Meta alone never re-spell.
+    assert_eq!(spell(&t, ch('a'), SHIFT), "A");
+    assert_eq!(spell(&t, ch('a'), META), "\x1ba");
+    assert_eq!(spell(&t, ch('a'), META.with(CONTROL)), "\x1b\x01");
+    // Where the rest re-spells, Meta counts in the parameter.
+    assert_eq!(spell(&t, ch(';'), META.with(CONTROL)), "\x1b[27;7;59~");
+    // Return and Tab under Shift or Control, but Meta takes itself and Control out
+    // first, as xterm's `filterAltMeta' does.
+    assert_eq!(spell(&t, named("return"), SHIFT), "\x1b[27;2;13~");
+    assert_eq!(spell(&t, named("tab"), CONTROL), "\x1b[27;5;9~");
+    assert_eq!(spell(&t, named("return"), META), "\x1b\r");
+    assert_eq!(spell(&t, named("return"), META.with(CONTROL)), "\x1b\r");
+    assert_eq!(spell(&t, named("return"), META.with(SHIFT)), "\x1b[27;2;13~");
+    // Shift+Tab is `ESC [ Z' at this level whatever else is held.
+    assert_eq!(spell(&t, named("backtab"), SHIFT), "\x1b[Z");
+    assert_eq!(spell(&t, named("backtab"), CONTROL.with(SHIFT)), "\x1b[Z");
+    // Escape only with Meta and Control or Shift; Backspace never.
+    assert_eq!(spell(&t, named("escape"), SHIFT), "\x1b");
+    assert_eq!(spell(&t, named("escape"), CONTROL.with(SHIFT)), "\x1b");
+    assert_eq!(
+        spell(&t, named("escape"), CONTROL.with(META)),
+        "\x1b[27;7;27~"
+    );
+    assert_eq!(spell(&t, named("backspace"), CONTROL), "\x7f");
+    // Super has no bit in xterm's parameter, and is dropped from a chord.
+    assert_eq!(spell(&t, ch(';'), CONTROL.with(SUPER)), "\x1b[27;5;59~");
+}
+
+#[test]
+fn kitty_disambiguate_follows_kittys_text_key_table() {
+    // Bit 1 against the example table in kitty's keyboard protocol document. Its key is
+    // `i', whose Control chords Emacs folds into TAB before any keymap sees them, so
+    // those columns are checked on `c', where the table's rule is the same rule.
+    let t = term(4, 20, b"\x1b[>1u");
+    assert_eq!(spell(&t, ch('i'), NONE), "i");
+    assert_eq!(spell(&t, ch('i'), SHIFT), "I");
+    assert_eq!(spell(&t, ch('i'), META), "\x1b[105;3u");
+    assert_eq!(spell(&t, ch('i'), META.with(SHIFT)), "\x1b[105;4u");
+    assert_eq!(spell(&t, ch('c'), CONTROL), "\x1b[99;5u");
+    assert_eq!(spell(&t, ch('c'), CONTROL.with(META)), "\x1b[99;7u");
+    assert_eq!(spell(&t, ch('c'), CONTROL.with(SHIFT)), "\x1b[99;6u");
+    assert_eq!(spell(&t, ch(' '), CONTROL), "\x1b[32;5u");
+    // Escape is always an escape code; Return, Tab and Backspace stay bare unmodified,
+    // so `reset' can still be typed after a crash.
+    assert_eq!(spell(&t, named("escape"), NONE), "\x1b[27u");
+    assert_eq!(spell(&t, named("escape"), META), "\x1b[27;3u");
+    assert_eq!(spell(&t, named("return"), NONE), "\r");
+    assert_eq!(spell(&t, named("tab"), NONE), "\t");
+    assert_eq!(spell(&t, named("backspace"), NONE), "\x7f");
+    assert_eq!(spell(&t, named("return"), SHIFT), "\x1b[13;2u");
+    assert_eq!(spell(&t, named("backtab"), SHIFT), "\x1b[9;2u");
+    // A terminal frame's ESC is half of every Meta chord and goes as the byte.
+    assert_eq!(spell(&t, Key::LooseEscape, NONE), "\x1b");
+    // Non-text keys leave SS3 behind, DECCKM or not, and F3 is not a CPR.
+    let mut t = t;
+    t.feed(b"\x1b[?1h");
+    assert_eq!(spell(&t, named("up"), NONE), "\x1b[A");
+    assert_eq!(spell(&t, named("f1"), NONE), "\x1b[P");
+    assert_eq!(spell(&t, named("up"), CONTROL), "\x1b[1;5A");
+    assert_eq!(spell(&t, named("f3"), NONE), "\x1b[13~");
+    assert_eq!(spell(&t, named("f3"), SHIFT), "\x1b[13;2~");
+    assert_eq!(spell(&t, named("f5"), NONE), "\x1b[15~");
+    assert_eq!(spell(&t, named("next"), CONTROL), "\x1b[6;5~");
+    // The keypad is keys of its own: text where the cap has text, codes where it does
+    // not, and F13 is a key rather than a Shift+F1.
+    assert_eq!(spell(&t, named("kp-1"), NONE), "1");
+    assert_eq!(spell(&t, named("kp-1"), CONTROL), "\x1b[57400;5u");
+    assert_eq!(spell(&t, named("kp-home"), NONE), "\x1b[57423u");
+    assert_eq!(spell(&t, named("kp-enter"), NONE), "\x1b[57414u");
+    assert_eq!(spell(&t, named("f13"), NONE), "\x1b[57376u");
+    assert_eq!(spell(&t, named("pause"), NONE), "\x1b[57362u");
+    assert_eq!(spell(&t, named("menu"), NONE), "\x1b[57363u");
+    // Super and Hyper have a bit here and nowhere else.
+    assert_eq!(spell(&t, ch('a'), SUPER), "\x1b[97;9u");
+    assert_eq!(spell(&t, ch('a'), HYPER), "\x1b[97;17u");
+}
+
+#[test]
+fn kitty_alternate_keys_report_the_shifted_key() {
+    // Bit 4: the shifted key after a colon, and only with Shift held. kitty's document:
+    // ctrl+shift+a is `CSI 97 : 65 ; 6 u', never `CSI 65'. The base-layout key is never
+    // sent -- an Emacs event has no physical key to name -- which the protocol allows.
+    let t = term(4, 20, b"\x1b[>5u");
+    assert_eq!(spell(&t, ch('a'), CONTROL.with(SHIFT)), "\x1b[97:65;6u");
+    assert_eq!(spell(&t, ch('a'), META.with(SHIFT)), "\x1b[97:65;4u");
+    // No Shift, no shifted key.
+    assert_eq!(spell(&t, ch('a'), CONTROL), "\x1b[97;5u");
+    // Only on a key that was going to be an escape code anyway.
+    assert_eq!(spell(&t, ch('a'), SHIFT), "A");
+    // Not on a key that produces no text.
+    assert_eq!(spell(&t, named("return"), SHIFT), "\x1b[13;2u");
+    assert_eq!(spell(&t, named("up"), SHIFT), "\x1b[1;2A");
+    // Without the bit, the same chord has no alternate.
+    let t = term(4, 20, b"\x1b[>1u");
+    assert_eq!(spell(&t, ch('a'), CONTROL.with(SHIFT)), "\x1b[97;6u");
+}
+
+#[test]
+fn kitty_report_all_keys_sends_text_as_escape_codes() {
+    // Bit 8: every key an escape code, Return, Tab and Backspace included.
+    let t = term(4, 20, b"\x1b[>8u");
+    assert_eq!(spell(&t, ch('a'), NONE), "\x1b[97u");
+    assert_eq!(spell(&t, ch('a'), SHIFT), "\x1b[97;2u");
+    assert_eq!(spell(&t, named("return"), NONE), "\x1b[13u");
+    assert_eq!(spell(&t, named("tab"), NONE), "\x1b[9u");
+    assert_eq!(spell(&t, named("backspace"), NONE), "\x1b[127u");
+    assert_eq!(spell(&t, named("escape"), NONE), "\x1b[27u");
+    assert_eq!(spell(&t, named("kp-1"), NONE), "\x1b[57400u");
+    assert_eq!(spell(&t, named("up"), NONE), "\x1b[A");
+    // And bit 16 beside it, which is the only way the text survives: kitty's document
+    // gives shift+a as `CSI 97 ; 2 ; 65 u'.
+    let t = term(4, 20, b"\x1b[>24u");
+    assert_eq!(spell(&t, ch('a'), SHIFT), "\x1b[97;2;65u");
+    assert_eq!(spell(&t, ch('a'), NONE), "\x1b[97;;97u");
+    assert_eq!(spell(&t, ch('é'), NONE), "\x1b[233;;233u");
+    assert_eq!(spell(&t, named("kp-1"), NONE), "\x1b[57400;;49u");
+    // Control prevents text, and keys that produce none carry none: kitty's Enter with
+    // every flag on is `CSI 13 u'.
+    assert_eq!(spell(&t, ch('a'), CONTROL), "\x1b[97;5u");
+    assert_eq!(spell(&t, named("return"), NONE), "\x1b[13u");
+    assert_eq!(spell(&t, named("kp-enter"), NONE), "\x1b[57414u");
+    // Everything at once.
+    let t = term(4, 20, b"\x1b[>29u");
+    assert_eq!(spell(&t, ch('a'), SHIFT), "\x1b[97:65;2;65u");
+    assert_eq!(spell(&t, ch('a'), CONTROL.with(SHIFT)), "\x1b[97:65;6u");
+}
+
+#[test]
+fn kitty_associated_text_alone_changes_nothing() {
+    // Bit 16 is an enhancement to bit 8 and undefined without it. Under bit 1 alone every
+    // key that produces text is sent as that text, and every escape code it does send is
+    // for a chord Control or Meta has already taken the text from.
+    let t = term(4, 20, b"\x1b[>17u");
+    assert_eq!(spell(&t, ch('a'), NONE), "a");
+    assert_eq!(spell(&t, ch('a'), SHIFT), "A");
+    assert_eq!(spell(&t, ch('a'), META), "\x1b[97;3u");
+}
+
+#[test]
+fn a_guessed_protocol_re_spells_only_the_literal_keys() {
+    // `cooked-key-protocol-overrides' names a protocol for a program that never asked for
+    // one, and a guess must go on meaning what it meant: Shift+Return and Shift+Tab
+    // re-spelled, Escape and every Control chord untouched. Sending `ESC [ 27 u' to a
+    // Claude Code on the strength of a process name would be the rubbish-in-the-input
+    // case the negotiation exists to prevent.
+    let t = term(4, 20, b"");
+    let kitty = Some(Assumed::Kitty);
+    assert_eq!(guessing(&t, named("return"), SHIFT, kitty).unwrap(), "\x1b[13;2u");
+    assert_eq!(guessing(&t, named("backtab"), SHIFT, kitty).unwrap(), "\x1b[9;2u");
+    assert_eq!(guessing(&t, named("escape"), NONE, kitty).unwrap(), "\x1b");
+    assert_eq!(guessing(&t, ch('a'), CONTROL, kitty).unwrap(), "\x01");
+    assert_eq!(guessing(&t, ch('x'), META, kitty).unwrap(), "\x1bx");
+
+    // The modifyOtherKeys guess has no level and is read as level 2 over the same keys.
+    let other = Some(Assumed::ModifyOther);
+    assert_eq!(guessing(&t, named("return"), SHIFT, other).unwrap(), "\x1b[27;2;13~");
+    assert_eq!(guessing(&t, named("backspace"), CONTROL, other).unwrap(), "\x1b[27;5;127~");
+    assert_eq!(guessing(&t, ch('a'), CONTROL, other).unwrap(), "\x01");
+    assert_eq!(guessing(&t, ch('x'), META, other).unwrap(), "\x1bx");
+
+    // A real negotiation is believed over a guess about what a program probably wants.
+    let t = term(4, 20, b"\x1b[>1u");
+    assert_eq!(guessing(&t, named("escape"), NONE, other).unwrap(), "\x1b[27u");
+}

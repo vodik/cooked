@@ -30,12 +30,13 @@
       cooked--clear-to-prompt
       cooked--core-version cooked--drain cooked--feed cooked--filter-feed
       cooked--focus-events-p cooked--foreground-pid cooked--forget-history
-      cooked--image-forget cooked--job-control cooked--kill
+      cooked--encode-key
+      cooked--image-forget cooked--job-control cooked--key-table cooked--kill
       cooked--live-p cooked--make-filter cooked--pid
       cooked--osc-reply cooked--prompt-text cooked--ready cooked--redraw
       cooked--remove-rows cooked--reply cooked--reply-focus cooked--resize
       cooked--row-unsent
-      cooked--sample-mode cooked--send cooked--send-mouse-report
+      cooked--sample-mode cooked--send cooked--send-key cooked--send-mouse-report
       cooked--send-paste-text cooked--set-attended
       cooked--set-color-scheme cooked--set-graphics-shown cooked--set-hidden
       cooked--set-tuning cooked--signal cooked--spawn
