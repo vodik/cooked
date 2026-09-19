@@ -851,11 +851,7 @@ fn write_input<'e>(
 /// says: KEYBOARD omitted or nil is [`session::Input::Other`], the conservative answer,
 /// which costs a frame the wait it would have waived rather than drawing one early.
 fn send<'e>(env: Env<'e>, args: &[Value<'e>]) -> Result<Value<'e>> {
-    let input = if args.get(2).is_some_and(|v| !env.is_nil(*v)) {
-        session::Input::Keyboard
-    } else {
-        session::Input::Other
-    };
+    let input = session::Input::typed(env.opt::<bool>(args, 2)?.is_some());
     let mut bytes = env.from_lisp::<Vec<u8>>(args[1])?;
     write_input(env, args[0], &mut bytes, input)?;
     Ok(env.nil())
@@ -966,11 +962,7 @@ fn send_key<'e>(env: Env<'e>, args: &[Value<'e>]) -> Result<Value<'e>> {
     // default. The exception is the caller that spells something else as a key:
     // `cooked--alt-scroll-keys' turns one wheel notch into several cursor keys, and the
     // bytes cannot say so -- they are the bytes a real arrow key sends.
-    let input = if args.get(4).is_some_and(|v| !env.is_nil(*v)) {
-        session::Input::Other
-    } else {
-        session::Input::Keyboard
-    };
+    let input = session::Input::typed(env.opt::<bool>(args, 4)?.is_none());
     write_input(env, args[0], &mut bytes, input)?;
     env.into_lisp(true)
 }

@@ -202,6 +202,13 @@ pub(crate) enum Input {
     Other,
 }
 
+impl Input {
+    /// [`Input::Keyboard`] when the user TYPED the bytes, and [`Input::Other`] when not.
+    pub(crate) fn typed(typed: bool) -> Self {
+        if typed { Self::Keyboard } else { Self::Other }
+    }
+}
+
 /// A snapshot handed to Lisp on each drain.
 pub(crate) struct Update {
     pub delta: Delta,
