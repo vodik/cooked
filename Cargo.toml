@@ -3,7 +3,9 @@ name = "cooked"
 version = "1.0.0"
 edition = "2024"
 rust-version = "1.85"
-license = "GPL-3.0-or-later"
+# The module is GPL-3.0-or-later. The second half is `src/emu/parser/', forked from vte and
+# kept under vte's own terms, which a crate embedding it has to name as well.
+license = "GPL-3.0-or-later AND (Apache-2.0 OR MIT)"
 description = "Terminal emulator core for Emacs, with termios and OSC 133 awareness"
 
 # The `cdylib` is what Emacs dlopens; the `rlib` is what the integration tests and the
