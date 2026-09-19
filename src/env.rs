@@ -776,15 +776,19 @@ impl<T: 'static> Tagged<T> {
     }
 
     /// The payload at `p`, or `None` if this module made that allocation for some other
-    /// type.
+    /// type -- or if `p` is null.
+    ///
+    /// Null is answered rather than read because it is Emacs' way of saying it has
+    /// nothing, and `get_user_ptr` is a C function that can come back that way; the
+    /// caller then signals as it does for any other value it was not handed a `T` for.
     ///
     /// # Safety
-    /// `p` must point at a live allocation made by [`Tagged::into_raw`], for any payload
-    /// type. Reading the tag is then in bounds and aligned whichever type that was,
-    /// because `#[repr(C)]` puts a `TypeId` first in every one of them; nothing else is
-    /// read until the tag has said the payload really is a `T`.
+    /// `p` must be null or point at a live allocation made by [`Tagged::into_raw`], for
+    /// any payload type. Reading the tag is then in bounds and aligned whichever type
+    /// that was, because `#[repr(C)]` puts a `TypeId` first in every one of them; nothing
+    /// else is read until the tag has said the payload really is a `T`.
     unsafe fn from_raw<'a>(p: *mut c_void) -> Option<&'a T> {
-        if unsafe { *p.cast::<TypeId>() } != TypeId::of::<T>() {
+        if p.is_null() || unsafe { *p.cast::<TypeId>() } != TypeId::of::<T>() {
             return None;
         }
         Some(unsafe { &(*p.cast::<Self>()).value })
@@ -1065,6 +1069,13 @@ mod tests {
         assert!(unsafe { Tagged::<Dummy>::from_raw(p) }.is_some());
         assert!(unsafe { Tagged::<Other>::from_raw(p) }.is_none());
         drop(unsafe { Box::from_raw(p.cast::<Tagged<Dummy>>()) });
+    }
+
+    #[test]
+    fn a_null_user_pointer_is_refused() {
+        // What `get_user_ptr` hands back when Emacs has nothing to hand back. Reading a
+        // tag out of it would be a null dereference rather than a refusal.
+        assert!(unsafe { Tagged::<Dummy>::from_raw(std::ptr::null_mut()) }.is_none());
     }
 
     #[test]
