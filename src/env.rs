@@ -241,6 +241,12 @@ symbols! {
     // which is the child's to grow.
     Car => "car",
     Cdr => "cdr",
+    // What `input_kind` in `lib.rs` asks about the event being handled, on every
+    // keystroke the user sends to a child: the variable's value, and whether it is a
+    // cons. Three names, interned three times a keypress before they were here.
+    SymbolValue => "symbol-value",
+    LastInputEvent => "last-input-event",
+    Consp => "consp",
     // Every `plist!` key in the module. They are interned once each here instead of once
     // each per drain, which is where fifteen of them were being rebuilt sixty times a
     // second. `sym_index` makes leaving one out a compile error rather than a silent
@@ -466,15 +472,22 @@ impl<'e> Env<'e> {
     }
 
     pub fn call(&self, func: &str, args: &[Value]) -> Result<Value> {
-        let f = self.intern(func)?;
-        ffi!(self, funcall, f, args.len() as isize, args.as_ptr())
+        self.funcall(self.intern(func)?, args)
+    }
+
+    /// [`Env::call`] for a function that is already a [`Value`].
+    ///
+    /// The one to use with [`sym!`] -- `env.funcall(sym!(env, "consp")?, &[v])` -- which
+    /// is how a call site on a hot path names a function without interning it and without
+    /// naming a [`Sym`] variant.
+    pub fn funcall(&self, func: Value, args: &[Value]) -> Result<Value> {
+        ffi!(self, funcall, func, args.len() as isize, args.as_ptr())
     }
 
     /// [`Env::call`] for a function named in the symbol table, which is every function
     /// this module calls often enough for the name lookup to show.
     fn call_sym(&self, func: Sym, args: &[Value]) -> Result<Value> {
-        let f = self.sym(func)?;
-        ffi!(self, funcall, f, args.len() as isize, args.as_ptr())
+        self.funcall(self.sym(func)?, args)
     }
 
     pub fn list(&self, items: &[Value]) -> Result<Value> {

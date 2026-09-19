@@ -778,8 +778,11 @@ fn drain(env: Env, args: &[Value]) -> Result<Value> {
 /// completion request, and names whatever key the user last pressed. The cost of that is
 /// one frame drawn a few milliseconds early, never a frame lost or torn.
 fn input_kind(env: Env) -> Result<session::Input> {
-    let event = env.call("symbol-value", &[env.intern("last-input-event")?])?;
-    if env.is_nil(event) || !env.is_nil(env.call("consp", &[event])?) {
+    let event = env.funcall(
+        sym!(env, "symbol-value")?,
+        &[sym!(env, "last-input-event")?],
+    )?;
+    if env.is_nil(event) || !env.is_nil(env.funcall(sym!(env, "consp")?, &[event])?) {
         Ok(session::Input::Other)
     } else {
         Ok(session::Input::Keyboard)
