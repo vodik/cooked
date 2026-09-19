@@ -593,7 +593,11 @@ impl<'e> Env<'e> {
     }
 
     /// Wrap `data` in an opaque Lisp user-pointer; Emacs' GC runs the destructor.
-    pub fn user_ptr<T: 'static>(&self, data: T) -> Result<Value<'e>> {
+    ///
+    /// Reached through `env.into_lisp(session)` rather than called directly: the
+    /// [`IntoLisp`] impl for a [`UserPtr`] type is what makes this the ordinary way a
+    /// Rust value goes out to Lisp, and it is the only caller.
+    pub fn user_ptr<T: UserPtr>(&self, data: T) -> Result<Value<'e>> {
         let boxed = Tagged::into_raw(data);
         ffi!(self, make_user_ptr, Some(finalizer_of::<T>()), boxed)
             .map(|v| v.in_env(self))
@@ -603,6 +607,9 @@ impl<'e> Env<'e> {
     }
 
     /// Borrow a user-pointer *this module* created for `T`.
+    ///
+    /// Reached through `env.from_lisp::<&Session>(v)`, for the reason [`Env::user_ptr`]
+    /// is reached through `into_lisp`.
     ///
     /// Emacs signals for a value that is not a user-pointer at all, but it has no notion
     /// of what kind of thing a user-pointer holds — so without a check of our own,
@@ -614,7 +621,7 @@ impl<'e> Env<'e> {
     /// answered by reading the pointed-at memory: whether this module made the
     /// allocation at all. Only once it has is the [`Tagged`] header there to read, and
     /// the header is what says which of our own types the allocation holds.
-    pub fn get_user_ptr<T: 'static>(&self, v: Value<'e>) -> Result<&'e T> {
+    pub fn get_user_ptr<T: UserPtr>(&self, v: Value<'e>) -> Result<&'e T> {
         // Propagate first: for a non-user-ptr this is already a pending
         // `wrong-type-argument`, which must not be overwritten with ours.
         //
@@ -626,12 +633,12 @@ impl<'e> Env<'e> {
         let ours = ffi!(self, get_user_finalizer, v)?
             .is_some_and(|f| std::ptr::fn_addr_eq(f, finalizer_of::<T>()));
         if !ours {
-            return Err(self.signal_wrong_type("cooked-session-p", v));
+            return Err(self.signal_wrong_type(T::PREDICATE, v));
         }
         let p = ffi!(self, get_user_ptr, v)?;
         // SAFETY: the finalizer said this module allocated `p` through `Tagged::into_raw`,
         // and Emacs keeps it alive for as long as the Lisp value is reachable.
-        unsafe { Tagged::from_raw(p) }.ok_or_else(|| self.signal_wrong_type("cooked-session-p", v))
+        unsafe { Tagged::from_raw(p) }.ok_or_else(|| self.signal_wrong_type(T::PREDICATE, v))
     }
 
     /// The write end of a `make-pipe-process` channel, owned and safe to use off-thread.
@@ -874,6 +881,26 @@ pub trait IntoLisp<'e> {
 /// borrow of something the handle names, and `&'e Session` -- what a defun asks for when
 /// it wants the session behind its first argument -- can only be tied to the environment
 /// that handed the handle over.
+/// A Rust type this module gives Lisp to hold, as a user pointer.
+///
+/// The bound on [`Env::user_ptr`] and [`Env::get_user_ptr`], so the types that can cross
+/// are the ones written down as impls of this and no others -- `'static` alone would
+/// admit any of them. There is no impl for `&mut T` or for `T` by value on the way back,
+/// which is how the ownership rule is stated: handing a value over moves it, and what
+/// comes back is the shared borrow `Emacs` can hand out any number of times.
+///
+/// Carries the predicate and nothing else. Everything a user pointer needs beyond the
+/// name -- the finalizer address, the type tag -- the compiler already mints per type,
+/// and a trait item that could be written out wrongly per type is a thing to have fewer
+/// of; the name is the one fact only a person can supply, because it names a function on
+/// the Lisp side.
+pub trait UserPtr: 'static {
+    /// The Lisp predicate this type answers to, named in the `wrong-type-argument`
+    /// signalled for a handle of some other kind: `"cooked-session-p"` for a `Session`.
+    /// Lisp must define it, so that the signal names something that resolves.
+    const PREDICATE: &'static str;
+}
+
 pub trait FromLisp<'e>: Sized {
     fn from_lisp(env: &Env<'e>, v: Value<'e>) -> Result<Self>;
 }

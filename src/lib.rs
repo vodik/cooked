@@ -28,7 +28,7 @@ use emu::{
     Assumed, Button, CellMetrics, ColorScheme, ImageFormat, ImageId, Key, Modifiers, NamedKey,
     ShownFormats,
 };
-use env::{Env, Result, Runtime, Value, plist, sym};
+use env::{Env, FromLisp, IntoLisp, Result, Runtime, UserPtr, Value, plist, sym};
 use nix::sys::signal::Signal;
 use pty::Winsize;
 use session::Session;
@@ -83,7 +83,7 @@ macro_rules! accessors {
     }) => {
         [ $( $env.defun($name, 1..=1, &docstring(&[$($doc),+]), {
             fn accessor<'e>(env: Env<'e>, args: &[Value<'e>]) -> Result<Value<'e>> {
-                env.into_lisp(on_session(handle(env, args[0])?, $call))
+                env.into_lisp(on_session(env.from_lisp::<&Session>(args[0])?, $call))
             }
             accessor
         }) ),* ]
@@ -645,8 +645,28 @@ pub unsafe extern "C" fn emacs_module_init(runtime: *mut Runtime) -> std::ffi::c
     }
 }
 
-fn handle<'e>(env: Env<'e>, value: Value<'e>) -> Result<&'e Session> {
-    env.get_user_ptr::<Session>(value)
+/// The two types Lisp holds on this module's behalf, and how each crosses.
+///
+/// A session goes out of `cooked--spawn' as `env.into_lisp(session)' and comes back into
+/// every other session defun as `env.from_lisp::<&Session>(args[0])', which is the same
+/// pair of calls a `u16' argument uses. The ownership rule is in the signatures: the way
+/// out takes the value, so spawning gives the session to Emacs' GC, and the way back
+/// answers `&'e Session' tied to the call, so nothing can hold one past it and nothing
+/// can ask for a `&mut'.
+impl UserPtr for Session {
+    const PREDICATE: &'static str = "cooked-session-p";
+}
+
+impl<'e> IntoLisp<'e> for Session {
+    fn into_lisp(self, env: &Env<'e>) -> Result<Value<'e>> {
+        env.user_ptr(self)
+    }
+}
+
+impl<'e> FromLisp<'e> for &'e Session {
+    fn from_lisp(env: &Env<'e>, v: Value<'e>) -> Result<Self> {
+        env.get_user_ptr(v)
+    }
 }
 
 /// The longest list [`each`] will walk before giving up.
@@ -709,7 +729,8 @@ impl<T> OrSignal<T> for std::result::Result<T, crate::error::Error> {
 fn set_tuning<'e>(env: Env<'e>, args: &[Value<'e>]) -> Result<Value<'e>> {
     let ms = env.from_lisp::<i64>(args[1])?.max(0) as u64;
     let limit = env.from_lisp::<i64>(args[2])?.max(1) as usize;
-    handle(env, args[0])?.set_tuning(std::time::Duration::from_millis(ms), limit);
+    env.from_lisp::<&Session>(args[0])?
+        .set_tuning(std::time::Duration::from_millis(ms), limit);
     Ok(env.nil())
 }
 
@@ -753,14 +774,14 @@ fn spawn<'e>(env: Env<'e>, args: &[Value<'e>]) -> Result<Value<'e>> {
         options,
     )
     .or_signal(env)?;
-    env.user_ptr(session)
+    env.into_lisp(session)
 }
 
 fn drain<'e>(env: Env<'e>, args: &[Value<'e>]) -> Result<Value<'e>> {
     let rejoin = args.get(1).is_none_or(|v| !env.is_nil(*v));
     let hidden = args.get(2).is_some_and(|v| !env.is_nil(*v));
     let promote = args.get(3).is_some_and(|v| !env.is_nil(*v));
-    let session = handle(env, args[0])?;
+    let session = env.from_lisp::<&Session>(args[0])?;
     let update = if hidden {
         session.drain_hidden()
     } else {
@@ -810,7 +831,8 @@ fn write_input<'e>(env: Env<'e>, session: Value<'e>, bytes: &mut [u8]) -> Result
     // `C-g` ends the wait. Emacs raises the quit itself once this returns; all that is
     // owed here is to return.
     let sent = input_kind(env).and_then(|input| {
-        handle(env, session).map(|s| s.send(bytes, input, &|| env.should_quit()))
+        env.from_lisp::<&Session>(session)
+            .map(|s| s.send(bytes, input, &|| env.should_quit()))
     });
     // Zero unconditionally rather than only for secrets: at keystroke sizes it costs
     // nothing, and it means the password path needs no special case to be covered.
@@ -849,7 +871,7 @@ fn send_mouse_report<'e>(env: Env<'e>, args: &[Value<'e>]) -> Result<Value<'e>> 
     // to report is reporting a pointer, not standing in for one.
     let (dx, dy) = (env.opt::<i64>(args, 5)?, env.opt::<i64>(args, 6)?);
     let offset = dx.or(dy).map(|_| (dx.unwrap_or(0), dy.unwrap_or(0)));
-    let session = handle(env, args[0])?;
+    let session = env.from_lisp::<&Session>(args[0])?;
     // The lock is held for the spelling and released before the write, which can wait out
     // a child that is not reading. What it has to cover is the two readings and the bytes
     // built from them; the pty's own ordering is the writer's, not this lock's.
@@ -917,7 +939,8 @@ fn encode_key<'e>(env: Env<'e>, args: &[Value<'e>]) -> Result<Vec<u8>> {
     // The lock covers the negotiation, the two keypad modes and the bytes built from
     // them, and is let go before any write: a spelling taken from one of them as it was
     // and another as it is names a chord neither end agrees on.
-    Ok(handle(env, args[0])?
+    Ok(env
+        .from_lisp::<&Session>(args[0])?
         .term()
         .key_report(key, mods, assumed)
         .unwrap_or_default())
@@ -954,7 +977,7 @@ fn key_table<'e>(env: Env<'e>, _args: &[Value<'e>]) -> Result<Value<'e>> {
 fn send_paste_text<'e>(env: Env<'e>, args: &[Value<'e>]) -> Result<Value<'e>> {
     let mut text = env.from_lisp::<String>(args[1])?;
     let mut bytes = {
-        let session = handle(env, args[0])?;
+        let session = env.from_lisp::<&Session>(args[0])?;
         // The lock covers the strip, the mode and the framing, and is let go before the
         // write, which can wait out a child that is not reading.
         session.term().paste(&text)
@@ -986,13 +1009,13 @@ fn bracketed_paste<'e>(env: Env<'e>, args: &[Value<'e>]) -> Result<Value<'e>> {
 
 fn reply<'e>(env: Env<'e>, args: &[Value<'e>]) -> Result<Value<'e>> {
     let bytes = env.from_lisp::<Vec<u8>>(args[1])?;
-    handle(env, args[0])?.reply(&bytes);
+    env.from_lisp::<&Session>(args[0])?.reply(&bytes);
     Ok(env.nil())
 }
 
 fn reply_focus<'e>(env: Env<'e>, args: &[Value<'e>]) -> Result<Value<'e>> {
     let focused = !env.is_nil(args[1]);
-    let session = handle(env, args[0])?;
+    let session = env.from_lisp::<&Session>(args[0])?;
     // The lock goes before the queue rather than around it: what it has to cover is the
     // mode and the bytes chosen from it, and `Session::reply` takes queues of its own.
     let Some(bytes) = session.term().focus_report(focused) else {
@@ -1004,7 +1027,7 @@ fn reply_focus<'e>(env: Env<'e>, args: &[Value<'e>]) -> Result<Value<'e>> {
 
 fn feed<'e>(env: Env<'e>, args: &[Value<'e>]) -> Result<Value<'e>> {
     let bytes = env.from_lisp::<Vec<u8>>(args[1])?;
-    handle(env, args[0])?.term().feed(&bytes);
+    env.from_lisp::<&Session>(args[0])?.term().feed(&bytes);
     Ok(env.nil())
 }
 
@@ -1035,14 +1058,18 @@ fn resize<'e>(env: Env<'e>, args: &[Value<'e>]) -> Result<Value<'e>> {
         cols: env.from_lisp::<u16>(args[2])?.max(1),
         cell: CellMetrics::new(cell(3)?, cell(4)?),
     };
-    handle(env, args[0])?.resize(size).or_signal(env)?;
+    env.from_lisp::<&Session>(args[0])?
+        .resize(size)
+        .or_signal(env)?;
     Ok(env.nil())
 }
 
 fn remove_rows<'e>(env: Env<'e>, args: &[Value<'e>]) -> Result<Value<'e>> {
     let first = env.from_lisp::<i64>(args[1])?.max(0) as usize;
     let count = env.from_lisp::<i64>(args[2])?.max(0) as usize;
-    handle(env, args[0])?.term().remove_rows(first, count);
+    env.from_lisp::<&Session>(args[0])?
+        .term()
+        .remove_rows(first, count);
     Ok(env.nil())
 }
 
@@ -1056,7 +1083,7 @@ fn row_unsent<'e>(env: Env<'e>, args: &[Value<'e>]) -> Result<Value<'e>> {
             Err(_) => return Ok(env.nil()),
         }
     };
-    handle(env, args[0])?.term().forget_sent(row);
+    env.from_lisp::<&Session>(args[0])?.term().forget_sent(row);
     Ok(env.nil())
 }
 
@@ -1067,7 +1094,7 @@ fn image_forget<'e>(env: Env<'e>, args: &[Value<'e>]) -> Result<Value<'e>> {
         .ok()
         .and_then(ImageId::from_wire)
     {
-        handle(env, args[0])?.term().forget_image(id);
+        env.from_lisp::<&Session>(args[0])?.term().forget_image(id);
     }
     Ok(env.nil())
 }
@@ -1082,13 +1109,18 @@ fn set_color_scheme<'e>(env: Env<'e>, args: &[Value<'e>]) -> Result<Value<'e>> {
     } else {
         return Err(env.signal_wrong_type("cooked-color-scheme-p", args[1]));
     };
-    let owed = handle(env, args[0])?.term().set_color_scheme(scheme);
+    let owed = env
+        .from_lisp::<&Session>(args[0])?
+        .term()
+        .set_color_scheme(scheme);
     env.into_lisp(owed.as_deref())
 }
 
 fn set_graphics_shown<'e>(env: Env<'e>, args: &[Value<'e>]) -> Result<Value<'e>> {
     let shown = shown_formats(env, args[1])?;
-    handle(env, args[0])?.term().set_graphics_shown(shown);
+    env.from_lisp::<&Session>(args[0])?
+        .term()
+        .set_graphics_shown(shown);
     Ok(env.nil())
 }
 
@@ -1114,7 +1146,9 @@ fn shown_formats(env: Env, list: Value) -> Result<ShownFormats> {
 
 fn signal<'e>(env: Env<'e>, args: &[Value<'e>]) -> Result<Value<'e>> {
     let sig = to_signal(env, args[1])?;
-    handle(env, args[0])?.signal(sig).or_signal(env)?;
+    env.from_lisp::<&Session>(args[0])?
+        .signal(sig)
+        .or_signal(env)?;
     Ok(env.nil())
 }
 
@@ -1154,18 +1188,23 @@ fn set_attended<'e>(env: Env<'e>, args: &[Value<'e>]) -> Result<Value<'e>> {
     // `from_lisp::<bool>` is nil-or-not rather than a type check, which is what a Lisp
     // caller means by a boolean -- so anything non-nil reads as attended and there is no
     // wrong value to report.
-    handle(env, args[0])?.set_attended(env.from_lisp(args[1])?);
+    env.from_lisp::<&Session>(args[0])?
+        .set_attended(env.from_lisp(args[1])?);
     Ok(env.nil())
 }
 
 /// Not an `accessors!` entry, for the reason `set_attended` is not.
 fn set_hidden<'e>(env: Env<'e>, args: &[Value<'e>]) -> Result<Value<'e>> {
-    handle(env, args[0])?.set_hidden(env.from_lisp(args[1])?);
+    env.from_lisp::<&Session>(args[0])?
+        .set_hidden(env.from_lisp(args[1])?);
     Ok(env.nil())
 }
 
 fn job_control<'e>(env: Env<'e>, args: &[Value<'e>]) -> Result<Value<'e>> {
-    let jc = handle(env, args[0])?.job_control().or_signal(env)?;
+    let jc = env
+        .from_lisp::<&Session>(args[0])?
+        .job_control()
+        .or_signal(env)?;
     let ch = |env: Env<'e>, c: Option<u8>| match c {
         Some(b) => env.into_lisp(b),
         None => Ok(env.nil()),
@@ -1187,7 +1226,7 @@ fn foreground_pid<'e>(env: Env<'e>, args: &[Value<'e>]) -> Result<Value<'e>> {
     // nil rather than an error: `tcgetpgrp' has nothing to report between a shell putting
     // one job down and the next taking over, and once the session is gone it can answer 0.
     // Neither is a fault the caller can do anything about, and both are ordinary.
-    match handle(env, args[0])?.foreground() {
+    match env.from_lisp::<&Session>(args[0])?.foreground() {
         Ok(pid) => env.into_lisp(pid),
         Err(_) => Ok(env.nil()),
     }
@@ -1202,13 +1241,29 @@ fn foreground_pid<'e>(env: Env<'e>, args: &[Value<'e>]) -> Result<Value<'e>> {
 /// the tag in it says `Session`. See [`Env::get_user_ptr`].
 type FilterCell = std::cell::RefCell<emu::stream::Filter>;
 
+impl UserPtr for FilterCell {
+    const PREDICATE: &'static str = "cooked-filter-p";
+}
+
+impl<'e> IntoLisp<'e> for FilterCell {
+    fn into_lisp(self, env: &Env<'e>) -> Result<Value<'e>> {
+        env.user_ptr(self)
+    }
+}
+
+impl<'e> FromLisp<'e> for &'e FilterCell {
+    fn from_lisp(env: &Env<'e>, v: Value<'e>) -> Result<Self> {
+        env.get_user_ptr(v)
+    }
+}
+
 fn make_filter<'e>(env: Env<'e>, _args: &[Value<'e>]) -> Result<Value<'e>> {
-    env.user_ptr(FilterCell::new(emu::stream::Filter::new()))
+    env.into_lisp(FilterCell::new(emu::stream::Filter::new()))
 }
 
 /// Resolve one chunk of a comint child's output; see `cooked--filter-feed'.
 fn filter_feed<'e>(env: Env<'e>, args: &[Value<'e>]) -> Result<Value<'e>> {
-    let filter = env.get_user_ptr::<FilterCell>(args[0])?;
+    let filter = env.from_lisp::<&FilterCell>(args[0])?;
     // The chunk arrives as an Emacs string rather than as bytes, because
     // `comint-preoutput-filter-functions' is handed output the process coding system has
     // already decoded, and Emacs is the one holding back a multibyte character split

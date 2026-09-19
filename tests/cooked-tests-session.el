@@ -329,6 +329,24 @@ a foreign handle would be reinterpreted as a session."
   (should-error (cooked--pid nil) :type 'wrong-type-argument)
   (should-error (cooked--kill (make-marker)) :type 'wrong-type-argument))
 
+(ert-deftest cooked-core-blames-the-predicate-of-the-type-it-asked-for ()
+  "A handle of the wrong kind is refused by the name of the kind that was wanted.
+
+A session and a comint filter are both user-pointers this module made, so the
+finalizer comparison cannot always separate them and the type tag inside the
+allocation is what does.  Either way the `wrong-type-argument' has to name the
+predicate for the type the defun asked for: handing a session to
+`cooked--filter-feed' once said `cooked-session-p', which named the argument
+that was passed rather than the one that was wanted."
+  (cooked-tests--with-session (list "/bin/sh")
+    (let ((filter (cooked--make-filter)))
+      (should (equal (cdr (should-error (cooked--filter-feed cooked--session "x" nil)
+                                        :type 'wrong-type-argument))
+                     (list 'cooked-filter-p cooked--session)))
+      (should (equal (cdr (should-error (cooked--pid filter)
+                                        :type 'wrong-type-argument))
+                     (list 'cooked-session-p filter))))))
+
 (ert-deftest cooked-exit-status-is-reported ()
   (cooked-tests--with-session '("/bin/sh" "-c" "exit 9")
     (should (cooked-tests--settle

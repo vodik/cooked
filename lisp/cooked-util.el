@@ -76,6 +76,19 @@ user-pointer's finalizer against its own; Emacs itself cannot tell one
 module's user-pointer from another's."
   (and (user-ptrp object) (ignore-errors (integerp (cooked--pid object)))))
 
+(defun cooked-filter-p (object)
+  "Whether OBJECT could be a VT filter handle made by `cooked--make-filter'.
+
+The sibling of `cooked-session-p', and the predicate the core names when a
+filter defun is handed something else.  Only a user-pointer can be a filter,
+and that is as much as this can honestly say: Emacs cannot tell one module's
+user-pointer from another's, and a filter has no accessor to ask the core
+through the way `cooked-session-p' asks `cooked--pid'.  The core does the real
+check -- the user-pointer's finalizer and the type tag inside it -- and this
+exists so the `wrong-type-argument' it signals names a predicate that
+resolves."
+  (user-ptrp object))
+
 (defvar cooked--buffers nil
   "Every buffer that has entered `cooked-mode', including some since killed.
 
