@@ -3,7 +3,6 @@
 //! Three producers, one pipeline: each ends at `intern_image` + `lay_image` and shares
 //! everything downstream of "here are some pixels".
 
-use super::osc::rejoin;
 use super::*;
 use crate::emu::kitty::CursorMove;
 
@@ -126,17 +125,16 @@ impl State {
     /// `inline=1` is required. Without it the sequence means "download this to the user's
     /// machine", a file-writing capability that is refused by doing nothing.
     ///
-    /// Semicolons separate the keys as well as OSC parameters, so the arguments arrive
-    /// split and are rejoined; base64 contains no semicolon, which makes that safe.
+    /// Semicolons separate the keys, which is one reason the parser hands a payload over
+    /// whole rather than cut at every `;`: this one is megabytes of base64.
     ///
     /// Returns whether this was an inline-image `File=`, handled or refused. `false`
     /// means it was some other `OSC 1337` and belongs to whoever else is listening.
-    pub(super) fn iterm_file(&mut self, params: &[&[u8]]) -> bool {
-        let joined = rejoin(params, 1);
+    pub(super) fn iterm_file(&mut self, payload: &[u8]) -> bool {
         // The colon separates the arguments from the payload, and only the first one
         // does: base64 has no colon in it.
-        let colon = joined.iter().position(|&b| b == b':');
-        let args = String::from_utf8_lossy(&joined[..colon.unwrap_or(joined.len())]).into_owned();
+        let colon = memchr::memchr(b':', payload);
+        let args = String::from_utf8_lossy(&payload[..colon.unwrap_or(payload.len())]).into_owned();
         let Some(args) = args.strip_prefix("File=") else {
             return false;
         };
@@ -173,7 +171,7 @@ impl State {
         if !inline {
             return true;
         }
-        let Some(bytes) = decode_base64(&joined[colon + 1..]) else {
+        let Some(bytes) = decode_base64(&payload[colon + 1..]) else {
             return true;
         };
         let Some((format, px)) = crate::emu::png::sniff(&bytes) else {
@@ -263,7 +261,7 @@ impl State {
 
     /// A slice of the running DCS string's payload.
     ///
-    /// Slices rather than a call per byte is the vendored parser's doing, and it is what
+    /// Slices rather than a call per byte is the parser's doing, and it is what
     /// makes collecting a megabyte of sixel a handful of appends.
     pub(super) fn dcs_put(&mut self, bytes: &[u8]) {
         // Truncated rather than dropped, unlike an over-long APC: a sixel body is a
@@ -316,7 +314,7 @@ impl State {
 
     /// `ESC _ ... ST` — the kitty graphics protocol, and nothing else so far.
     ///
-    /// Reachable only because the parser is vendored: upstream vte consumes APC and tells
+    /// Reachable only because the parser is cooked's own: upstream vte consumes APC and tells
     /// the performer nothing.
     pub(super) fn apc(&mut self, bytes: &[u8]) {
         // A probe is how a kitty client decides whether to transmit at all, so this is

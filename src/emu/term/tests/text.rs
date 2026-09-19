@@ -401,3 +401,14 @@ fn a_widened_cell_blanks_the_wide_character_it_grows_over() {
     t.feed("\x1b[1;1H\u{2714}\u{FE0F}".as_bytes());
     assert_eq!(cell_chars(&t), "\u{2714}+    ");
 }
+
+/// DEL and the C1 controls never become text. Both are zero width, so either reaching
+/// `print` would be folded onto the cell to its left as though it were a combining mark,
+/// and a control character would be sitting in an Emacs buffer. The parser drops them;
+/// this pins that nothing downstream has to.
+#[test]
+fn del_and_c1_controls_leave_nothing_on_the_grid() {
+    let t = term(2, 20, "a\x7fb\u{85}c\u{9b}d".as_bytes());
+    assert_eq!(text(&t, 0).trim_end(), "abcd");
+    assert!(text(&t, 0).chars().all(|c| !c.is_control()));
+}

@@ -914,15 +914,14 @@ fn backlog_counts_pending_events_as_well_as_scrollback() {
 /// The batched print path must be indistinguishable from the per-character one.
 ///
 /// The reference side sets `force_per_character_print`, which is the only way to make a
-/// `Term` take the old path. Feeding a byte at a time does *not* do it -- `print_str`
+/// `Term` take the old path. Feeding a byte at a time does *not* do it -- `print_ascii`
 /// still runs, with runs of length one -- so a test built that way compares the fast path
 /// against itself; the first version of this test did exactly that and survived
 /// deliberately breaking `write_run` twice.
 ///
 /// The cases land on the seams: the last column, where `write_run` stops one short so the
 /// deferred wrap is decided in one place; wide characters and combining marks, which it
-/// declines; DEL, which is not a C0 control and so reaches `print_str` while having no
-/// width; insert mode and a designated set or single shift, which disable it; and a scroll, so eviction is
+/// declines; DEL, which the decoder drops from the middle of a run; insert mode and a designated set or single shift, which disable it; and a scroll, so eviction is
 /// compared too.
 #[test]
 fn batched_and_per_character_printing_agree() {

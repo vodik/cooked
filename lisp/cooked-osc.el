@@ -751,14 +751,14 @@ it could only vanish without the message a refusal promises."
   :type 'natnum
   :group 'cooked)
 
-(defconst cooked--osc-52-core-limit (- (ash 1 20) 12)
+(defconst cooked--osc-52-core-limit (- (ash 1 20) 16)
   "The longest OSC 52 payload the native core is sure to hand to Lisp.
 
-The core refuses any OSC whose fields after the code add up to more than its
-`OSC_PAYLOAD_LIMIT', one mebibyte.  For OSC 52 those fields are the targets
-and the data, and the targets name at most the twelve selections
-`cpqs01234567', so twelve less than a mebibyte is always delivered.  It is a
-multiple of four, which a padded base64 payload always is.")
+The core refuses any OSC with more than its `OSC_PAYLOAD_LIMIT', one mebibyte,
+after the code.  For OSC 52 that is the targets, a semicolon and the data, and
+the targets name at most the twelve selections `cpqs01234567'.  Thirteen less
+than a mebibyte is therefore always delivered, and this is the multiple of four
+below that, which a padded base64 payload always is.")
 
 (defvar-local cooked--clipboard-refused nil
   "The size of the reply last refused for `cooked-clipboard-max-size', or nil.

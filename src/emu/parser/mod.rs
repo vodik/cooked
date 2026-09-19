@@ -1,33 +1,38 @@
-//! The VT parser state machine, vendored from `vte` 0.15.0.
+//! The VT parser state machine, forked from `vte` 0.15.0.
 //!
 //! Upstream is <https://github.com/alacritty/vte>, by Joe Wilm and Christian Duerr,
 //! dual-licensed Apache-2.0 OR MIT; both licences sit beside this file. It is
 //! implemented according to [Paul Williams' ANSI parser state machine].
 //!
-//! Vendored rather than depended on because two things cooked needs cannot be
-//! expressed through [`Perform`] as upstream defines it:
+//! **This is cooked's parser now, and is not kept in step with upstream.** It began as a
+//! vendored copy held close to the original so that a re-sync would be a diff, and the
+//! differences below outgrew that bargain: each is a place where `vte`'s interface was
+//! the wrong shape for what sits behind it here, and staying faithful meant working
+//! around the parser from the outside. The escape-sequence states -- CSI, DCS, ESC and
+//! their parameters -- are still upstream's and still read like it. Ground, the strings
+//! and the [`Perform`] trait are not.
 //!
-//! * **APC is discarded.** `ESC _` lands in `State::SosPmApcString`, which consumes to
-//!   the terminator and tells the performer nothing — and APC is where the kitty
-//!   graphics protocol lives, so an image never reaches us at all.
-//! * **String payloads arrive one byte at a time.** `Perform::put` is called per byte,
-//!   which is the wrong shape for a multi-megabyte image transmission.
-//!
-//! Both are answered here: [`Perform::apc_dispatch`] receives an APC payload whole, and
-//! DCS payloads arrive as slices through [`Perform::put`].
-//!
-//! Kept otherwise faithful to upstream, so that a future re-sync is a diff rather than
-//! an archaeology exercise. The `no_std` machinery and the optional `ansi` module are
-//! the only things dropped: cooked is always `std`, and it has its own interpreter.
-//!
-//! Two *behavioural* divergences, both in [`Parser::advance_partial_utf8`], both found by
-//! `tests/delta_replay.rs` and both cases of the resumed path disagreeing with the path a
-//! whole read takes — so both are bugs rather than adaptations, and a re-sync should
-//! carry them forward rather than drop them:
-//!
-//! * a codepoint split across two reads no longer swallows the text that followed it in
-//!   the same buffer;
-//! * a C1 control split across two reads is executed rather than printed.
+//! * **APC is delivered.** Upstream discards it along with SOS and PM, and APC is where
+//!   the kitty graphics protocol lives. [`Perform::apc_dispatch`] receives a payload
+//!   whole.
+//! * **DCS payloads arrive as slices**, through [`Perform::put`], and both string states
+//!   are scanned in bulk. Upstream calls `put` per byte, which is the wrong shape for a
+//!   sixel image megabytes long.
+//! * **An OSC is a code and a payload**, not a list of parameters. Upstream cut the
+//!   string at every `;`, into at most sixteen pieces, and everything downstream whose
+//!   payload could contain one glued it back together. See [`Perform::osc_dispatch`].
+//! * **OSC and APC payloads are bounded**, by [`MAX_OSC_RAW`] and [`MAX_APC_RAW`], and
+//!   one that outgrows its bound is dropped rather than truncated.
+//! * **Text is bytes.** Ground hands over every run of bytes from `0x20` up as it
+//!   arrived, through [`Perform::print_bytes`], and knows nothing about UTF-8. Upstream
+//!   validated it, held back a sequence a read had cut short, and called `print` once a
+//!   character -- and had two bugs in resuming a split code point, both found by
+//!   `tests/delta_replay.rs`. Reading the bytes is [`crate::emu::utf8`]'s, where it is
+//!   done once and a read may cut the stream anywhere without changing the answer.
+//! * **There are no C1 controls**, and DEL is text for the decoder to drop. See
+//!   [`Parser::advance_ground`].
+//! * The `no_std` machinery and the optional `ansi` module are gone: cooked is always
+//!   `std`, and it has its own interpreter.
 //!
 //! # Differences from the original state machine description
 //!
@@ -37,18 +42,13 @@
 //!
 //! [Paul Williams' ANSI parser state machine]: https://vt100.net/emu/dec_ansi_parser
 #![deny(clippy::all, clippy::if_not_else, clippy::enum_glob_use)]
-// Upstream is a library crate, where these are the API; here they are crate-internal.
-// Narrowing them would make a re-sync a rewrite rather than a diff, which is the whole
-// bargain this file's header strikes.
-#![allow(unreachable_pub)]
 use core::str;
 
 mod params;
 
-pub use params::{Params, ParamsIter};
+pub(crate) use params::{Params, ParamsIter};
 
 const MAX_INTERMEDIATES: usize = 2;
-const MAX_OSC_PARAMS: usize = 16;
 
 /// Largest APC payload collected before the sequence is abandoned.
 ///
@@ -56,7 +56,7 @@ const MAX_OSC_PARAMS: usize = 16;
 /// cap themselves at 4096 bytes a piece, but an unchunked `t=d` is one APC carrying the
 /// whole base64 image. Consumers cap again on what the payload *means*; this is only the
 /// bound on what the parser will hold on their behalf.
-pub const MAX_APC_RAW: usize = 8 << 20;
+pub(crate) const MAX_APC_RAW: usize = 8 << 20;
 /// Largest OSC payload the parser will collect before giving up on the string.
 ///
 /// Upstream used its own 1024 to size a `no_std` array; the `Vec` that replaced it had no
@@ -68,43 +68,28 @@ pub const MAX_APC_RAW: usize = 8 << 20;
 /// Consumers cap again on what a payload *means* -- see `OSC_PAYLOAD_LIMIT`, which is
 /// far tighter for every code that is not carrying a picture. This is only the bound on
 /// what the parser will hold on their behalf.
-pub const MAX_OSC_RAW: usize = 8 << 20;
+pub(crate) const MAX_OSC_RAW: usize = 8 << 20;
 
 /// Parser for raw _VTE_ protocol which delegates actions to a [`Perform`]
 ///
 /// [`Perform`]: trait.Perform.html
 ///
 #[derive(Default)]
-pub struct Parser {
+pub(crate) struct Parser {
     state: State,
     intermediates: [u8; MAX_INTERMEDIATES],
     intermediate_idx: usize,
     params: Params,
     param: u16,
-    osc_raw: Vec<u8>,
-    osc_params: [(usize, usize); MAX_OSC_PARAMS],
-    osc_num_params: usize,
-    /// Set when an OSC payload outgrew [`MAX_OSC_RAW`], so its end dispatches nothing.
-    ///
-    /// Dropped rather than truncated, for the same reason an over-long APC is: the
-    /// parameter offsets index into a buffer that stopped growing, so half an OSC is not
-    /// a shorter OSC but a set of slices that no longer mean what they say.
-    osc_overflow: bool,
-    apc_raw: Vec<u8>,
-    /// Set when an APC payload outgrew [`MAX_APC_RAW`], so its end dispatches nothing.
-    ///
-    /// Dropped rather than truncated: the consumer of an APC is decoding a structured
-    /// payload, and half of a kitty image is not a smaller image, it is a parse error
-    /// with a plausible-looking prefix.
-    apc_overflow: bool,
+    /// The payload of whichever string is being collected, an OSC's or an APC's. One,
+    /// because there is only ever one string; see [`Payload`].
+    string: Payload,
     ignoring: bool,
-    partial_utf8: [u8; 4],
-    partial_utf8_len: usize,
 }
 
 impl Parser {
     /// Create a new Parser
-    pub fn new() -> Parser {
+    pub(crate) fn new() -> Parser {
         Default::default()
     }
 }
@@ -126,13 +111,8 @@ impl Parser {
     ///
     /// [`Perform`]: trait.Perform.html
     #[inline]
-    pub fn advance<P: Perform>(&mut self, performer: &mut P, bytes: &[u8]) {
+    pub(crate) fn advance<P: Perform>(&mut self, performer: &mut P, bytes: &[u8]) {
         let mut i = 0;
-
-        // Handle partial codepoints from previous calls to `advance`.
-        if self.partial_utf8_len != 0 {
-            i += self.advance_partial_utf8(performer, bytes);
-        }
 
         while i != bytes.len() {
             match self.state {
@@ -183,13 +163,7 @@ impl Parser {
             .iter()
             .position(|b| matches!(b, 0x18 | 0x1A | 0x1B | 0x9C))
             .unwrap_or(bytes.len());
-        if end != 0 {
-            let room = MAX_APC_RAW - self.apc_raw.len().min(MAX_APC_RAW);
-            if end > room {
-                self.apc_overflow = true;
-            }
-            self.apc_raw.extend_from_slice(&bytes[..end.min(room)]);
-        }
+        self.string.extend(&bytes[..end]);
         if end == bytes.len() {
             return end;
         }
@@ -212,17 +186,12 @@ impl Parser {
     /// bulk string states are taken here as in [`Self::advance`], which upstream lacks.
     #[inline]
     #[must_use = "Returned value should be used to processs the remaining bytes"]
-    pub fn advance_until_terminated<P: Perform>(
+    pub(crate) fn advance_until_terminated<P: Perform>(
         &mut self,
         performer: &mut P,
         bytes: &[u8],
     ) -> usize {
         let mut i = 0;
-
-        // Handle partial codepoints from previous calls to `advance`.
-        if self.partial_utf8_len != 0 {
-            i += self.advance_partial_utf8(performer, bytes);
-        }
 
         while i != bytes.len() && !performer.terminated() {
             match self.state {
@@ -255,7 +224,7 @@ impl Parser {
             State::DcsPassthrough => self.advance_dcs_passthrough(performer, byte),
             State::Escape => self.advance_esc(performer, byte),
             State::EscapeIntermediate => self.advance_esc_intermediate(performer, byte),
-            State::OscString => self.advance_osc_string(performer, byte),
+            State::OscString { code_end } => self.advance_osc_string(performer, code_end, byte),
             State::ApcString => self.advance_apc_string(performer, byte),
             State::SosPmApcString => self.anywhere(performer, byte),
             State::Ground => unreachable!(),
@@ -436,14 +405,11 @@ impl Parser {
                 self.state = State::CsiEntry
             }
             0x5D => {
-                self.osc_raw.clear();
-                self.osc_num_params = 0;
-                self.osc_overflow = false;
-                self.state = State::OscString
+                self.string.begin(MAX_OSC_RAW);
+                self.state = State::OscString { code_end: None }
             }
             0x5F => {
-                self.apc_raw.clear();
-                self.apc_overflow = false;
+                self.string.begin(MAX_APC_RAW);
                 self.state = State::ApcString
             }
             0x30..=0x7E => {
@@ -475,25 +441,35 @@ impl Parser {
     }
 
     #[inline(always)]
-    fn advance_osc_string<P: Perform>(&mut self, performer: &mut P, byte: u8) {
+    fn advance_osc_string<P: Perform>(
+        &mut self,
+        performer: &mut P,
+        code_end: Option<usize>,
+        byte: u8,
+    ) {
         match byte {
             0x00..=0x06 | 0x08..=0x17 | 0x19 | 0x1C..=0x1F => (),
             0x07 => {
-                self.osc_end(performer, byte);
+                self.osc_dispatch(performer, code_end, byte);
                 self.state = State::Ground
             }
             0x18 | 0x1A => {
-                self.osc_end(performer, byte);
+                self.osc_dispatch(performer, code_end, byte);
                 performer.execute(byte);
                 self.state = State::Ground
             }
             0x1B => {
-                self.osc_end(performer, byte);
+                self.osc_dispatch(performer, code_end, byte);
                 self.reset_params();
                 self.state = State::Escape
             }
-            0x3B => self.action_osc_put_param(),
-            _ => self.action_osc_put(byte),
+            // The `;` after the code is the only one the parser reads. It is not stored,
+            // and every later one is payload.
+            0x3B if code_end.is_none() => {
+                let code_end = Some(self.string.len());
+                self.state = State::OscString { code_end }
+            }
+            _ => self.string.extend(&[byte]),
         }
     }
 
@@ -508,7 +484,6 @@ impl Parser {
         match byte {
             0x18 | 0x1A => {
                 // Cancelled mid-payload: abandon it rather than dispatch a fragment.
-                self.apc_raw.clear();
                 performer.execute(byte);
                 self.state = State::Ground
             }
@@ -521,25 +496,16 @@ impl Parser {
                 self.apc_end(performer);
                 self.state = State::Ground
             }
-            _ => self.action_apc_put(byte),
+            _ => self.string.extend(&[byte]),
         }
     }
 
-    #[inline(always)]
-    fn action_apc_put(&mut self, byte: u8) {
-        if self.apc_raw.len() >= MAX_APC_RAW {
-            self.apc_overflow = true;
-            return;
-        }
-        self.apc_raw.push(byte);
-    }
-
+    /// Hand a finished APC over, unless it outgrew [`MAX_APC_RAW`]; see
+    /// [`Payload::finish`].
     fn apc_end<P: Perform>(&mut self, performer: &mut P) {
-        if !self.apc_overflow {
-            performer.apc_dispatch(&self.apc_raw);
+        if let Some(payload) = self.string.finish() {
+            performer.apc_dispatch(payload);
         }
-        self.apc_raw.clear();
-        self.apc_overflow = false;
     }
 
     #[inline(always)]
@@ -634,49 +600,6 @@ impl Parser {
         }
     }
 
-    /// Add OSC param separator.
-    #[inline]
-    fn action_osc_put_param(&mut self) {
-        let idx = self.osc_raw.len();
-
-        let param_idx = self.osc_num_params;
-        match param_idx {
-            // First param is special - 0 to current byte index.
-            0 => self.osc_params[param_idx] = (0, idx),
-
-            // Only process up to MAX_OSC_PARAMS.
-            MAX_OSC_PARAMS => return,
-
-            // All other params depend on previous indexing.
-            _ => {
-                let prev = self.osc_params[param_idx - 1];
-                let begin = prev.1;
-                self.osc_params[param_idx] = (begin, idx);
-            }
-        }
-
-        self.osc_num_params += 1;
-    }
-
-    #[inline(always)]
-    fn action_osc_put(&mut self, byte: u8) {
-        if self.osc_raw.len() >= MAX_OSC_RAW {
-            self.osc_overflow = true;
-            return;
-        }
-        self.osc_raw.push(byte);
-    }
-
-    fn osc_end<P: Perform>(&mut self, performer: &mut P, byte: u8) {
-        self.action_osc_put_param();
-        if !self.osc_overflow {
-            self.osc_dispatch(performer, byte);
-        }
-        self.osc_raw.clear();
-        self.osc_num_params = 0;
-        self.osc_overflow = false;
-    }
-
     /// Reset escape sequence parameters and intermediates.
     #[inline]
     fn reset_params(&mut self) {
@@ -687,225 +610,139 @@ impl Parser {
         self.params.clear();
     }
 
-    /// Hand the collected OSC parameters to the performer as slices of `osc_raw`.
+    /// Hand the collected OSC to the performer: its code, and the rest of it untouched.
     ///
-    /// Upstream built this array with `MaybeUninit` and a pointer cast, which is `no_std`
-    /// machinery for avoiding a default value -- and `no_std` is precisely what this
-    /// vendored copy dropped. An empty slice is a perfectly good default here, so the
-    /// safe form compiles to the same thing without the `assume_init` or the cast.
+    /// Upstream split the whole string at every `;`, into at most sixteen parameters, and
+    /// every consumer whose payload may contain one -- a URI, a path, a title, a command
+    /// line, iTerm2's `File=` arguments -- had to glue it back together. What separates
+    /// the fields of a payload is that payload's business: OSC 8 has exactly two, OSC 133
+    /// has as many options as the shell sent, and OSC 66 separates its metadata with
+    /// colons. The one thing every OSC shares is `CODE ;`, so that is all this reads.
+    ///
+    /// An OSC whose code is not a number that fits is dispatched nowhere. Nothing has
+    /// ever been specified with one, and both performers dropped them already. Nor is one
+    /// that outgrew [`MAX_OSC_RAW`]; see [`Payload::finish`].
     #[inline]
-    fn osc_dispatch<P: Perform>(&self, performer: &mut P, byte: u8) {
-        let mut slices: [&[u8]; MAX_OSC_PARAMS] = [&[]; MAX_OSC_PARAMS];
-        for (slice, &(start, end)) in slices
-            .iter_mut()
-            .zip(&self.osc_params[..self.osc_num_params])
-        {
-            *slice = &self.osc_raw[start..end];
+    fn osc_dispatch<P: Perform>(&self, performer: &mut P, code_end: Option<usize>, byte: u8) {
+        let Some(string) = self.string.finish() else {
+            return;
+        };
+        let (code, payload) = match code_end {
+            Some(end) => (&string[..end], Some(&string[end..])),
+            None => (string, None),
+        };
+        if let Some(code) = osc_code(code) {
+            performer.osc_dispatch(code, payload, byte == 0x07);
         }
-        performer.osc_dispatch(&slices[..self.osc_num_params], byte == 0x07);
     }
 
-    /// Advance the parser state from ground.
+    /// Advance the parser state from ground by one step: a run of text, or one control.
     ///
-    /// The ground state is handled separately since it can only be left using
-    /// the escape character (`\x1b`). This allows more efficient parsing by
-    /// using SIMD search with [`memchr`].
+    /// Text is every byte from `0x20` up, and it is handed over as it arrived. Upstream
+    /// searched for the next `ESC`, validated everything before it as UTF-8, held back a
+    /// sequence the read had cut short, and walked the result a character at a time
+    /// looking for controls -- after which the performer decoded it all again to draw
+    /// it. None of that is grammar. The escape sequences are seven-bit and the same
+    /// whatever the eighth bit means, so what a high byte *is* belongs to whoever draws
+    /// text, and reading it once, there, is both less work and one fewer place that has
+    /// to agree with another about ill-formed input. See [`crate::emu::utf8`].
+    ///
+    /// DEL is text by this rule, and is dropped by the decoder along with the C1
+    /// controls, which as far as this parser is concerned do not exist.
     #[inline]
     fn advance_ground<P: Perform>(&mut self, performer: &mut P, bytes: &[u8]) -> usize {
-        // Find the next escape character.
-        let num_bytes = bytes.len();
-        let plain_chars = memchr::memchr(0x1B, bytes).unwrap_or(num_bytes);
-
-        // If the next character is ESC, just process it and short-circuit.
-        if plain_chars == 0 {
-            self.state = State::Escape;
-            self.reset_params();
-            return 1;
+        let text = text_len(bytes);
+        if text > 0 {
+            performer.print_bytes(&bytes[..text]);
+            return text;
         }
-
-        match str::from_utf8(&bytes[..plain_chars]) {
-            Ok(parsed) => {
-                Self::ground_dispatch(performer, parsed);
-                let mut processed = plain_chars;
-
-                // If there's another character, it must be escape so process it directly.
-                if processed < num_bytes {
-                    self.state = State::Escape;
-                    self.reset_params();
-                    processed += 1;
-                }
-
-                processed
+        match bytes[0] {
+            0x1B => {
+                self.state = State::Escape;
+                self.reset_params();
             }
-            // Handle invalid and partial utf8.
-            Err(err) => {
-                // Dispatch all the valid bytes.
-                let valid_bytes = err.valid_up_to();
-                let parsed = unsafe { str::from_utf8_unchecked(&bytes[..valid_bytes]) };
-                Self::ground_dispatch(performer, parsed);
-
-                match err.error_len() {
-                    Some(len) => {
-                        // Execute C1 escapes or emit replacement character.
-                        if len == 1 && bytes[valid_bytes] <= 0x9F {
-                            performer.execute(bytes[valid_bytes]);
-                        } else {
-                            performer.print('�');
-                        }
-
-                        // Restart processing after the invalid bytes.
-                        //
-                        // While we could theoretically try to just re-parse
-                        // `bytes[valid_bytes + len..plain_chars]`, it's easier
-                        // to just skip it and invalid utf8 is pretty rare anyway.
-                        valid_bytes + len
-                    }
-                    None => {
-                        if plain_chars < num_bytes {
-                            // Process bytes cut off by escape.
-                            performer.print('�');
-                            self.state = State::Escape;
-                            self.reset_params();
-                            plain_chars + 1
-                        } else {
-                            // Process bytes cut off by the buffer end.
-                            let extra_bytes = num_bytes - valid_bytes;
-                            let partial_len = self.partial_utf8_len + extra_bytes;
-                            self.partial_utf8[self.partial_utf8_len..partial_len]
-                                .copy_from_slice(&bytes[valid_bytes..valid_bytes + extra_bytes]);
-                            self.partial_utf8_len = partial_len;
-                            num_bytes
-                        }
-                    }
-                }
-            }
+            byte => performer.execute(byte),
         }
+        1
+    }
+}
+
+/// The payload of a string being collected, which may grow only so far.
+///
+/// What it guards is the reading. A payload that outgrew its limit is dropped rather than
+/// truncated -- half a URI is a different URI, and half a kitty image is not a smaller
+/// image but a parse error with a plausible-looking prefix -- and the way that is held to
+/// is that [`Payload::finish`] is the only way to the bytes, and gives none once anything
+/// has been turned away.
+///
+/// The allocation outlives the string, which is why this is a field of the parser and not
+/// of the state that is collecting into it.
+#[derive(Default)]
+struct Payload {
+    bytes: Vec<u8>,
+    limit: usize,
+    overflowed: bool,
+}
+
+impl Payload {
+    /// Start a string of at most LIMIT bytes, forgetting whatever the last one left.
+    fn begin(&mut self, limit: usize) {
+        self.bytes.clear();
+        self.limit = limit;
+        self.overflowed = false;
     }
 
-    /// Advance the parser while processing a partial utf8 codepoint.
+    /// Bytes collected so far.
+    fn len(&self) -> usize {
+        self.bytes.len()
+    }
+
+    /// Collect BYTES, or as many of them as there is room for.
     #[inline]
-    fn advance_partial_utf8<P: Perform>(&mut self, performer: &mut P, bytes: &[u8]) -> usize {
-        // Try to copy up to 3 more characters, to ensure the codepoint is complete.
-        let old_bytes = self.partial_utf8_len;
-        let to_copy = bytes.len().min(self.partial_utf8.len() - old_bytes);
-        self.partial_utf8[old_bytes..old_bytes + to_copy].copy_from_slice(&bytes[..to_copy]);
-        self.partial_utf8_len += to_copy;
-
-        // Parse the unicode character.
-        match str::from_utf8(&self.partial_utf8[..self.partial_utf8_len]) {
-            // If the entire buffer is valid, use the first character and continue parsing.
-            Ok(parsed) => {
-                let c = unsafe { parsed.chars().next().unwrap_unchecked() };
-                Self::partial_dispatch(performer, c);
-
-                self.partial_utf8_len = 0;
-                c.len_utf8() - old_bytes
-            }
-            Err(err) => {
-                let valid_bytes = err.valid_up_to();
-                // If we have any valid bytes, that means we partially copied another
-                // utf8 character into `partial_utf8`. Only the first character is ours to
-                // emit; everything after it is still in the caller's buffer and is parsed
-                // by the loop we return to.
-                //
-                // **A divergence from upstream**, the first of the two the module header
-                // lists. vte 0.15.0 returns `valid_bytes - old_bytes` here, which tells
-                // the caller to skip *every* byte that parsed rather than just the
-                // character that was printed -- so text between the completed codepoint
-                // and the next partial one is consumed and never printed. It takes three
-                // things at once to reach: a codepoint split across two reads, at least
-                // one more character after it, and a second multi-byte codepoint whose
-                // own bytes are cut by the four-byte staging buffer. `tests/
-                // delta_replay.rs` produces all three within a few hundred cases, which
-                // is precisely what the fragmented-write generator is for; by hand it
-                // looks like `"\u{2500}"` split mid-sequence, and the space after it
-                // vanishing off the grid.
-                //
-                // The fix is to return what the `Ok` arm ten lines above already returns:
-                // the length of the character actually emitted. `c` began in
-                // `partial_utf8` before this call, so `c.len_utf8()` always exceeds
-                // `old_bytes` and the subtraction cannot wrap.
-                if valid_bytes > 0 {
-                    let c = unsafe {
-                        let parsed = str::from_utf8_unchecked(&self.partial_utf8[..valid_bytes]);
-                        parsed.chars().next().unwrap_unchecked()
-                    };
-
-                    Self::partial_dispatch(performer, c);
-
-                    self.partial_utf8_len = 0;
-                    return c.len_utf8() - old_bytes;
-                }
-
-                match err.error_len() {
-                    // If the partial character was also invalid, emit the replacement
-                    // character.
-                    Some(invalid_len) => {
-                        performer.print('�');
-
-                        self.partial_utf8_len = 0;
-                        invalid_len - old_bytes
-                    }
-                    // If the character still isn't complete, wait for more data.
-                    None => to_copy,
-                }
-            }
-        }
+    fn extend(&mut self, bytes: &[u8]) {
+        let room = self.limit.saturating_sub(self.bytes.len());
+        self.overflowed |= bytes.len() > room;
+        self.bytes
+            .extend_from_slice(&bytes[..bytes.len().min(room)]);
     }
 
-    /// One code point completed out of the partial-UTF-8 staging buffer, dispatched the
-    /// way [`Parser::ground_dispatch`] would have dispatched it had the bytes arrived in
-    /// one read.
-    ///
-    /// **A divergence from upstream**, the second of the two the module header lists, and
-    /// the same shape as the first: vte 0.15.0 calls `print` unconditionally here, so a C1 control
-    /// split across two reads is printed as a glyph while the same two bytes arriving
-    /// together are executed. `CSI` written as `\u{9b}` is the one that matters -- the
-    /// grid would gain a stray character and lose the escape sequence that followed it.
-    /// Found by `tests/delta_replay.rs`.
-    ///
-    /// Only the C1 range is tested, unlike `ground_dispatch`'s predicate: a C0 control is
-    /// one byte in UTF-8 and so can never be the thing a partial sequence completes into.
-    #[inline]
-    fn partial_dispatch<P: Perform>(performer: &mut P, c: char) {
-        if matches!(c, '\u{80}'..='\u{9f}') {
-            performer.execute(c as u8);
-        } else {
-            performer.print(c);
-        }
+    /// The whole payload, or `None` if it was ever more than there was room for.
+    fn finish(&self) -> Option<&[u8]> {
+        (!self.overflowed).then_some(&self.bytes)
     }
+}
 
-    /// Handle ground dispatch of print/execute for all characters in a string.
-    ///
-    /// Printable characters are handed over in the longest runs the text allows, through
-    /// [`Perform::print_str`]; controls still go one at a time to `execute`. Upstream
-    /// calls `print` per character -- see `print_str` for why that is worth changing.
-    #[inline]
-    fn ground_dispatch<P: Perform>(performer: &mut P, text: &str) {
-        let is_control = |c: char| matches!(c, '\x00'..='\x1f' | '\u{80}'..='\u{9f}');
-        let mut rest = text;
-        while !rest.is_empty() {
-            match rest.find(is_control) {
-                // No control left: the remainder is one run.
-                None => {
-                    performer.print_str(rest);
-                    return;
-                }
-                // A control at the front. `execute` takes the byte, which is what the C1
-                // range means here: those characters are one byte in the stream cooked
-                // parses, whatever their UTF-8 length is in this `&str`.
-                Some(0) => {
-                    let c = rest.chars().next().unwrap_or('\0');
-                    performer.execute(c as u8);
-                    rest = &rest[c.len_utf8()..];
-                }
-                Some(at) => {
-                    performer.print_str(&rest[..at]);
-                    rest = &rest[at..];
-                }
-            }
+/// How many of BYTES, from the start, are text: not a C0 control. Eight at a time, by
+/// the zero-byte test asked of `word - 0x20`; `text::printable_ascii_len` explains why
+/// the lowest flag can be trusted.
+#[inline]
+fn text_len(bytes: &[u8]) -> usize {
+    const ONES: u64 = u64::MAX / 255;
+    const HIGH: u64 = ONES * 0x80;
+    let mut chunks = bytes.chunks_exact(8);
+    let mut len = 0;
+    for chunk in &mut chunks {
+        let word = u64::from_le_bytes(chunk.try_into().unwrap());
+        let control = word.wrapping_sub(ONES * 0x20) & !word & HIGH;
+        if control != 0 {
+            return len + control.trailing_zeros() as usize / 8;
         }
+        len += 8;
     }
+    len + chunks
+        .remainder()
+        .iter()
+        .take_while(|&&b| b >= 0x20)
+        .count()
+}
+
+/// The number an OSC opens with: digits and nothing else, and no more than fit.
+fn osc_code(digits: &[u8]) -> Option<u16> {
+    if digits.is_empty() || !digits.iter().all(u8::is_ascii_digit) {
+        return None;
+    }
+    // ASCII digits are UTF-8, so only an overflow can fail from here.
+    str::from_utf8(digits).ok()?.parse().ok()
 }
 
 #[derive(PartialEq, Eq, Debug, Default, Copy, Clone)]
@@ -921,7 +758,15 @@ enum State {
     DcsPassthrough,
     Escape,
     EscapeIntermediate,
-    OscString,
+    /// `ESC ]` — an operating system command, collected and handed over as a code and a
+    /// payload.
+    ///
+    /// `code_end` is where the code ends in the payload, once the `;` after it has
+    /// arrived. It travels with the state so that it cannot outlive the string: an OSC
+    /// abandoned halfway leaves nothing for the next to inherit.
+    OscString {
+        code_end: Option<usize>,
+    },
     /// `ESC _` — an application programming command, collected and handed over whole.
     ///
     /// Upstream folds this into `SosPmApcString` and discards it. It is split out
@@ -943,28 +788,21 @@ enum State {
 /// a useful way in my own words for completeness, but the site should be
 /// referenced if something isn't clear. If the site disappears at some point in
 /// the future, consider checking archive.org.
-pub trait Perform {
-    /// Draw a character to the screen and update states.
-    fn print(&mut self, _c: char) {}
-
-    /// Draw a run of printable characters, none of them a C0 or C1 control.
+pub(crate) trait Perform {
+    /// Draw a run of text: bytes from `0x20` up, exactly as they arrived.
     ///
-    /// Upstream calls [`Perform::print`] once per character. Ordinary output is long runs
-    /// of text in one pen, and a performer that places a whole run at once pays the cursor
-    /// bookkeeping, the margin tests and the damage flag once instead of per character.
-    ///
-    /// The default implementation is exactly the old behaviour, so a performer that does
-    /// not care may ignore this and implement `print` alone.
+    /// Not characters, because the parser does not know what a character is; see
+    /// [`Parser::advance_ground`]. Two calls with nothing dispatched between them carry
+    /// consecutive bytes of the stream, so a multi-byte sequence may be split across
+    /// them, and a performer reading the bytes as UTF-8 holds the first part until the
+    /// second arrives. Any other dispatch in between means it never will.
     ///
     /// No guarantee is made about where runs are cut: a single logical line may arrive as
-    /// several calls, and a call may end mid-word.
-    fn print_str(&mut self, text: &str) {
-        for c in text.chars() {
-            self.print(c);
-        }
-    }
+    /// several calls, and a call may end mid-word or mid-character.
+    fn print_bytes(&mut self, _bytes: &[u8]) {}
 
-    /// Execute a C0 or C1 control function.
+    /// Execute a C0 control function. `ESC` never arrives, DEL is text, and there are no
+    /// C1 controls; see [`Parser::advance_ground`].
     fn execute(&mut self, _byte: u8) {}
 
     /// Invoked when a final character arrives in first part of device control
@@ -1007,8 +845,13 @@ pub trait Perform {
     /// terminated.
     fn unhook(&mut self) {}
 
-    /// Dispatch an operating system command.
-    fn osc_dispatch(&mut self, _params: &[&[u8]], _bell_terminated: bool) {}
+    /// Dispatch an operating system command: `OSC CODE ; PAYLOAD ST`.
+    ///
+    /// PAYLOAD is everything after the first `;`, semicolons included, for the performer
+    /// to take apart in whatever way CODE calls for. It is `None` when there was no `;`
+    /// at all, which is not the same statement as an empty payload: `OSC 112 ST` resets
+    /// the cursor colour, and `OSC 8 ; ST` is a malformed hyperlink.
+    fn osc_dispatch(&mut self, _code: u16, _payload: Option<&[u8]>, _bell_terminated: bool) {}
 
     /// A final character has arrived for a CSI sequence
     ///
@@ -1047,6 +890,7 @@ pub trait Perform {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::emu::utf8::{Decoder, Piece};
 
     const OSC_BYTES: &[u8] = &[
         0x1B, 0x5D, // Begin OSC
@@ -1055,14 +899,27 @@ mod tests {
         b'c', b'r', b'i', b't', b't', b'y', 0x07, // End OSC
     ];
 
+    /// Records what the parser dispatched. Text is read through the same [`Decoder`] the
+    /// real performers use, and recorded a character at a time, so that the tests below
+    /// about UTF-8 cut across reads say what a performer would have drawn.
     #[derive(Default)]
     struct Dispatcher {
         dispatched: Vec<Sequence>,
+        decoder: Decoder,
+    }
+
+    impl Dispatcher {
+        /// Record S, after giving up on any sequence the text before it left unfinished.
+        fn push(&mut self, s: Sequence) {
+            self.dispatched
+                .extend(self.decoder.flush().map(Sequence::Print));
+            self.dispatched.push(s);
+        }
     }
 
     #[derive(Debug, PartialEq, Eq)]
     enum Sequence {
-        Osc(Vec<Vec<u8>>, bool),
+        Osc(u16, Option<Vec<u8>>, bool),
         Csi(Vec<Vec<u16>>, Vec<u8>, bool, char),
         Esc(Vec<u8>, bool, u8),
         DcsHook(Vec<Vec<u16>>, Vec<u8>, bool, char),
@@ -1074,29 +931,26 @@ mod tests {
     }
 
     impl Perform for Dispatcher {
-        fn osc_dispatch(&mut self, params: &[&[u8]], bell_terminated: bool) {
-            let params = params.iter().map(|p| p.to_vec()).collect();
-            self.dispatched.push(Sequence::Osc(params, bell_terminated));
+        fn osc_dispatch(&mut self, code: u16, payload: Option<&[u8]>, bell_terminated: bool) {
+            let payload = payload.map(<[u8]>::to_vec);
+            self.push(Sequence::Osc(code, payload, bell_terminated));
         }
 
         fn csi_dispatch(&mut self, params: &Params, intermediates: &[u8], ignore: bool, c: char) {
             let params = params.iter().map(|subparam| subparam.to_vec()).collect();
             let intermediates = intermediates.to_vec();
-            self.dispatched
-                .push(Sequence::Csi(params, intermediates, ignore, c));
+            self.push(Sequence::Csi(params, intermediates, ignore, c));
         }
 
         fn esc_dispatch(&mut self, intermediates: &[u8], ignore: bool, byte: u8) {
             let intermediates = intermediates.to_vec();
-            self.dispatched
-                .push(Sequence::Esc(intermediates, ignore, byte));
+            self.push(Sequence::Esc(intermediates, ignore, byte));
         }
 
         fn hook(&mut self, params: &Params, intermediates: &[u8], ignore: bool, c: char) {
             let params = params.iter().map(|subparam| subparam.to_vec()).collect();
             let intermediates = intermediates.to_vec();
-            self.dispatched
-                .push(Sequence::DcsHook(params, intermediates, ignore, c));
+            self.push(Sequence::DcsHook(params, intermediates, ignore, c));
         }
 
         fn put(&mut self, bytes: &[u8]) {
@@ -1105,101 +959,98 @@ mod tests {
         }
 
         fn apc_dispatch(&mut self, bytes: &[u8]) {
-            self.dispatched.push(Sequence::Apc(bytes.to_vec()));
+            self.push(Sequence::Apc(bytes.to_vec()));
         }
 
         fn unhook(&mut self) {
-            self.dispatched.push(Sequence::DcsUnhook);
+            self.push(Sequence::DcsUnhook);
         }
 
-        fn print(&mut self, c: char) {
-            self.dispatched.push(Sequence::Print(c));
+        fn print_bytes(&mut self, bytes: &[u8]) {
+            let mut rest = bytes;
+            while let Some(piece) = self.decoder.next(&mut rest) {
+                match piece {
+                    Piece::Ascii(run) => {
+                        let run = run.iter().map(|&b| Sequence::Print(char::from(b)));
+                        self.dispatched.extend(run);
+                    }
+                    Piece::Char(c) => self.dispatched.push(Sequence::Print(c)),
+                }
+            }
         }
 
         fn execute(&mut self, byte: u8) {
-            self.dispatched.push(Sequence::Execute(byte));
+            self.push(Sequence::Execute(byte));
         }
+    }
+
+    /// The one OSC a parse of INPUT dispatched, as `(code, payload, bell_terminated)`.
+    fn one_osc(input: &[u8]) -> (u16, Option<Vec<u8>>, bool) {
+        let mut dispatcher = Dispatcher::default();
+        Parser::new().advance(&mut dispatcher, input);
+        let mut oscs = dispatcher.dispatched.into_iter().filter_map(|s| match s {
+            Sequence::Osc(code, payload, bell) => Some((code, payload, bell)),
+            _ => None,
+        });
+        let osc = oscs.next().expect("an osc sequence");
+        assert!(oscs.next().is_none(), "more than one osc sequence");
+        osc
+    }
+
+    /// Whatever a parse of INPUT dispatched that was an OSC.
+    fn oscs(input: &[u8]) -> usize {
+        let mut dispatcher = Dispatcher::default();
+        Parser::new().advance(&mut dispatcher, input);
+        let is_osc = |s: &&Sequence| matches!(s, Sequence::Osc(..));
+        dispatcher.dispatched.iter().filter(is_osc).count()
     }
 
     #[test]
     fn parse_osc() {
-        let mut dispatcher = Dispatcher::default();
-        let mut parser = Parser::new();
-
-        parser.advance(&mut dispatcher, OSC_BYTES);
-
-        assert_eq!(dispatcher.dispatched.len(), 1);
-        match &dispatcher.dispatched[0] {
-            Sequence::Osc(params, _) => {
-                assert_eq!(params.len(), 2);
-                assert_eq!(params[0], &OSC_BYTES[2..3]);
-                assert_eq!(params[1], &OSC_BYTES[4..(OSC_BYTES.len() - 1)]);
-            }
-            _ => panic!("expected osc sequence"),
-        }
+        let (code, payload, _) = one_osc(OSC_BYTES);
+        assert_eq!(code, 2);
+        assert_eq!(payload.unwrap(), &OSC_BYTES[4..(OSC_BYTES.len() - 1)]);
     }
 
     #[test]
-    fn parse_empty_osc() {
-        let mut dispatcher = Dispatcher::default();
-        let mut parser = Parser::new();
-
-        parser.advance(&mut dispatcher, &[0x1B, 0x5D, 0x07]);
-
-        assert_eq!(dispatcher.dispatched.len(), 1);
-        match &dispatcher.dispatched[0] {
-            Sequence::Osc(..) => (),
-            _ => panic!("expected osc sequence"),
-        }
+    fn osc_payload_keeps_its_semicolons() {
+        // Upstream cut an OSC at every `;`, into at most sixteen parameters, and ran the
+        // ones past the sixteenth together with the separators gone. Only the first is
+        // the parser's to read.
+        let uri = format!("https://example.com/{}", ";a=b".repeat(40));
+        let input = format!("\x1b]8;id=x;{uri}\x1b\\");
+        let (code, payload, _) = one_osc(input.as_bytes());
+        assert_eq!(code, 8);
+        assert_eq!(payload.unwrap(), format!("id=x;{uri}").as_bytes());
     }
 
     #[test]
-    fn parse_osc_max_params() {
-        let params = ";".repeat(params::MAX_PARAMS + 1);
-        let input = format!("\x1b]{}\x1b", &params[..]).into_bytes();
-        let mut dispatcher = Dispatcher::default();
-        let mut parser = Parser::new();
+    fn an_osc_with_no_semicolon_has_no_payload_and_one_with_has_an_empty_one() {
+        assert_eq!(one_osc(b"\x1b]112\x07"), (112, None, true));
+        assert_eq!(one_osc(b"\x1b]112;\x07"), (112, Some(vec![]), true));
+    }
 
-        parser.advance(&mut dispatcher, &input);
-
-        assert_eq!(dispatcher.dispatched.len(), 1);
-        match &dispatcher.dispatched[0] {
-            Sequence::Osc(params, _) => {
-                assert_eq!(params.len(), MAX_OSC_PARAMS);
-                assert!(params.iter().all(Vec::is_empty));
-            }
-            _ => panic!("expected osc sequence"),
+    #[test]
+    fn an_osc_without_a_numeric_code_is_not_dispatched() {
+        for input in [
+            &b"\x1b]\x07"[..],
+            b"\x1b];title\x07",
+            b"\x1b]L;title\x07",
+            b"\x1b]+8;;uri\x07",
+            b"\x1b]99999;too big for a code\x07",
+        ] {
+            assert_eq!(oscs(input), 0, "{input:?}");
         }
     }
 
     #[test]
     fn osc_bell_terminated() {
-        const INPUT: &[u8] = b"\x1b]11;ff/00/ff\x07";
-        let mut dispatcher = Dispatcher::default();
-        let mut parser = Parser::new();
-
-        parser.advance(&mut dispatcher, INPUT);
-
-        assert_eq!(dispatcher.dispatched.len(), 1);
-        match &dispatcher.dispatched[0] {
-            Sequence::Osc(_, true) => (),
-            _ => panic!("expected osc with bell terminator"),
-        }
+        assert!(one_osc(b"\x1b]11;ff/00/ff\x07").2);
     }
 
     #[test]
     fn osc_c0_st_terminated() {
-        const INPUT: &[u8] = b"\x1b]11;ff/00/ff\x1b\\";
-        let mut dispatcher = Dispatcher::default();
-        let mut parser = Parser::new();
-
-        parser.advance(&mut dispatcher, INPUT);
-
-        assert_eq!(dispatcher.dispatched.len(), 2);
-        match &dispatcher.dispatched[0] {
-            Sequence::Osc(_, false) => (),
-            _ => panic!("expected osc with ST terminator"),
-        }
+        assert!(!one_osc(b"\x1b]11;ff/00/ff\x1b\\").2);
     }
 
     #[test]
@@ -1218,7 +1069,7 @@ mod tests {
         let osc_data = INPUT[5..(INPUT.len() - 1)].into();
         assert_eq!(
             dispatcher.dispatched[1],
-            Sequence::Osc(vec![vec![b'2'], osc_data], true)
+            Sequence::Osc(2, Some(osc_data), true)
         );
         assert_eq!(dispatcher.dispatched.len(), 2);
     }
@@ -1226,26 +1077,16 @@ mod tests {
     #[test]
     fn osc_containing_string_terminator() {
         const INPUT: &[u8] = b"\x1b]2;\xe6\x9c\xab\x1b\\";
-        let mut dispatcher = Dispatcher::default();
-        let mut parser = Parser::new();
-
-        parser.advance(&mut dispatcher, INPUT);
-
-        assert_eq!(dispatcher.dispatched.len(), 2);
-        match &dispatcher.dispatched[0] {
-            Sequence::Osc(params, _) => {
-                assert_eq!(params[1], &INPUT[4..(INPUT.len() - 2)]);
-            }
-            _ => panic!("expected osc sequence"),
-        }
+        let (_, payload, _) = one_osc(INPUT);
+        assert_eq!(payload.unwrap(), &INPUT[4..(INPUT.len() - 2)]);
     }
 
     #[test]
     fn an_overlong_osc_is_dropped_rather_than_truncated() {
         // Upstream let this `Vec` grow without limit, so an OSC nobody terminates was an
-        // allocation the child controlled. Dropped rather than truncated because the
-        // parameter offsets index into the buffer: half an OSC is not a shorter OSC, it
-        // is a set of slices that no longer mean what they say.
+        // allocation the child controlled. Dropped rather than truncated because half a
+        // payload is not a shorter payload: it is a different URI, or a base64 image that
+        // fails to decode.
         let mut dispatcher = Dispatcher::default();
         let mut parser = Parser::new();
 
@@ -1258,45 +1099,21 @@ mod tests {
 
     #[test]
     fn an_overlong_osc_does_not_poison_the_next_one() {
-        let mut dispatcher = Dispatcher::default();
-        let mut parser = Parser::new();
-
-        parser.advance(&mut dispatcher, b"\x1b]52;s");
-        parser.advance(&mut dispatcher, &vec![b'a'; MAX_OSC_RAW + 100]);
-        parser.advance(&mut dispatcher, b"\x07");
-        parser.advance(&mut dispatcher, b"\x1b]2;title\x07");
-
-        assert_eq!(dispatcher.dispatched.len(), 1);
-        match &dispatcher.dispatched[0] {
-            Sequence::Osc(params, _) => {
-                assert_eq!(params[0], b"2");
-                assert_eq!(params[1], b"title");
-            }
-            other => panic!("expected osc sequence, got {other:?}"),
-        }
+        let mut input = b"\x1b]52;s".to_vec();
+        input.extend(vec![b'a'; MAX_OSC_RAW + 100]);
+        input.extend(b"\x07\x1b]2;title\x07");
+        assert_eq!(one_osc(&input), (2, Some(b"title".to_vec()), true));
     }
 
     #[test]
     fn an_osc_abandoned_midway_does_not_poison_the_next_one() {
-        // An overflow cleared by `osc_end` is the easy case; one abandoned by an ESC
-        // that starts something else has to clear the flag too.
-        let mut dispatcher = Dispatcher::default();
-        let mut parser = Parser::new();
-
-        parser.advance(&mut dispatcher, b"\x1b]52;s");
-        parser.advance(&mut dispatcher, &vec![b'a'; MAX_OSC_RAW + 100]);
-        parser.advance(&mut dispatcher, b"\x1b]2;title\x07");
-
-        let dispatched: Vec<_> = dispatcher
-            .dispatched
-            .iter()
-            .filter(|s| matches!(s, Sequence::Osc(..)))
-            .collect();
-        assert_eq!(dispatched.len(), 1);
-        match dispatched[0] {
-            Sequence::Osc(params, _) => assert_eq!(params[1], b"title"),
-            other => panic!("expected osc sequence, got {other:?}"),
-        }
+        // Abandoned by an ESC that starts something else, with the payload overflowed and
+        // a code already read. The code lives in `State::OscString` and the overflow in a
+        // `Payload` that every string begins afresh, so the next OSC inherits neither.
+        let mut input = b"\x1b]52;s".to_vec();
+        input.extend(vec![b'a'; MAX_OSC_RAW + 100]);
+        input.extend(b"\x1b]2;title\x07");
+        assert_eq!(one_osc(&input), (2, Some(b"title".to_vec()), true));
     }
 
     #[test]
@@ -1637,7 +1454,7 @@ mod tests {
     /// buffer ends mid-character and lands in the `Err` arm with two characters' worth of
     /// valid bytes in it. Upstream skipped the caller past all of them, and the `a` was
     /// never printed. Found by `tests/delta_replay.rs`; see the comment in
-    /// `advance_partial_utf8`.
+    /// `crate::emu::utf8`.
     #[test]
     fn partial_utf8_followed_by_more_text() {
         const INPUT: &[u8] = "ĸaĸ".as_bytes();
@@ -1654,23 +1471,54 @@ mod tests {
         assert_eq!(dispatcher.dispatched[2], Sequence::Print('ĸ'));
     }
 
-    /// cooked's, not upstream's: a C1 control cut in half is still a control.
+    /// A C1 control is dropped, and dropped the same whether or not a read cut it in half.
     ///
     /// `\u{9b}` is `CSI`, and the two bytes it is written as in UTF-8 are as likely to
-    /// straddle a read as any other pair. Arriving together they are executed; upstream
-    /// printed them when they arrived apart. See `Parser::partial_dispatch`.
+    /// straddle a read as any other pair. Upstream executed them arriving together and
+    /// printed them arriving apart. See `crate::emu::utf8`.
     #[test]
-    fn partial_utf8_c1_control() {
-        const INPUT: &[u8] = "\u{9b}".as_bytes();
+    fn a_c1_control_is_dropped_whole_or_split() {
+        const INPUT: &[u8] = "a\u{9b}b".as_bytes();
 
-        let mut dispatcher = Dispatcher::default();
-        let mut parser = Parser::new();
+        for cut in 0..=INPUT.len() {
+            let mut dispatcher = Dispatcher::default();
+            let mut parser = Parser::new();
 
-        parser.advance(&mut dispatcher, &INPUT[..1]);
-        parser.advance(&mut dispatcher, &INPUT[1..]);
+            parser.advance(&mut dispatcher, &INPUT[..cut]);
+            parser.advance(&mut dispatcher, &INPUT[cut..]);
 
-        assert_eq!(dispatcher.dispatched.len(), 1);
-        assert_eq!(dispatcher.dispatched[0], Sequence::Execute(0x9b));
+            assert_eq!(
+                dispatcher.dispatched,
+                [Sequence::Print('a'), Sequence::Print('b')],
+                "cut at {cut}"
+            );
+        }
+    }
+
+    /// A sequence that ASCII interrupts is one replacement character, wherever the read
+    /// was cut: the bytes after it cannot complete it, so it is invalid and not partial.
+    #[test]
+    fn utf8_cut_short_by_ascii_is_one_replacement() {
+        const INPUT: &[u8] = b"\xE2\x82a\xE2\x82\x1b[m";
+
+        for cut in 0..=INPUT.len() {
+            let mut dispatcher = Dispatcher::default();
+            let mut parser = Parser::new();
+
+            parser.advance(&mut dispatcher, &INPUT[..cut]);
+            parser.advance(&mut dispatcher, &INPUT[cut..]);
+
+            assert_eq!(
+                dispatcher.dispatched,
+                [
+                    Sequence::Print('\u{fffd}'),
+                    Sequence::Print('a'),
+                    Sequence::Print('\u{fffd}'),
+                    Sequence::Csi(vec![vec![0]], vec![], false, 'm'),
+                ],
+                "cut at {cut}"
+            );
+        }
     }
 
     #[test]
@@ -1724,27 +1572,28 @@ mod tests {
         assert_eq!(dispatcher.dispatched[3], Sequence::Print('2'));
     }
 
+    /// C0 controls are executed, DEL is dropped, and a stray byte from the C1 range is as
+    /// invalid as any other stray byte; see `crate::emu::utf8`.
     #[test]
-    fn c1s() {
-        const INPUT: &[u8] = b"\x00\x1f\x80\x90\x98\x9b\x9c\x9d\x9e\x9fa";
+    fn c0_del_and_stray_high_bytes() {
+        const INPUT: &[u8] = b"\x00\x1f\x7f\x80\x9b\x9fa";
 
         let mut dispatcher = Dispatcher::default();
         let mut parser = Parser::new();
 
         parser.advance(&mut dispatcher, INPUT);
 
-        assert_eq!(dispatcher.dispatched.len(), 11);
-        assert_eq!(dispatcher.dispatched[0], Sequence::Execute(0));
-        assert_eq!(dispatcher.dispatched[1], Sequence::Execute(31));
-        assert_eq!(dispatcher.dispatched[2], Sequence::Execute(128));
-        assert_eq!(dispatcher.dispatched[3], Sequence::Execute(144));
-        assert_eq!(dispatcher.dispatched[4], Sequence::Execute(152));
-        assert_eq!(dispatcher.dispatched[5], Sequence::Execute(155));
-        assert_eq!(dispatcher.dispatched[6], Sequence::Execute(156));
-        assert_eq!(dispatcher.dispatched[7], Sequence::Execute(157));
-        assert_eq!(dispatcher.dispatched[8], Sequence::Execute(158));
-        assert_eq!(dispatcher.dispatched[9], Sequence::Execute(159));
-        assert_eq!(dispatcher.dispatched[10], Sequence::Print('a'));
+        assert_eq!(
+            dispatcher.dispatched,
+            [
+                Sequence::Execute(0),
+                Sequence::Execute(31),
+                Sequence::Print('\u{fffd}'),
+                Sequence::Print('\u{fffd}'),
+                Sequence::Print('\u{fffd}'),
+                Sequence::Print('a'),
+            ]
+        );
     }
 
     #[test]

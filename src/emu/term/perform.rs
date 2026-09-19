@@ -13,12 +13,18 @@ impl State {
     /// is only this side's to extend while this side is the one that wrote it: an `e`,
     /// then a cursor move, then a combining acute must not join the `e`. See
     /// [`crate::emu::text`].
+    ///
+    /// A multi-byte sequence the text before this left unfinished ends here too, and for
+    /// the same reason: what follows is not text, so nothing can complete it. It is
+    /// printed as the `U+FFFD` it has become, before whatever was dispatched acts.
     fn end_cluster(&mut self) {
+        if let Some(c) = self.decoder.flush() {
+            self.print(c);
+        }
         self.text.reset();
     }
-}
 
-impl Perform for State {
+    /// Draw one character that is not a control.
     fn print(&mut self, c: char) {
         // The designated set, and any single shift, before anything else sees the
         // character: the segmenter has to measure what is drawn, not what was sent.
@@ -44,45 +50,26 @@ impl Perform for State {
         }
     }
 
-    /// The batched half of [`Perform::print`], and the path nearly all output takes.
+    /// Draw a run of printable ASCII, which is the path nearly all output takes.
     ///
-    /// Only printable ASCII goes fast: `0x20..=0x7e` is exactly the set that is one byte
-    /// in the stream, one column on the grid, never zero-width and never a control. DEL
-    /// arrives here too, since the parser does not treat `0x7f` as a control, but it has
-    /// no width, so it and anything else -- a wide character, a combining mark -- falls
-    /// through to `print` one character at a time.
-    ///
-    /// The pen cannot change inside a run, because changing it takes an escape sequence
-    /// and that would have ended the run, so the conditions are tested once here rather
-    /// than per character.
-    fn print_str(&mut self, text: &str) {
-        // A designated set or a single shift substitutes the character, which is
-        // per-character work the run form does not do, so either disqualifies the whole
-        // run. A single shift spends itself on the run's first character, after which the
-        // rest of the run is plain again but goes the slow way anyway -- an `ESC N` is rare
-        // enough that re-deciding mid-run is not worth a second test. The pen's rendition
-        // and link are fields of every cell written, so neither needs the slow path.
-        let batched = self.modes.charsets.is_plain();
-        // Compiled out of a release build entirely; see `State::force_per_character_print`.
-        #[cfg(test)]
-        let batched = batched && !self.force_per_character_print;
-        let pen = self.pen();
-
-        let mut rest = text;
+    /// `0x20..=0x7e` is exactly the set that is one byte in the stream, one column on the
+    /// grid, never zero-width and never a control, so a run of it is laid without asking
+    /// the segmenter about each. BATCHED says whether it may be, which is
+    /// [`Perform::print_bytes`]'s to decide once for everything it was handed; the pen
+    /// cannot change inside a run either, because changing it takes an escape sequence
+    /// and that would have ended the run.
+    fn print_ascii(&mut self, run: &[u8], batched: bool, pen: Pen) {
+        // SAFETY: the decoder hands over nothing here but bytes in `0x20..=0x7e`.
+        let mut rest = unsafe { std::str::from_utf8_unchecked(run) };
         while !rest.is_empty() {
-            let plain = if batched {
-                text::printable_ascii_len(rest.as_bytes())
+            let placed = if batched {
+                self.screen_mut().write_run(rest, pen)
             } else {
                 0
-            };
-            let placed = if plain == 0 {
-                0
-            } else {
-                self.screen_mut().write_run(&rest[..plain], pen)
             };
             if placed == 0 {
-                // The character `write_run` declined: the last column of a row, a wide
-                // character, a pending wrap. One trip through the full path settles it.
+                // The character `write_run` declined: the last column of a row, a pending
+                // wrap. One trip through the full path settles it.
                 let c = rest.chars().next().unwrap_or('\0');
                 self.print(c);
                 rest = &rest[c.len_utf8()..];
@@ -105,6 +92,36 @@ impl Perform for State {
                         .restart(last.encode_utf8(&mut buf), Width::Measured(1));
                 }
                 rest = &rest[placed..];
+            }
+        }
+    }
+}
+
+impl Perform for State {
+    /// Read a run of text as UTF-8, once, and draw it; see [`crate::emu::utf8`].
+    ///
+    /// Printable ASCII goes a run at a time through [`State::print_ascii`], and anything
+    /// else -- a wide character, a combining mark -- a character at a time through
+    /// [`State::print`]. No control is among them: the parser executes C0, and the
+    /// decoder drops DEL and C1, so nothing that reaches a cell is `Cc`.
+    fn print_bytes(&mut self, bytes: &[u8]) {
+        // A designated set or a single shift substitutes the character, which is
+        // per-character work the run form does not do, so either disqualifies every run
+        // in this text. A single shift spends itself on the first character, after which
+        // the rest is plain again but goes the slow way anyway -- an `ESC N` is rare
+        // enough that re-deciding mid-text is not worth a second test. The pen's
+        // rendition and link are fields of every cell written, so neither needs the slow
+        // path.
+        let batched = self.modes.charsets.is_plain();
+        // Compiled out of a release build entirely; see `State::force_per_character_print`.
+        #[cfg(test)]
+        let batched = batched && !self.force_per_character_print;
+        let pen = self.pen();
+        let mut rest = bytes;
+        while let Some(piece) = self.decoder.next(&mut rest) {
+            match piece {
+                Piece::Ascii(run) => self.print_ascii(run, batched, pen),
+                Piece::Char(c) => self.print(c),
             }
         }
     }
@@ -254,8 +271,8 @@ impl Perform for State {
         self.decode.is_some()
     }
 
-    fn osc_dispatch(&mut self, params: &[&[u8]], bell_terminated: bool) {
+    fn osc_dispatch(&mut self, code: u16, payload: Option<&[u8]>, bell_terminated: bool) {
         self.end_cluster();
-        self.osc(params, bell_terminated);
+        self.osc(code, payload, bell_terminated);
     }
 }

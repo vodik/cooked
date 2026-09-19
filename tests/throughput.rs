@@ -109,6 +109,11 @@ fn feed_only() {
         ("styled, parse only", styled(200_000)),
         ("wide, parse only", wide(200_000)),
     ] {
+        // `COOKED_BENCH_ONLY=wide` runs the one case, which is what makes a profile of it
+        // a profile of it rather than of all three.
+        if std::env::var("COOKED_BENCH_ONLY").is_ok_and(|only| !label.contains(&only)) {
+            continue;
+        }
         let mut term = Term::new(50, 200);
         let mut forced = 0usize;
         timed(label, data.len(), || {

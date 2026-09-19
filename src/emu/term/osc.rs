@@ -3,36 +3,40 @@
 
 use super::*;
 
-/// PARAMS from index FROM on, joined back with the `;` the parser split them at.
+/// BYTES cut at the first `;`: the field before it, and everything after it.
 ///
-/// A URI, a path, or iTerm2's `File=` argument string can contain semicolons of its own,
-/// and the parser cannot tell those from the ones separating OSC parameters.
-pub(crate) fn rejoin(params: &[&[u8]], from: usize) -> Vec<u8> {
-    let mut out = Vec::new();
-    for (at, part) in params.get(from..).unwrap_or_default().iter().enumerate() {
-        if at != 0 {
-            out.push(b';');
-        }
-        out.extend_from_slice(part);
+/// Everything, because the parser hands an OSC payload over whole and a URI, a path or a
+/// piece of text can contain semicolons of its own. With no `;` the second half is empty.
+pub(crate) fn split_field(bytes: &[u8]) -> (&[u8], &[u8]) {
+    match memchr::memchr(b';', bytes) {
+        Some(at) => (&bytes[..at], &bytes[at + 1..]),
+        None => (bytes, &[]),
     }
-    out
 }
 
-/// The text PARAMS carry from index FROM on, if it is UTF-8 of at most MAX bytes with no
-/// control character in it.
+/// The destination an OSC 8 PAYLOAD names, `PARAMS ; URI`, if it passes
+/// [`validated_text`]. Empty for the OSC 8 that closes a link.
+///
+/// PARAMS is ignored. The only one anybody sends is `id=`, and content-addressing
+/// already answers what it is for; see [`LinkStore::intern`].
+pub(crate) fn hyperlink_uri(payload: &[u8]) -> Option<String> {
+    validated_text(split_field(payload).1, MAX_URI_LEN)
+}
+
+/// BYTES as text, if they are UTF-8 of at most MAX bytes with no control character in
+/// them.
 ///
 /// For a payload Emacs will act on rather than display: a hyperlink's destination reaches
 /// `browse-url`, and a working directory becomes `default-directory`. A newline or an
 /// `ESC` inside either is not something anybody meant, so the payload is refused whole
 /// rather than trimmed. The length is checked here because the grid's OSC 8 and the
 /// comint filter's OSC 7 both return before any generic payload limit applies.
-pub(crate) fn validated_text(params: &[&[u8]], from: usize, max: usize) -> Option<String> {
-    let bytes = rejoin(params, from);
+pub(crate) fn validated_text(bytes: &[u8], max: usize) -> Option<String> {
     if bytes.len() > max {
         return None;
     }
-    let text = String::from_utf8(bytes).ok()?;
-    (!text::has_control(&text)).then_some(text)
+    let text = std::str::from_utf8(bytes).ok()?;
+    (!text::has_control(text)).then(|| text.to_owned())
 }
 
 impl State {
@@ -45,13 +49,13 @@ impl State {
     /// command record all the same, and `cooked-previous-command` and the fringe would
     /// point at that line, or, once the primary screen is back, at whatever transcript
     /// text the position has come to hold.
-    pub(super) fn semantic(&mut self, params: &[&[u8]]) {
+    pub(super) fn semantic(&mut self, payload: &[u8]) {
         if self.shown.is_alternate() {
             return;
         }
         // Parsed before a mark is taken, so an ignored mark leaves no id on the grid that
         // Emacs is never told about.
-        let Some(mark) = Self::parse_mark(params) else {
+        let Some(mark) = Self::parse_mark(payload) else {
             return;
         };
         let at = self.anchor();
@@ -76,16 +80,18 @@ impl State {
     /// `D`. `A` is the only spelling of a prompt start: the proposal also allows `P`, but
     /// cooked implements no fresh-line behaviour to tell the two apart, and none of the
     /// integrations that reach it send `P`.
-    fn parse_mark(params: &[&[u8]]) -> Option<Mark> {
-        match params.get(1).copied()? {
-            b"A" => Self::prompt_kind(params),
+    fn parse_mark(payload: &[u8]) -> Option<Mark> {
+        let (letter, options) = split_field(payload);
+        let mut options = options.split(|&b| b == b';');
+        match letter {
+            b"A" => Self::prompt_kind(options),
             b"B" => Some(Mark::PromptEnd),
             // A command line that is too long or not text still leaves a `C`: the mark is
             // the part Emacs cannot do without, and the command line is a courtesy.
-            b"C" => Some(Mark::CommandStart(Self::cmdline(params))),
+            b"C" => Some(Mark::CommandStart(Self::cmdline(options))),
             b"D" => Some(Mark::CommandEnd(
-                params
-                    .get(2)
+                options
+                    .next()
                     .and_then(|p| std::str::from_utf8(p).ok())
                     .and_then(|s| s.parse().ok()),
             )),
@@ -105,14 +111,10 @@ impl State {
     /// would wait at `prompt` for good. An unknown kind is dropped the same way, since
     /// dropping changes no state.
     ///
-    /// Options arrive in `params[2..]`, since `;` separates OSC parameters and `133;A;k=s`
-    /// is three of them. Other emitters' options -- kitty's `click_events=`, Ghostty's
+    /// OPTIONS is what followed the letter, cut at each `;`. Other emitters' options -- kitty's `click_events=`, Ghostty's
     /// `redraw=` -- are not `k=` and leave the prompt initial.
-    fn prompt_kind(params: &[&[u8]]) -> Option<Mark> {
-        let kind = params
-            .iter()
-            .skip(2)
-            .find_map(|opt| opt.strip_prefix(b"k=".as_slice()));
+    fn prompt_kind<'a>(mut options: impl Iterator<Item = &'a [u8]>) -> Option<Mark> {
+        let kind = options.find_map(|opt| opt.strip_prefix(b"k=".as_slice()));
         match kind {
             None | Some(b"" | b"i") => Some(Mark::PromptStart),
             Some(b"s" | b"c") => Some(Mark::PromptContinuation),
@@ -134,11 +136,8 @@ impl State {
     /// Capped at [`MAX_CMDLINE_LEN`] because this returns before `osc_dispatch`'s generic
     /// limit. Control characters are dropped, except the newline a multi-line construct
     /// contains and a tab.
-    fn cmdline(params: &[&[u8]]) -> Option<String> {
-        let raw = params
-            .iter()
-            .skip(2)
-            .find_map(|opt| opt.strip_prefix(b"cmdline_url=".as_slice()))?;
+    fn cmdline<'a>(mut options: impl Iterator<Item = &'a [u8]>) -> Option<String> {
+        let raw = options.find_map(|opt| opt.strip_prefix(b"cmdline_url=".as_slice()))?;
         if raw.len() > MAX_CMDLINE_LEN {
             return None;
         }
@@ -232,13 +231,10 @@ impl State {
     /// An empty URI closes, and apart from a reset nothing else does; see [`PenState`]
     /// for why an SGR reset must not.
     ///
-    /// PARAMS is ignored. The only one anybody sends is `id=`, and content-addressing
-    /// already answers what it is for; see [`LinkStore::intern`].
-    ///
-    /// The URI goes through [`validated_text`], so one containing a `;` is rejoined and
+    /// The URI goes through [`hyperlink_uri`], so one containing a `;` arrives whole and
     /// one carrying a control character or longer than [`MAX_URI_LEN`] is refused.
-    pub(super) fn hyperlink(&mut self, params: &[&[u8]]) {
-        let Some(uri) = validated_text(params, 2, MAX_URI_LEN) else {
+    pub(super) fn hyperlink(&mut self, payload: &[u8]) {
+        let Some(uri) = hyperlink_uri(payload) else {
             return;
         };
         if uri.is_empty() {
@@ -274,20 +270,19 @@ impl State {
     /// is unsupported.
     ///
     /// [text sizing protocol]: https://sw.kovidgoyal.net/kitty/text-sizing-protocol/
-    pub(super) fn text_size(&mut self, params: &[&[u8]]) {
-        let Some(width) = params.get(1).and_then(|meta| Self::text_size_width(meta)) else {
+    pub(super) fn text_size(&mut self, payload: &[u8]) {
+        let (meta, raw) = split_field(payload);
+        let Some(width) = Self::text_size_width(meta) else {
             return;
         };
-        // Rejoined, because text containing `;` arrives pre-split. The cap is the spec's
-        // own; see [`MAX_TEXT_SIZE_LEN`].
-        let raw = rejoin(params, 2);
+        // The cap is the spec's own; see [`MAX_TEXT_SIZE_LEN`].
         if raw.len() > MAX_TEXT_SIZE_LEN {
             return;
         }
         // Lossy, as the spec asks: ill-formed UTF-8 becomes `U+FFFD` rather than dropping
         // the escape. Controls are stripped, since a newline cannot be part of a block
         // standing on a stated number of cells.
-        let text: String = String::from_utf8_lossy(&raw)
+        let text: String = String::from_utf8_lossy(raw)
             .chars()
             .filter(|c| !c.is_control())
             .collect();
@@ -360,29 +355,24 @@ impl State {
         Some(width)
     }
 
-    pub(super) fn osc(&mut self, params: &[&[u8]], bell_terminated: bool) {
-        let Some(code) = params.first().and_then(|p| std::str::from_utf8(p).ok()) else {
-            return;
-        };
-        if code == "133" {
-            self.semantic(params);
+    pub(super) fn osc(&mut self, code: u16, payload: Option<&[u8]>, bell_terminated: bool) {
+        let body = payload.unwrap_or_default();
+        if code == 133 {
+            self.semantic(body);
             return;
         }
         // Before the generic path, and returning: OSC 8 is grid state, and handing it to
         // Lisp as well would invite a second implementation there.
-        if code == "8" {
-            self.hyperlink(params);
+        if code == 8 {
+            self.hyperlink(body);
             return;
         }
         // The same reasoning, more so: OSC 66 does not merely change grid state, it
         // *writes to the grid*. Its payload is text, and text belongs to one writer.
-        if code == "66" {
-            self.text_size(params);
+        if code == 66 {
+            self.text_size(body);
             return;
         }
-        let Ok(code) = code.parse::<u16>() else {
-            return;
-        };
         // A hostile stream should not get to size our heap, and nothing legitimate -- a
         // title, a directory, a clipboard write -- comes close. 1337 carries a whole base64
         // image, so it gets the parser's own cap, `MAX_OSC_RAW`.
@@ -391,18 +381,25 @@ impl State {
         } else {
             OSC_PAYLOAD_LIMIT
         };
-        if params[1..].iter().map(|p| p.len()).sum::<usize>() > limit {
+        if body.len() > limit {
             return;
         }
         // Only `File=` is ours. The rest of iTerm2's private channel, such as `SetUserVar`,
         // goes on to Lisp as an `Event::Osc`.
-        if code == 1337 && self.iterm_file(params) {
+        if code == 1337 && self.iterm_file(body) {
             return;
         }
-        // Payloads are handed over lossily rather than dropped: a mangled title is
-        // better than a silently vanished one, and callers can validate.
-        let parts = params[1..]
-            .iter()
+        // Lisp takes the payload as fields, which is how every OSC it handles is laid
+        // out. At most [`MAX_OSC_FIELDS`], the last of which keeps whatever semicolons
+        // are left, so a payload of nothing but `;` is not a list a megabyte long. None
+        // at all for an OSC with no `;`, which is how `OSC 112 ST` differs from
+        // `OSC 112 ; ST`.
+        //
+        // Handed over lossily rather than dropped: a mangled title is better than a
+        // silently vanished one, and callers can validate.
+        let parts = payload
+            .into_iter()
+            .flat_map(|body| body.splitn(MAX_OSC_FIELDS, |&b| b == b';'))
             .map(|p| String::from_utf8_lossy(p).into_owned())
             .collect();
         self.push_for_lisp(Event::Osc(

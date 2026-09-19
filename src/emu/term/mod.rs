@@ -16,6 +16,7 @@ use super::screen::{Cursor, Erase, Evicted, Resize, Screen, Shift};
 use super::sixel;
 use super::style::{StyleId, StyleStore};
 use super::text::{self, Segmenter, Step, Width};
+use super::utf8::{Decoder, Piece};
 use csi::{Handover, PushedPen, SavedMode};
 pub(crate) use keys::{KeyEncoding, KittyFlags, ModifyOtherKeys};
 use keys::{KittySetMode, KittyStack};
@@ -612,9 +613,14 @@ pub const BACKLOG_HIGH_WATER: usize = 8_000;
 /// than they can be drained.
 pub(crate) const IMAGE_BACKLOG_UNIT: usize = 1024;
 
-/// Largest OSC payload forwarded to Lisp, in bytes. Well past any real title or
+/// Largest OSC payload forwarded to Lisp, in bytes: everything after `CODE ;`, the
+/// semicolons between its fields included. Well past any real title or
 /// hyperlink, and short of letting a single escape sequence allocate without bound.
 pub(crate) const OSC_PAYLOAD_LIMIT: usize = 1 << 20;
+
+/// Most fields an OSC payload is cut into for Lisp; the last keeps the semicolons left.
+/// No OSC Lisp handles has more than a handful.
+pub(crate) const MAX_OSC_FIELDS: usize = 16;
 
 /// How long a `cmdline_url=` may be before the `C` mark is taken without one.
 ///
@@ -1514,17 +1520,20 @@ struct State {
     last_print: Option<char>,
     /// Where one grapheme cluster ends and the next begins, carried across reads.
     ///
-    /// The printing path's other half: [`Perform::print`] asks this what the code point
+    /// The printing path's other half: [`State::print`] asks this what the code point
     /// in hand does — open a cell of its own, or ride the one before it — rather than
     /// asking a width table, because a width belongs to a cluster and not to a code
     /// point. See [`crate::emu::text`], which also explains why every dispatch below
     /// that is not a print resets it.
     text: Segmenter,
+    /// The start of a multi-byte sequence that the end of a read cut short; see
+    /// [`crate::emu::utf8`]. Given up on by whatever resets `text`.
+    decoder: Decoder,
     /// Test-only: force every character through [`State::print`] rather than the batched
-    /// [`Perform::print_str`] path.
+    /// [`State::print_ascii`] path.
     ///
     /// The two paths are only worth having if they are indistinguishable, and nothing else
-    /// can show that: feeding a byte at a time still runs `print_str`, with runs of length
+    /// can show that: feeding a byte at a time still runs `print_ascii`, with runs of length
     /// one, so it compares the fast path against itself. See
     /// `batched_and_per_character_printing_agree`.
     ///
@@ -1672,7 +1681,7 @@ impl Charsets {
         self.single = Some(slot.min(3));
     }
 
-    /// Whether printing is the identity, which is what lets [`Perform::print_str`] take
+    /// Whether printing is the identity, which is what lets [`Perform::print_bytes`] take
     /// its batched path: the set in GL is ASCII and no single shift is waiting.
     pub(super) fn is_plain(&self) -> bool {
         self.single.is_none() && self.slots[self.gl] == Charset::Ascii

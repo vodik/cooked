@@ -1745,15 +1745,26 @@ that cannot be torn down must not take the ones after it in `buffer-list` with i
 
 ---
 
-## Vendored parser
+## Forked parser
 
-`src/emu/parser/` is vte 0.15, vendored rather than depended on, because two things
+`src/emu/parser/` began as vte 0.15, vendored rather than depended on because two things
 cooked needs cannot be expressed through `Perform` as upstream defines it. Upstream
 discards APC entirely, which is where the kitty graphics protocol lives, so an image
 never reaches us at all; and DCS payloads arrive one byte at a time, which is the wrong
-shape for a multi-megabyte transmission. Both are answered locally, and the module is
-kept otherwise faithful so a re-sync stays a diff. Two further departures since: APC and
-OSC both have a size bound, where upstream bounded neither.
+shape for a multi-megabyte transmission.
+
+It was kept otherwise faithful for a while, so that a re-sync would stay a diff, and is
+not any longer: it is cooked's parser. The escape-sequence states are still upstream's.
+Ground, the strings and the `Perform` trait are not. APC and OSC have a size bound,
+where upstream bounded neither. An OSC is dispatched as a code and an untouched payload
+rather than cut at every `;` into sixteen parameters, which every consumer with a URI or
+a path in its payload had to undo. Text is bytes: ground hands over every run from `0x20` up as it
+arrived and knows nothing about UTF-8, which is a fact about this terminal rather than
+about the grammar of escape sequences. `src/emu/utf8.rs` reads those bytes once, for
+both the grid and the comint filter, yielding printable ASCII as runs and everything
+else a code point at a time. It drops DEL and the C1 controls, so nothing that reaches a
+cell is a control character, and it holds a sequence a read cut short, so a read may cut
+the stream anywhere without changing what is drawn. The module's header lists each departure and why.
 
 ## Source layout
 

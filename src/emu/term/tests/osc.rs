@@ -180,6 +180,42 @@ fn osc_payloads_keep_their_internal_separators() {
     );
 }
 
+/// A URI is one field however many semicolons it has. The parser once cut an OSC at
+/// every `;` and kept sixteen pieces, so a query string past the fourteenth came back
+/// with its separators gone and named somewhere else.
+#[test]
+fn a_uri_full_of_semicolons_arrives_as_it_was_sent() {
+    let uri = format!("https://example.com/?{}", "k=v;".repeat(40));
+    let mut t = Term::new(4, 40);
+    t.feed(format!("\x1b]8;id=a;{uri}\x1b\\x\x1b]8;;\x1b\\").as_bytes());
+    let links = t.drain().links;
+    assert_eq!(links.len(), 1);
+    assert_eq!(links[0].1, uri);
+}
+
+/// Lisp gets a payload as fields, and no more of them than [`MAX_OSC_FIELDS`]: the last
+/// keeps the semicolons that are left, so nothing is lost and a payload of nothing but
+/// `;` is not a list as long as the payload. An OSC with no `;` has no fields, which is
+/// how `OSC 112 ST` differs from `OSC 112 ; ST`.
+#[test]
+fn an_osc_reaches_lisp_as_a_bounded_list_of_fields() {
+    let mut t = term(4, 20, b"\x1b]112\x07\x1b]112;\x07");
+    assert_eq!(
+        t.drain().events,
+        vec![
+            Event::Osc(112, vec![], Terminator::Bel),
+            Event::Osc(112, vec!["".into()], Terminator::Bel),
+        ]
+    );
+    t.feed(format!("\x1b]9;{}\x07", ";".repeat(100)).as_bytes());
+    let events = t.drain().events;
+    let [Event::Osc(9, fields, _)] = &events[..] else {
+        panic!("{events:?}");
+    };
+    assert_eq!(fields.len(), MAX_OSC_FIELDS);
+    assert_eq!(fields.concat().len() + MAX_OSC_FIELDS - 1, 100);
+}
+
 #[test]
 fn osc_52_clipboard_is_passed_through() {
     let mut t = term(4, 20, b"\x1b]52;c;aGVsbG8=\x07");
@@ -198,7 +234,7 @@ fn osc_52_clipboard_is_passed_through() {
 /// message there rather than dropped unseen here. The two numbers have to agree.
 #[test]
 fn osc_52_at_the_lisp_bound_reaches_lisp_with_every_target() {
-    let bound = OSC_PAYLOAD_LIMIT - 12;
+    let bound = OSC_PAYLOAD_LIMIT - 16;
     let osc = |len| {
         let mut t = Term::new(4, 20);
         t.feed(format!("\x1b]52;cpqs01234567;{}\x07", "A".repeat(len)).as_bytes());

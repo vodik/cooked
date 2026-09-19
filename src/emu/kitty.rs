@@ -1,7 +1,7 @@
 //! The kitty graphics protocol, as far as cooked speaks it.
 //!
 //! A command is `ESC _ G <control data> ; <payload> ESC \`, where the control data is
-//! comma-separated `key=value` pairs and the payload is base64. The vendored parser in
+//! comma-separated `key=value` pairs and the payload is base64. The parser in
 //! [`super::parser`] exists to deliver these: upstream vte discards APC outright, which
 //! is why this could not be reached at all before.
 //!

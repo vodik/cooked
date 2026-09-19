@@ -578,6 +578,6 @@ together.
 
 * Licence
 
-GPL-3.0-or-later. =src/emu/parser/= is vte 0.15, vendored from
-[[https://github.com/alacritty/vte][alacritty/vte]] under Apache-2.0 OR MIT; both
+GPL-3.0-or-later. =src/emu/parser/= is forked from vte 0.15,
+[[https://github.com/alacritty/vte][alacritty/vte]], under Apache-2.0 OR MIT; both
 licences sit beside it, and =src/emu/parser/mod.rs= records what was changed and why.

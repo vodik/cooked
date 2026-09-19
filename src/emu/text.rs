@@ -90,9 +90,32 @@ const MAX_CLUSTER: usize = 512;
 /// zero-width and never a control, which is what lets both printers write a run of them
 /// without asking the segmenter about each. DEL is outside it: it is not a control to the
 /// parser, and it has no width.
+///
+/// Eight bytes at a time, since this is the scan ordinary output spends its life in: the
+/// decoder runs it to find every run a printer lays. `parser::text_len` is its sibling.
 #[inline]
 pub(crate) fn printable_ascii_len(bytes: &[u8]) -> usize {
-    bytes
+    const ONES: u64 = u64::MAX / 255;
+    const HIGH: u64 = ONES * 0x80;
+    let mut chunks = bytes.chunks_exact(8);
+    let mut len = 0;
+    for chunk in &mut chunks {
+        let word = u64::from_le_bytes(chunk.try_into().unwrap());
+        // The classic zero-byte test, asked of `word - 0x20` for "below a space" and of
+        // `word ^ 0x7f` for DEL, beside the high bits themselves. A borrow can raise a
+        // false flag only in a byte *above* a true one, and the lowest flag is the only
+        // one read, so the position is exact.
+        let below = word.wrapping_sub(ONES * 0x20) & !word;
+        let del = word ^ (ONES * 0x7f);
+        let del = del.wrapping_sub(ONES) & !del;
+        let stop = (word | below | del) & HIGH;
+        if stop != 0 {
+            return len + stop.trailing_zeros() as usize / 8;
+        }
+        len += 8;
+    }
+    len + chunks
+        .remainder()
         .iter()
         .take_while(|&&b| (0x20..0x7f).contains(&b))
         .count()
@@ -104,6 +127,25 @@ pub(crate) fn printable_ascii_len(bytes: &[u8]) -> usize {
 /// act on, where any of the three can end a sequence early or start one of its own.
 pub(crate) fn has_control(text: &str) -> bool {
     text.chars().any(char::is_control)
+}
+
+/// Whether C always opens a two-column cell of its own; see [`Segmenter::push`].
+///
+/// Kana and the two large blocks of unified ideographs. Drawn narrowly on purpose: the
+/// blocks around them are where the exceptions are. The combining voicing marks `U+3099`
+/// and `U+309A` sit inside the Hiragana block, `U+3030` and `U+303D` among the CJK symbols
+/// are `Extended_Pictographic`, as are `U+3297` and `U+3299` among the enclosed ones, and
+/// a precomposed Hangul syllable is `LV` or `LVT`, which a leading jamo joins. A test
+/// holds every code point admitted here to what `unicode-width` and
+/// `unicode-segmentation` say about it.
+#[inline]
+fn opens_wide_cell(c: char) -> bool {
+    matches!(c,
+        '\u{3041}'..='\u{3096}'       // Hiragana letters
+        | '\u{30A0}'..='\u{30FF}'     // Katakana
+        | '\u{3400}'..='\u{4DBF}'     // CJK Unified Ideographs Extension A
+        | '\u{4E00}'..='\u{9FFF}'     // CJK Unified Ideographs
+    )
 }
 
 /// Columns one code point stands on, in isolation.
@@ -214,7 +256,7 @@ impl Segmenter {
     /// Begin a cell holding exactly CLUSTER, standing on WIDTH columns.
     ///
     /// Two callers, both of which placed text without coming through [`Segmenter::push`]:
-    /// the batched ASCII run in `print_str`, which seeds the last character it placed so
+    /// the batched ASCII run in `print_ascii`, which seeds the last character it placed so
     /// that a combining mark arriving next still finds its base, and `OSC 66`, which
     /// seeds the block it just drew along with the width the child *declared* for it —
     /// so a mark following a declared-width block attaches to the block rather than
@@ -238,7 +280,7 @@ impl Segmenter {
         // Printable ASCII opens a cell, always, and does it without touching UAX#29.
         // Nothing in `0x20..=0x7e` is `Extend`, `ZWJ`, `SpacingMark` or a variation
         // selector, so no cluster can continue into one — bar `Prepend` × Any, declined
-        // here for exactly the reason `print_str` declines it, which is written out
+        // here for exactly the reason `print_ascii` declines it, which is written out
         // there. A range test in place of a boundary scan, on the characters that are
         // essentially all of what a session prints: without it, segmentation cost about
         // 3% of the plain-text benchmark, and with it the cost is not measurable.
@@ -248,6 +290,22 @@ impl Segmenter {
             self.cells = 1;
             self.declared = false;
             return Step::Cell(1);
+        }
+        // The same again for the bulk of East Asian text, which is where the other large
+        // body of output lives and where UAX#29 has as little to say. Every code point in
+        // [`opens_wide_cell`] is `Grapheme_Cluster_Break=Other`, is neither
+        // `Extended_Pictographic` nor an Indic conjunct consonant, and is East Asian Wide.
+        // The only rule that can forbid a break before an `Other` is `GB9b`, a `Prepend`
+        // before it, which is the exception already accepted above; so it opens a cell of
+        // two columns whatever came before. Without this, each one cost two table
+        // lookups -- its width from one crate, its break class from another -- and a
+        // boundary scan, which between them were a fifth of the wide-text benchmark.
+        if opens_wide_cell(c) {
+            self.cluster.clear();
+            self.cluster.push(c);
+            self.cells = 2;
+            self.declared = false;
+            return Step::Cell(2);
         }
         // No previous cell. A code point with a width starts one; a zero-width one has
         // nothing to attach to, and `Join { before: 0 }` is how that is said — the grid
@@ -307,6 +365,81 @@ impl Segmenter {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Every code point the wide fast path admits, against the two crates it bypasses:
+    /// two columns wide, and a cluster of its own after anything that is not a `Prepend`
+    /// -- a letter, another ideograph, a combining mark, a ZWJ, a regional indicator, a
+    /// leading Hangul jamo, an emoji, a Devanagari consonant and its virama.
+    #[test]
+    fn the_wide_fast_path_agrees_with_the_tables_it_bypasses() {
+        let before = [
+            "a",
+            "\u{65e5}",
+            "e\u{301}",
+            "\u{1f468}\u{200d}",
+            "\u{1f1e8}",
+            "\u{1100}",
+            "\u{1f600}",
+            "\u{915}\u{94d}",
+        ];
+        let mut admitted = 0;
+        for c in ('\u{3000}'..='\u{a000}').filter(|&c| opens_wide_cell(c)) {
+            admitted += 1;
+            assert_eq!(char_cells(c), 2, "{c:?}");
+            for before in before {
+                let text = format!("{before}{c}");
+                let last = text.graphemes(true).next_back().unwrap();
+                assert_eq!(last.chars().collect::<Vec<_>>(), [c], "{before:?} {c:?}");
+            }
+        }
+        assert_eq!(admitted, 86 + 96 + 6592 + 20992);
+    }
+
+    /// The fast path and the path it bypasses leave the segmenter in the same state:
+    /// what joins an ideograph afterwards still finds it.
+    #[test]
+    fn a_variation_selector_still_joins_an_ideograph() {
+        assert_eq!(
+            steps("\u{845b}\u{e0100}"),
+            vec![
+                Step::Cell(2),
+                Step::Join {
+                    before: 2,
+                    after: 2
+                }
+            ]
+        );
+    }
+
+    /// The word-at-a-time scan against the definition it replaced, for every pair of
+    /// byte values at every pair of positions in a word, and for every single byte at
+    /// every offset of a buffer long enough to have a word, a second word and a tail.
+    ///
+    /// Pairs, because the arithmetic has a borrow in it: a stopping byte can raise a
+    /// false flag in the bytes above it, and what has to hold is that the *first* stop
+    /// is still the one reported.
+    #[test]
+    fn the_word_scan_agrees_with_a_byte_at_a_time() {
+        let ascii = |bytes: &[u8]| {
+            let plain = |b: &&u8| (0x20..0x7f).contains(*b);
+            bytes.iter().take_while(plain).count()
+        };
+        for (i, j) in (0..8).flat_map(|i| (i + 1..8).map(move |j| (i, j))) {
+            for (a, b) in (0..=255).flat_map(|a| (0..=255).map(move |b| (a, b))) {
+                let mut word = [b'x'; 8];
+                (word[i], word[j]) = (a, b);
+                assert_eq!(printable_ascii_len(&word), ascii(&word), "{word:?}");
+            }
+        }
+        for at in 0..21 {
+            for value in 0..=255 {
+                let mut buffer = [b'x'; 21];
+                buffer[at] = value;
+                assert_eq!(printable_ascii_len(&buffer), ascii(&buffer), "{buffer:?}");
+                assert_eq!(printable_ascii_len(&buffer[..at]), at);
+            }
+        }
+    }
 
     /// Feed a string one code point at a time, as the parser does, and report the cells
     /// each one claimed — the shape the grid sees.

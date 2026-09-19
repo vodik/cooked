@@ -129,6 +129,7 @@ pub(crate) mod style;
 pub(crate) mod term;
 pub(crate) mod terminfo;
 pub(crate) mod text;
+pub(crate) mod utf8;
 
 pub(crate) use cell::{Color, MarkId, Style};
 pub(crate) use image::{CellMetrics, ImageData, ImageFormat, ShownFormats};

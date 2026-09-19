@@ -331,9 +331,9 @@ fn an_iterm_image_without_inline_is_a_download_and_is_declined() {
 }
 
 #[test]
-fn iterm_arguments_survive_being_split_on_semicolons() {
-    // Semicolons separate iTerm2's keys and OSC's parameters alike, so the arguments
-    // arrive already split and have to be rejoined before they can be read.
+fn iterm_arguments_are_separated_by_semicolons() {
+    // Semicolons separate iTerm2's keys, and used to separate OSC parameters as well,
+    // when the arguments arrived already split and had to be rejoined.
     let png = rgba_png(10, 20, &[0; 10 * 20 * 4]);
     let mut t = with_metrics(10, 20);
     let apc = format!(
@@ -476,7 +476,7 @@ fn an_unsupported_capability_is_declined_out_loud() {
 
 #[test]
 fn a_compressed_transmission_reaches_the_grid() {
-    // End to end, the way `icat` sends it: APC through the vendored parser, base64
+    // End to end, the way `icat` sends it: APC through the parser, base64
     // off, zlib off, pixels to a PPM, one placement per cell. 20 rows of 10 black
     // RGB pixels compress to a few dozen bytes, which is the point of `o=z`.
     // `zlib.compress(bytes(10 * 20 * 3), 9)` — 600 bytes of black in fifteen.

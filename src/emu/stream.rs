@@ -65,8 +65,9 @@ use super::link::{LinkId, LinkStore, MAX_URI_LEN};
 use super::parser::{Params, Parser, Perform};
 use super::sgr;
 use super::style::{StyleId, StyleStore};
-use super::term::osc::validated_text;
-use super::text::{self, Segmenter, Step, Width};
+use super::term::osc::{hyperlink_uri, validated_text};
+use super::text::{Segmenter, Step, Width};
+use super::utf8::{Decoder, Piece};
 
 /// Columns one logical line may reach before it is retired to keep it bounded.
 ///
@@ -261,6 +262,9 @@ struct Stream {
     /// [`Stream::emitted`] stale rather than authoritative.
     flushed: bool,
     seg: Segmenter,
+    /// The start of a multi-byte sequence that the end of a read cut short; see
+    /// [`crate::emu::utf8`].
+    decoder: Decoder,
     pen: Style,
     link: Option<LinkId>,
     /// The renditions the line's cells name; see [`StyleStore`].
@@ -554,8 +558,8 @@ impl Stream {
     ///
     /// Validated by the same [`validated_text`] as the grid's `State::hyperlink`, so a
     /// destination cannot smuggle an escape sequence into whatever displays it.
-    fn hyperlink(&mut self, params: &[&[u8]]) {
-        let Some(uri) = validated_text(params, 2, MAX_URI_LEN) else {
+    fn hyperlink(&mut self, payload: &[u8]) {
+        let Some(uri) = hyperlink_uri(payload) else {
             return;
         };
         self.link = (!uri.is_empty()).then(|| self.links.intern(&uri).0);
@@ -568,14 +572,29 @@ impl Stream {
     /// once, in `cooked-osc.el', and answering it a second time here in Rust is how the
     /// two answers come to differ. The cap is [`MAX_URI_LEN`] for the reason the
     /// hyperlink has one: the payload is a child's to choose the length of.
-    fn set_directory(&mut self, params: &[&[u8]]) {
-        if let Some(url) = validated_text(params, 1, MAX_URI_LEN).filter(|url| !url.is_empty()) {
+    fn set_directory(&mut self, payload: &[u8]) {
+        if let Some(url) = validated_text(payload, MAX_URI_LEN).filter(|url| !url.is_empty()) {
             self.out.directory = Some(url);
         }
     }
 }
 
-impl Perform for Stream {
+impl Stream {
+    /// End the grapheme cluster under the cursor, which anything that is not a print does,
+    /// for the reason `State::end_cluster' gives: the cell to the cursor's left is only
+    /// this side's to extend while this side is the one that wrote it.
+    ///
+    /// A multi-byte sequence the text before this left unfinished ends here as well,
+    /// since nothing that follows can complete it, and is printed as `U+FFFD`.
+    fn end_cluster(&mut self) {
+        if let Some(c) = self.decoder.flush() {
+            self.print(c);
+        }
+        self.seg.reset();
+        self.base = None;
+    }
+
+    /// Draw one character that is not a control.
     fn print(&mut self, c: char) {
         match self.seg.push(c) {
             Step::Cell(width) => self.place(c, width),
@@ -590,37 +609,40 @@ impl Perform for Stream {
     /// starts a cluster". What it cannot skip is the per-column write, because the
     /// columns are what a later `\r` overwrites -- the text is not accumulated as a
     /// string until it is emitted.
-    fn print_str(&mut self, text: &str) {
-        let mut rest = text;
-        while !rest.is_empty() {
-            let plain = text::printable_ascii_len(rest.as_bytes());
-            if plain == 0 {
-                let c = rest.chars().next().unwrap_or('\0');
-                self.print(c);
-                rest = &rest[c.len_utf8()..];
-                continue;
+    fn print_ascii(&mut self, run: &[u8]) {
+        let plain = run.len();
+        if self.col + plain > MAX_LINE_COLUMNS {
+            self.retire();
+        }
+        self.pad(self.col + plain);
+        self.split_wide(self.col);
+        self.split_wide(self.col + plain - 1);
+        let cell = self.pen_cell(BLANK);
+        for (offset, &b) in run.iter().enumerate() {
+            self.line[self.col + offset] = Column::new(cell.with_char(char::from(b)));
+        }
+        self.col += plain;
+        self.base = Some(self.col - 1);
+        // The run bypassed the segmenter, so the segmenter is told what it missed: the
+        // last character placed is what a combining mark arriving next has to find. See
+        // `State::print_ascii', which does the same and explains the one `Prepend' case
+        // this declines.
+        let last = [run[plain - 1]];
+        // SAFETY: the decoder hands over nothing here but bytes in `0x20..=0x7e`.
+        let last = unsafe { std::str::from_utf8_unchecked(&last) };
+        self.seg.restart(last, Width::Measured(1));
+    }
+}
+
+impl Perform for Stream {
+    /// Read a run of text as UTF-8, once, and draw it; see [`crate::emu::utf8`].
+    fn print_bytes(&mut self, bytes: &[u8]) {
+        let mut rest = bytes;
+        while let Some(piece) = self.decoder.next(&mut rest) {
+            match piece {
+                Piece::Ascii(run) => self.print_ascii(run),
+                Piece::Char(c) => self.print(c),
             }
-            if self.col + plain > MAX_LINE_COLUMNS {
-                self.retire();
-            }
-            self.pad(self.col + plain);
-            self.split_wide(self.col);
-            self.split_wide(self.col + plain - 1);
-            let cell = self.pen_cell(BLANK);
-            for (offset, c) in rest[..plain].chars().enumerate() {
-                self.line[self.col + offset] = Column::new(cell.with_char(c));
-            }
-            self.col += plain;
-            self.base = Some(self.col - 1);
-            // The run bypassed the segmenter, so the segmenter is told what it missed:
-            // the last character placed is what a combining mark arriving next has to
-            // find. See `State::print_str', which does the same and explains the one
-            // `Prepend' case this declines.
-            let last = rest[..plain].chars().next_back().unwrap_or(BLANK);
-            let mut buf = [0u8; 4];
-            self.seg
-                .restart(last.encode_utf8(&mut buf), Width::Measured(1));
-            rest = &rest[plain..];
         }
     }
 
@@ -628,8 +650,7 @@ impl Perform for Stream {
         // Anything that is not a print ends the cluster under the cursor, for the reason
         // `State::execute' gives: the cell to the cursor's left is only this side's to
         // extend while this side is the one that wrote it.
-        self.seg.reset();
-        self.base = None;
+        self.end_cluster();
         match byte {
             // BS. Past the end of the line it still steps back, because the cursor may
             // legitimately be out there after a `CSI C`.
@@ -650,8 +671,7 @@ impl Perform for Stream {
     }
 
     fn csi_dispatch(&mut self, params: &Params, intermediates: &[u8], _ignore: bool, action: char) {
-        self.seg.reset();
-        self.base = None;
+        self.end_cluster();
         // Private and intermediate-bearing sequences are all modes, reports and DEC
         // extensions: nothing a line of text can be changed by. Dropping them here keeps
         // the table below about the one thing it can answer.
@@ -709,8 +729,7 @@ impl Perform for Stream {
     }
 
     fn esc_dispatch(&mut self, intermediates: &[u8], _ignore: bool, byte: u8) {
-        self.seg.reset();
-        self.base = None;
+        self.end_cluster();
         // RIS. The pen is the only part of a reset that means anything without a screen,
         // and a child that resets the terminal after a full-screen program has left it
         // in some rendition is the case that matters: without this the rest of the
@@ -721,12 +740,12 @@ impl Perform for Stream {
         }
     }
 
-    fn osc_dispatch(&mut self, params: &[&[u8]], _bell_terminated: bool) {
-        self.seg.reset();
-        self.base = None;
-        match params.first().copied() {
-            Some(b"8") => self.hyperlink(params),
-            Some(b"7") => self.set_directory(params),
+    fn osc_dispatch(&mut self, code: u16, payload: Option<&[u8]>, _bell_terminated: bool) {
+        self.end_cluster();
+        let payload = payload.unwrap_or_default();
+        match code {
+            8 => self.hyperlink(payload),
+            7 => self.set_directory(payload),
             // Titles, clipboard writes, colour queries, the semantic marks: every one of
             // them is a statement about a *terminal*, and the thing on the other end of
             // this is a comint buffer that has an Emacs mode line, an Emacs kill ring
