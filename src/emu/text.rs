@@ -68,6 +68,8 @@
 use unicode_segmentation::{GraphemeCursor, UnicodeSegmentation};
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
+use super::units::Cols;
+
 /// The regional indicators, `U+1F1E6..=U+1F1FF`: the 26 code points that pair up into
 /// flags. Two columns each by the spec, one each by `unicode-width`; see the module
 /// header for why this is the only override.
@@ -154,11 +156,11 @@ fn opens_wide_cell(c: char) -> bool {
 /// *first* code point of a cluster, which is the only place [`Segmenter`] calls it.
 /// Everything after that joins the cell and costs nothing, however wide it would be on
 /// its own.
-pub(crate) fn char_cells(c: char) -> usize {
+pub(crate) fn char_cells(c: char) -> Cols {
     if REGIONAL.contains(&c) {
-        return 2;
+        return Cols::new(2);
     }
-    c.width().unwrap_or(0)
+    Cols::new(c.width().unwrap_or(0))
 }
 
 /// Columns a whole grapheme cluster stands on.
@@ -182,11 +184,11 @@ pub(crate) fn char_cells(c: char) -> usize {
 /// that spec's mode 2027, lands this exact case on two. Two rather than one because the
 /// part that widened it is still drawn — a skin-tone swatch next to the `a` — and
 /// a column short would put it on top of whatever follows.
-pub(crate) fn cluster_cells(cluster: &str) -> usize {
+pub(crate) fn cluster_cells(cluster: &str) -> Cols {
     match cluster.chars().next() {
-        Some(c) if REGIONAL.contains(&c) => 2,
-        Some(_) => cluster.width().min(2),
-        None => 0,
+        Some(c) if REGIONAL.contains(&c) => Cols::new(2),
+        Some(_) => Cols::new(cluster.width().min(2)),
+        None => Cols::ZERO,
     }
 }
 
@@ -195,7 +197,7 @@ pub(crate) fn cluster_cells(cluster: &str) -> usize {
 /// The batch form, for a caller holding a whole string at once: the `OSC 66` payload,
 /// which arrives complete and is a closed piece of text rather than a point in a stream.
 /// The streaming path does not come through here — see [`Segmenter`].
-pub(crate) fn clusters(text: &str) -> impl Iterator<Item = (&str, usize)> {
+pub(crate) fn clusters(text: &str) -> impl Iterator<Item = (&str, Cols)> {
     text.graphemes(true).map(|g| (g, cluster_cells(g)))
 }
 
@@ -203,12 +205,12 @@ pub(crate) fn clusters(text: &str) -> impl Iterator<Item = (&str, usize)> {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Step {
     /// It starts a cell of its own, this many columns wide. Never zero.
-    Cell(usize),
+    Cell(Cols),
     /// It rides the cell before it, which stood on `before` columns and now stands on
     /// `after`. The two differ only for a variation selector, and `before` is zero when
     /// there is no cell before it to speak of at all — the first thing on a fresh row
     /// being a combining mark.
-    Join { before: usize, after: usize },
+    Join { before: Cols, after: Cols },
 }
 
 /// How many columns a cell stands on, and on whose word.
@@ -218,7 +220,7 @@ pub(crate) enum Step {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub(crate) struct Width {
     /// The columns. Zero is a cell nothing has been placed on yet.
-    pub(crate) cells: usize,
+    pub(crate) cells: Cols,
     pub(crate) source: WidthSource,
 }
 
@@ -235,7 +237,7 @@ pub(crate) enum WidthSource {
 
 impl Width {
     /// WIDTH columns as the characters measure.
-    pub(crate) fn measured(cells: usize) -> Self {
+    pub(crate) fn measured(cells: Cols) -> Self {
         Self {
             cells,
             source: WidthSource::Measured,
@@ -243,7 +245,7 @@ impl Width {
     }
 
     /// WIDTH columns because `OSC 66 ; w=N` said so.
-    pub(crate) fn declared(cells: usize) -> Self {
+    pub(crate) fn declared(cells: Cols) -> Self {
         Self {
             cells,
             source: WidthSource::Declared,
@@ -302,7 +304,7 @@ impl Segmenter {
     /// still a declaration: `OSC 66 ; w=3` two columns from the end of the row leaves a
     /// two-column cell the child named the width of, and a combining mark arriving next
     /// must not re-measure it back to one.
-    pub(crate) fn settle(&mut self, cells: usize) {
+    pub(crate) fn settle(&mut self, cells: Cols) {
         self.width.cells = cells;
     }
 
@@ -318,8 +320,8 @@ impl Segmenter {
         if c.is_ascii_graphic() || c == ' ' {
             self.cluster.clear();
             self.cluster.push(c);
-            self.width = Width::measured(1);
-            return Step::Cell(1);
+            self.width = Width::measured(Cols::ONE);
+            return Step::Cell(Cols::ONE);
         }
         // The same again for the bulk of East Asian text, which is where the other large
         // body of output lives and where UAX#29 has as little to say. Every code point in
@@ -333,8 +335,8 @@ impl Segmenter {
         if opens_wide_cell(c) {
             self.cluster.clear();
             self.cluster.push(c);
-            self.width = Width::measured(2);
-            return Step::Cell(2);
+            self.width = Width::measured(Cols::new(2));
+            return Step::Cell(Cols::new(2));
         }
         // No previous cell. A code point with a width starts one; a zero-width one has
         // nothing to attach to, and `Join { before: 0 }` is how that is said — the grid
@@ -344,10 +346,10 @@ impl Segmenter {
             self.cluster.clear();
             self.cluster.push(c);
             self.width = Width::measured(cells);
-            return if cells == 0 {
+            return if cells.is_zero() {
                 Step::Join {
-                    before: 0,
-                    after: 0,
+                    before: Cols::ZERO,
+                    after: Cols::ZERO,
                 }
             } else {
                 Step::Cell(cells)
@@ -367,7 +369,7 @@ impl Segmenter {
             // conservative reading: it costs a cell rather than losing a character.
             .unwrap_or(true);
         let cells = char_cells(c);
-        if boundary && cells > 0 {
+        if boundary && !cells.is_zero() {
             self.cluster.drain(..at);
             self.width = Width::measured(cells);
             return Step::Cell(cells);
@@ -410,7 +412,7 @@ mod tests {
         let mut admitted = 0;
         for c in ('\u{3000}'..='\u{a000}').filter(|&c| opens_wide_cell(c)) {
             admitted += 1;
-            assert_eq!(char_cells(c), 2, "{c:?}");
+            assert_eq!(char_cells(c), Cols::new(2), "{c:?}");
             for before in before {
                 let text = format!("{before}{c}");
                 let last = text.graphemes(true).next_back().unwrap();
@@ -424,16 +426,7 @@ mod tests {
     /// what joins an ideograph afterwards still finds it.
     #[test]
     fn a_variation_selector_still_joins_an_ideograph() {
-        assert_eq!(
-            steps("\u{845b}\u{e0100}"),
-            vec![
-                Step::Cell(2),
-                Step::Join {
-                    before: 2,
-                    after: 2
-                }
-            ]
-        );
+        assert_eq!(steps("\u{845b}\u{e0100}"), vec![cell(2), join(2, 2)]);
     }
 
     /// The word-at-a-time scan against the definition it replaced, for every pair of
@@ -473,17 +466,31 @@ mod tests {
         text.chars().map(|c| seg.push(c)).collect()
     }
 
+    /// A cell of N columns opening, which is what most of these assert.
+    fn cell(n: usize) -> Step {
+        Step::Cell(Cols::new(n))
+    }
+
+    /// A code point riding the cell before it, which stood on BEFORE columns and now
+    /// stands on AFTER.
+    fn join(before: usize, after: usize) -> Step {
+        Step::Join {
+            before: Cols::new(before),
+            after: Cols::new(after),
+        }
+    }
+
     /// Total columns a string occupies when streamed through the segmenter.
     fn streamed_cells(text: &str) -> usize {
         let mut seg = Segmenter::default();
-        let mut cells = 0;
+        let mut cells = Cols::ZERO;
         for c in text.chars() {
             match seg.push(c) {
                 Step::Cell(w) => cells += w,
                 Step::Join { before, after } => cells = cells + after - before,
             }
         }
-        cells
+        cells.get()
     }
 
     #[test]
@@ -494,17 +501,11 @@ mod tests {
         assert_eq!(streamed_cells(family), 2);
         assert_eq!(
             steps(family)[0],
-            Step::Cell(2),
+            cell(2),
             "the base opens a two-column cell"
         );
         assert!(
-            steps(family)[1..].iter().all(|s| matches!(
-                s,
-                Step::Join {
-                    before: 2,
-                    after: 2
-                }
-            )),
+            steps(family)[1..].iter().all(|s| *s == join(2, 2)),
             "and everything after it rides that cell without widening it"
         );
     }
@@ -520,7 +521,7 @@ mod tests {
         // The override `unicode-width` alone would get wrong: a lone regional indicator
         // is two columns by the spec, not one.
         assert_eq!(streamed_cells("\u{1F1E6}"), 2);
-        assert_eq!(char_cells('\u{1F1E6}'), 2);
+        assert_eq!(char_cells('\u{1F1E6}'), Cols::new(2));
     }
 
     #[test]
@@ -529,10 +530,7 @@ mod tests {
         assert_eq!(streamed_cells("\u{2714}"), 1);
         assert_eq!(
             steps("\u{2714}\u{FE0F}")[1],
-            Step::Join {
-                before: 1,
-                after: 2
-            },
+            join(1, 2),
             "VS16 widens the cell already written"
         );
         assert_eq!(streamed_cells("\u{2714}\u{FE0F}"), 2);
@@ -541,23 +539,14 @@ mod tests {
     #[test]
     fn a_combining_mark_costs_no_column() {
         assert_eq!(streamed_cells("e\u{301}"), 1);
-        assert_eq!(
-            steps("e\u{301}")[1],
-            Step::Join {
-                before: 1,
-                after: 1
-            }
-        );
+        assert_eq!(steps("e\u{301}")[1], join(1, 1));
     }
 
     #[test]
     fn a_combining_mark_with_nothing_before_it_says_so() {
         assert_eq!(
             steps("\u{301}")[0],
-            Step::Join {
-                before: 0,
-                after: 0
-            },
+            join(0, 0),
             "there is no previous cell, and the grid decides what that means"
         );
     }
@@ -565,7 +554,7 @@ mod tests {
     #[test]
     fn ordinary_text_is_one_cell_per_character() {
         assert_eq!(streamed_cells("hello"), 5);
-        assert!(steps("hello").iter().all(|s| *s == Step::Cell(1)));
+        assert!(steps("hello").iter().all(|s| *s == cell(1)));
     }
 
     #[test]
@@ -604,7 +593,7 @@ mod tests {
             "a\u{1F600}b",
         ] {
             assert_eq!(
-                clusters(text).map(|(_, w)| w).sum::<usize>(),
+                clusters(text).map(|(_, w)| w).sum::<Cols>().get(),
                 streamed_cells(text),
                 "{text:?} measures the same whether it arrives whole or a byte at a time"
             );

@@ -41,11 +41,11 @@ impl State {
                 // to be told, since that number is how it finds the cell next time.
                 let settled = self.screen_mut().join(c, before, after);
                 self.text.settle(settled);
-                (0, Evicted::none())
+                (Cols::ZERO, Evicted::none())
             }
         };
         self.evicted(evicted);
-        if width > 0 {
+        if !width.is_zero() {
             self.last_print = Some(c);
         }
     }
@@ -89,7 +89,7 @@ impl State {
                 if let Some(last) = last {
                     let mut buf = [0u8; 4];
                     self.text
-                        .restart(last.encode_utf8(&mut buf), Width::measured(1));
+                        .restart(last.encode_utf8(&mut buf), Width::measured(Cols::ONE));
                 }
                 rest = &rest[placed..];
             }

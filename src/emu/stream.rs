@@ -341,7 +341,8 @@ impl Stream {
     }
 
     /// Write CH at the cursor, WIDTH columns wide, and advance.
-    fn place(&mut self, ch: char, width: usize) {
+    fn place(&mut self, ch: char, width: Cols) {
+        let width = width.get();
         if self.col >= MAX_LINE_COLUMNS {
             self.retire();
         }
@@ -369,7 +370,8 @@ impl Stream {
     /// the first thing on a fresh line being a combining mark -- is dropped, which is
     /// the one thing that can be done with it: there is nothing for it to combine with,
     /// and hanging it on a blank would invent a character the child never sent.
-    fn join(&mut self, c: char, before: usize, after: usize) {
+    fn join(&mut self, c: char, before: Cols, after: Cols) {
+        let (before, after) = (before.get(), after.get());
         let Some(base) = self.base else { return };
         if base >= self.line.len() {
             return;
@@ -393,7 +395,7 @@ impl Stream {
             }
             self.col = self.col.max(base + after);
         }
-        self.seg.settle(after);
+        self.seg.settle(Cols::new(after));
     }
 
     /// CH as the pen writes it: its rendition and the open link.
@@ -631,7 +633,7 @@ impl Stream {
         let last = [run[plain - 1]];
         // SAFETY: the decoder hands over nothing here but bytes in `0x20..=0x7e`.
         let last = unsafe { std::str::from_utf8_unchecked(&last) };
-        self.seg.restart(last, Width::measured(1));
+        self.seg.restart(last, Width::measured(Cols::ONE));
     }
 }
 

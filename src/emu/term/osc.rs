@@ -429,7 +429,7 @@ impl State {
         if text.is_empty() {
             return;
         }
-        let (pen, cols) = (self.pen(), self.screen().width());
+        let (pen, cols) = (self.pen(), Cols::new(self.screen().width()));
         // "If the multicell block is larger than the screen size in either dimension,
         // the terminal must discard the character." Drawing part of it would move the
         // cursor by something other than the declared width.
@@ -453,7 +453,7 @@ impl State {
             }
             return;
         }
-        let width = usize::from(width);
+        let width = Cols::new(usize::from(width));
         if width > cols {
             return;
         }

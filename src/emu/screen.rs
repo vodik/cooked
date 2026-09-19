@@ -736,8 +736,8 @@ impl Screen {
     /// belongs to a grapheme cluster rather than a code point.
     pub fn write(&mut self, ch: char, pen: Pen) -> Evicted {
         match crate::emu::text::char_cells(ch) {
-            0 => {
-                self.join(ch, 0, 0);
+            Cols::ZERO => {
+                self.join(ch, Cols::ZERO, Cols::ZERO);
                 Evicted::none()
             }
             width => self.place(ch, width, pen),
@@ -762,8 +762,9 @@ impl Screen {
     /// Returns the columns the cell ended up standing on, which is AFTER unless the
     /// widening was declined. The caller records it, because from then on it is that
     /// number and not the measurement that says where the cell begins.
-    pub fn join(&mut self, mark: char, before: usize, after: usize) -> usize {
+    pub fn join(&mut self, mark: char, before: Cols, after: Cols) -> Cols {
         let (row, cols) = (self.cursor.row, self.cols);
+        let (before, after) = (before.get(), after.get());
         let lead = if self.cursor.wrap_pending {
             cols.saturating_sub(before.max(1))
         } else {
@@ -775,10 +776,10 @@ impl Screen {
         // Nothing to resize: the overwhelming case, since almost every mark that joins a
         // cell leaves its width alone.
         if after == before || before == 0 {
-            return before;
+            return Cols::new(before);
         }
         if after > before && lead + after > cols {
-            return before;
+            return Cols::new(before);
         }
         // The resized columns take the lead cell's own rendition and link, so a widened
         // emoji does not leave a differently-coloured half behind it.
@@ -805,7 +806,7 @@ impl Screen {
         // disarm: the cell no longer reaches the edge, so the next character does not
         // wrap.
         self.settle_cursor(lead + after);
-        after
+        Cols::new(after)
     }
 
     /// Place one character standing on WIDTH columns, whatever a width table would say.
@@ -815,8 +816,8 @@ impl Screen {
     /// `OSC 66` carries a width the *child* declared. Everything else here — the
     /// deferred wrap, DECAWM, the scroll a wrap can trigger, the continuation cells, the
     /// insert-mode shift — is unchanged and is the only copy of it.
-    pub fn place(&mut self, ch: char, width: usize, pen: Pen) -> Evicted {
-        let cols = self.cols;
+    pub fn place(&mut self, ch: char, width: Cols, pen: Pen) -> Evicted {
+        let (cols, width) = (self.cols, width.get());
         // Read before `touch` borrows `self` mutably below.
         let insert_mode = self.insert_mode;
         let mut evicted = Evicted::none();
@@ -895,13 +896,13 @@ impl Screen {
     ///
     /// A WIDTH of zero folds the whole thing onto the cell before, which is the honest
     /// reading of a cluster that begins with a combining mark.
-    pub fn write_cluster(&mut self, text: &str, width: usize, pen: Pen) -> Evicted {
+    pub fn write_cluster(&mut self, text: &str, width: Cols, pen: Pen) -> Evicted {
         let mut chars = text.chars();
         let Some(base) = chars.next() else {
             return Evicted::none();
         };
-        let evicted = if width == 0 {
-            self.join(base, 0, 0);
+        let evicted = if width.is_zero() {
+            self.join(base, Cols::ZERO, Cols::ZERO);
             Evicted::none()
         } else {
             self.place(base, width, pen)
