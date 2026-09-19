@@ -684,6 +684,13 @@ struct Shared {
     /// only ever `try_lock`s it, and leaves the queue to the sender when it is busy. See
     /// [`Shared::flush_replies`].
     writer: Mutex<()>,
+    /// How many threads are inside a write to the child that may block; see
+    /// [`Sending`] and the throttle in [`Shared::read_loop`].
+    ///
+    /// A count rather than a flag because [`Session::send`] is not the only caller Lisp
+    /// can reach: the writer mutex serialises the writes themselves, but a second sender
+    /// waiting for it must not let the first one's exemption lapse.
+    sending: AtomicUsize,
     mode: AtomicMode,
     /// A size the child is not yet known to have, for the reader thread to keep applying
     /// until it sticks. `None` once the tty agrees. See `Session::resize`.
@@ -761,6 +768,40 @@ impl<'a> Waiting<'a> {
 impl Drop for Waiting<'_> {
     fn drop(&mut self) {
         self.0.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+
+/// A write to the child in progress on Emacs' thread, which suspends the backlog
+/// throttle for as long as it lasts; see [`Shared::sending`].
+///
+/// The throttle exists to make a child that outruns Emacs block in its own `write`
+/// rather than pile up in memory, and it does that by leaving the pty unread. That is
+/// exactly wrong while Emacs is blocked in a write of its own: a paste of more lines
+/// than `backlog_limit` is echoed back, the reader stops reading, the child's output
+/// queue fills, the child stops reading, and both sides wait out `WRITE_TIMEOUT` before
+/// the paste fails. What the throttle would be protecting here is memory bounded by the
+/// paste itself, which Emacs already holds in full, so reading on costs nothing it was
+/// meant to save.
+///
+/// A guard rather than a pair of stores, because a write that fails -- a timeout, a
+/// `C-g`, an unwinding panic -- must not leave the throttle suspended for the life of
+/// the session.
+struct Sending<'a>(&'a Shared);
+
+impl<'a> Sending<'a> {
+    fn on(shared: &'a Shared) -> Self {
+        shared.sending.fetch_add(1, Ordering::SeqCst);
+        // The reader is asleep in a `poll` that watches nothing but the interrupt while
+        // it is throttled, so without this it would not look at the count until its next
+        // tick -- and would then have to look again after every one.
+        shared.unthrottle();
+        Self(shared)
+    }
+}
+
+impl Drop for Sending<'_> {
+    fn drop(&mut self) {
+        self.0.sending.fetch_sub(1, Ordering::SeqCst);
     }
 }
 
@@ -901,6 +942,7 @@ impl Session {
             lisp_waiters: AtomicUsize::new(0),
             replies: Mutex::new(ReplyQueue::default()),
             writer: Mutex::new(()),
+            sending: AtomicUsize::new(0),
             mode: AtomicMode::new(mode),
             pending_resize: Mutex::new(None),
             clock: options.clock.clone(),
@@ -1101,6 +1143,9 @@ impl Session {
         }
         self.shared.interacted();
         let wait = Wait::new(std::time::Instant::now() + WRITE_TIMEOUT, stop);
+        // Taken before the writer mutex, so a second sender waiting for that one does not
+        // let the first sender's exemption lapse; see [`Sending`].
+        let _sending = Sending::on(&self.shared);
         let writer = self.shared.writer.held();
         let result = self.shared.write_after_replies(bytes, &wait);
         // A reply queued while the writer was held found it busy and left itself here, so
@@ -1565,12 +1610,15 @@ impl Shared {
             // then not polled for input at all -- a readable pty nobody reads would
             // return from every poll at once -- and the drain that empties the backlog
             // raises the interrupt to say so; see [`Shared::unthrottle`].
-            let throttled = {
+            let full = {
                 let mut term = self.term.held();
                 // Once a tick, while the lock is held anyway: see `Term::sweep`.
                 term.sweep();
                 term.backlog() >= self.backlog_limit.load(Ordering::Relaxed)
             };
+            // Not while a send is blocked on the child, which the throttle would
+            // otherwise deadlock against its own echo; see [`Sending`].
+            let throttled = full && self.sending.load(Ordering::SeqCst) == 0;
             self.throttled.store(throttled, Ordering::SeqCst);
             if throttled {
                 // A child that filled the backlog inside one frame has forfeited atomicity:
@@ -3053,6 +3101,37 @@ mod tests {
         assert!(
             start.elapsed() < WRITE_TIMEOUT / 2,
             "took {:?}, which is the deadline and not the stop",
+            start.elapsed()
+        );
+    }
+
+    /// A paste bigger than the backlog must not deadlock against the reader's throttle.
+    ///
+    /// `send` blocks Emacs' thread in `Pty::write`, so nothing drains while it waits. A
+    /// child that echoes the paste back fills the backlog, the reader stops pulling from
+    /// the pty to let the child block, and the child then stops reading -- so the write
+    /// waits out `WRITE_TIMEOUT` and the paste is cut short with an error. A backlog of
+    /// one line and a paste of a few thousand is the shortest way to that state.
+    ///
+    /// Raw mode with no echo so the line discipline neither chops the paste at
+    /// `MAX_INPUT` nor doubles it; `cat` alone is what sends it back.
+    #[test]
+    fn a_paste_larger_than_the_backlog_is_not_stalled_by_the_throttle() {
+        const LINES: usize = 8192;
+        let (session, _read) =
+            session_with_backlog(&["/bin/sh", "-c", "stty raw -echo; exec cat"], 1);
+        wait_for(&session, |u| u.mode == Mode::Raw);
+        let paste = b"paste\r\n".repeat(LINES);
+        let start = Instant::now();
+        let result = session.send(&paste, Input::Other, &|| false);
+        assert_eq!(
+            result,
+            Ok(()),
+            "the paste stalled against the backlog throttle and timed out"
+        );
+        assert!(
+            start.elapsed() < WRITE_TIMEOUT / 2,
+            "the paste took {:?}, which is the write deadline and not the child",
             start.elapsed()
         );
     }
