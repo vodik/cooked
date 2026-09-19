@@ -1292,6 +1292,25 @@ impl Term {
     pub fn trailing_text(&self) -> Option<String> {
         self.state.screen().last_nonblank_text()
     }
+
+    /// The rows the shown screen occupies, one [`Runs`] per screen row, top row first.
+    ///
+    /// The whole of the screen rather than what changed, for a consumer that shows it
+    /// without keeping a copy: `cooked-process.el' hangs the live rows under a
+    /// compilation buffer as an overlay, where a progress bar the child rewrites in place
+    /// is the only thing that never retires. Reading them here is what spares that file a
+    /// second reading of [`Delta`]'s shifts, rows and edits — the delta protocol has one
+    /// renderer, and `cooked--render-block' is it.
+    ///
+    /// [`Screen::used`](crate::emu::screen::Screen::used) rows, so a blank row below the
+    /// content is left out and the cursor's own row is not, exactly as the drain's
+    /// `:used' reports it.
+    pub fn screen_text(&self) -> Vec<Runs> {
+        let screen = self.state.screen();
+        (0..screen.used())
+            .filter_map(|index| screen.row(index).map(|row| row.runs()))
+            .collect()
+    }
 }
 
 /// Everything the child negotiated, and nothing else.

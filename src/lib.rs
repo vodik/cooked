@@ -207,6 +207,27 @@ pub unsafe extern "C" fn emacs_module_init(runtime: *mut Runtime) -> std::ffi::c
         /// screen's text (an OSC 133 mark, CSI 2 J or CSI 3 J) or the child has exited.
         "cooked--drain" 1..=4 => drain;
 
+        /// The rows SESSION's screen occupies, as one rendered block.
+        ///
+        /// `(TEXT STYLES DECOS ROWS)', the shape `cooked--drain' hands `:scrolled' over in
+        /// and `cooked--render-block' renders: the screen's rows joined by newlines, one
+        /// per screen row, with no rejoining of a line the terminal wrapped.  STYLES names
+        /// renditions by the ids a drain's `:styles' has already carried, so install those
+        /// before rendering this.
+        ///
+        /// The whole screen every time, and nothing about what changed.  For the consumer
+        /// that shows the live screen without holding a copy of it --
+        /// `cooked-process--refresh-tail', whose overlay is where a progress bar the child
+        /// rewrites in place is the only thing ever seen.  A buffer that *does* hold a copy
+        /// wants the drain instead: `:shifts', `:rows' and `:edits' are how a screenful is
+        /// kept up to date for the price of the cells that changed, and this is how it is
+        /// read for the price of all of them.
+        ///
+        /// Rows below the content are left out, as `:used' leaves them out, and the
+        /// cursor's own row is not.  Trailing blanks within a row are the child's and are
+        /// kept.
+        "cooked--screen-text" 1..=1 => screen_text;
+
         /// Write STRING to the pty of SESSION.
         /// Waits up to three seconds for a child that is not reading, then signals, having
         /// sent whatever it took by then. Replies already queued for the child go first.
@@ -798,6 +819,15 @@ fn drain<'e>(env: Env<'e>, args: &[Value<'e>]) -> Result<Value<'e>> {
         session.drain_with(promote)
     };
     update_to_lisp(env, &update, rejoin)
+}
+
+/// See `cooked--screen-text'.
+fn screen_text<'e>(env: Env<'e>, args: &[Value<'e>]) -> Result<Value<'e>> {
+    // The lock covers the read of the cells and is let go before the block is built, which
+    // calls back into Emacs: the runs are copies of the rows, so nothing the child writes
+    // next can be half in and half out of them.
+    let rows = env.from_lisp::<&Session>(args[0])?.term().screen_text();
+    wire::screen_to_lisp(env, &rows)
 }
 
 /// Write BYTES to SESSION's child as input the user produced, and zero them afterwards.

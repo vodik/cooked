@@ -130,6 +130,24 @@ pub(crate) fn emission_to_lisp<'e>(env: Env<'e>, filter: &Filter) -> Result<Valu
     )
 }
 
+/// The whole screen as one [`Block`], its rows joined by newlines; see
+/// `cooked--screen-text'.
+///
+/// The shape `:scrolled' arrives in rather than the shape `:rows' does, and for the same
+/// reason scrollback has it: the caller renders one string and asks nothing about
+/// individual rows, so there is no row table to build. `cooked--render-block' takes
+/// either.
+pub(crate) fn screen_to_lisp<'e>(env: Env<'e>, rows: &[Runs]) -> Result<Value<'e>> {
+    let mut block = Block::default();
+    for (index, runs) in rows.iter().enumerate() {
+        if index > 0 {
+            block.push_newline();
+        }
+        block.push_runs(env, runs)?;
+    }
+    block.into_lisp(&env)
+}
+
 /// The damaged rows split into maximal runs of *consecutive* indices.
 ///
 /// A pure function over the slice so it can be tested without an Emacs.

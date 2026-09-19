@@ -233,6 +233,34 @@ is what tells the two apart."
       (should (cooked--face-color (cooked-tests-process--face-at "ok")
                                   :foreground)))))
 
+(ert-deftest cooked-process-flushes-the-only-line-of-a-one-row-grid ()
+  "A grid as short as the knob goes still hands its one line over, at exit.
+
+`cooked-process-rows' is a latency in lines and 1 is the prompt end of it,
+where nothing ever scrolls and the flush at exit is the only path to the
+consumer.  It is also where that flush's shrink to a single row changes no
+dimension at all, so it is worth one test of its own."
+  (let ((cooked-process-rows 1))
+    (cooked-tests-process--with "printf 'the only line'"
+      (should (equal (cooked-tests-process--body) "the only line")))))
+
+(ert-deftest cooked-process-tail-carries-the-childs-colours ()
+  "A bar the child drew in green is shown in green, not merely shown.
+
+The tail is read from the core as one block in the shape `:scrolled' arrives in,
+so it carries the child's renditions exactly as retired text does.  Asserted
+because `equal' on strings ignores text properties: every other assertion about
+the tail here would hold just as well for a tail that had lost its colours."
+  (cooked-tests-process--while
+      "printf '\\033[32mBuilding [==>]\\033[0m\\r'; sleep 30"
+    (should (cooked-tests--settle
+             (lambda () (string-match-p "Building" (or (cooked-tests-process--tail) "")))
+             5))
+    (let* ((tail (cooked-tests-process--tail))
+           (at (string-match "Building" tail)))
+      (should (cooked--face-color (get-text-property at 'font-lock-face tail)
+                                  :foreground)))))
+
 (ert-deftest cooked-process-styling-can-be-turned-off ()
   "With `cooked-process-styled' nil the text arrives bare, as it used to.
 

@@ -666,6 +666,30 @@ fn trailing_text_finds_a_password_prompt() {
     assert_eq!(t.trailing_text().as_deref(), Some("Password:"));
 }
 
+/// What `cooked--screen-text' hands the live tail of a headless session: every row down
+/// to the content, the cursor's own row included, and nothing below it.
+#[test]
+fn screen_text_stops_at_the_rows_the_screen_occupies() {
+    let mut t = term(5, 10, b"one\r\ntwo\r\n");
+    let rows: Vec<String> = t
+        .screen_text()
+        .iter()
+        .map(|r| r.text().to_owned())
+        .collect();
+    // Row 2 is the cursor's, blank and reported, because `used` never counts fewer rows
+    // than the cursor sits on; rows 3 and 4 are below everything and are left out.
+    assert_eq!(rows, ["one", "two", ""]);
+    // The runs come with the rendition the child asked for, which is what makes a styled
+    // tail one block in the shape `:scrolled' already has.
+    t.feed(b"\x1b[31mred");
+    let last = t.screen_text().pop().expect("the cursor's row");
+    let styled: Vec<(&str, bool)> = last
+        .iter()
+        .map(|run| (run.text, run.style.is_default()))
+        .collect();
+    assert_eq!(styled, [("red", false)]);
+}
+
 #[test]
 fn damage_covers_only_touched_rows() {
     let mut t = term(4, 8, b"a\r\nb");

@@ -36,7 +36,8 @@
       cooked--osc-reply cooked--prompt-text cooked--ready cooked--redraw
       cooked--remove-rows cooked--reply cooked--reply-focus cooked--resize
       cooked--row-unsent
-      cooked--sample-mode cooked--send cooked--send-key cooked--send-mouse-report
+      cooked--sample-mode cooked--screen-text
+      cooked--send cooked--send-key cooked--send-mouse-report
       cooked--send-paste-text cooked--set-attended
       cooked--set-color-scheme cooked--set-graphics-shown cooked--set-hidden
       cooked--set-tuning cooked--signal cooked--spawn

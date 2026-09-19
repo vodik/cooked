@@ -234,15 +234,8 @@ than kill it, or the exit it was asked for never reaches the sentinel.")
   "Columns the session was spawned at, needed by the flush at exit.")
 (defvar-local cooked-process--reaped nil
   "Set once the exit path has run, so it can run only once.")
-(defvar-local cooked-process--live nil
-  "The live grid as a vector of rendered rows, one per screen row.
-
-A drain reports only the rows it damaged, so the untouched ones have to be
-remembered somewhere to be shown at all.  Coherent under scrolling because
-`Screen::scroll_up' in src/emu/screen.rs damages the whole region: rows that
-merely shifted are re-reported rather than left for this to shift itself.")
 (defvar-local cooked-process--tail nil
-  "Overlay showing `cooked-process--live', in the consumer's buffer.")
+  "Overlay showing the live grid, in the consumer's buffer.")
 
 (defvar-local cooked-process--host nil
   "The hidden host buffer, set in the *consumer's* buffer.
@@ -371,12 +364,13 @@ one `compilation-start' rather than advising every caller of it."
 (defun cooked-process--text (block)
   "BLOCK's text, carrying the child's colours when they are wanted.
 
-BLOCK is what `cooked--drain' hands back for a run of rendered text --
-`(TEXT STYLE-SPANS DECO-SPANS ROWS)', the shape
-`cooked--render-block' takes.  Only the first two are used, and that is a
-decision each.  The text can be several screen rows separated by newlines, since
-the core coalesces contiguous damaged rows into one block;
-`cooked-process--remember-rows' is where they are told apart again.
+BLOCK is what `cooked--drain' hands back for a run of rendered text, and what
+`cooked--screen-text' hands over for the live screen -- `(TEXT STYLE-SPANS
+DECO-SPANS ROWS)', the shape `cooked--render-block' takes.  Only the first two
+are used, and that is a decision each.  The text can be several screen rows
+separated by newlines, and stays one string here: the only caller that cares
+where the rows are is `cooked-process--tail-text', which splits it on those
+newlines.
 
 Decorations are dropped because they are a *terminal's* answer to a glyph the
 font cannot draw -- a box character composed out of overlays, a shade dithered
@@ -439,71 +433,35 @@ business and therefore the consumer's, which is the whole of what makes
 
 ;;;; The live tail
 
-(defun cooked-process--remember-rows (rows height &optional shifts edits)
-  "Fold a drain's ROWS, SHIFTS and EDITS into `cooked-process--live'.
-
-HEIGHT is the grid's row count, which decides the vector's length: a resize
-between drains means the remembered rows describe a screen that no longer
-exists, and the drain that carries the new height re-reports every row of the
-new one.
-
-The vector is a copy of the screen kept the way a terminal buffer keeps one,
-because the core sends what changed on that understanding.  SHIFTS move rows
-that did not change, in order and before anything else, and the blank rows a
-shift opens are never sent.  EDITS replace part of a row, by character offsets
-into the text last kept for it.  A row is kept untrimmed for that reason, and
-trimmed only when it is shown."
-  (unless (and cooked-process--live
-               (eql (length cooked-process--live) height))
-    (setq cooked-process--live (make-vector height "")))
-  (pcase-dolist (`(,top ,bottom ,count ,up) shifts)
-    (when (< bottom height)
-      (let ((rows (append (cl-subseq cooked-process--live top (1+ bottom)) nil))
-            (blank (make-list count "")))
-        (setq rows (if up
-                       (append (nthcdr count rows) blank)
-                     (append blank (butlast rows count))))
-        (cl-loop for text in rows
-                 for row from top
-                 do (aset cooked-process--live row text)))))
-  (pcase-dolist (`(,first . ,block) rows)
-    ;; One entry is a *run* of contiguous damaged rows, joined by newlines --
-    ;; see `cooked--render-rows'.  The vector is per screen row, so the run is
-    ;; split back apart on the newlines the core put between its rows.  Splitting
-    ;; the rendered text rather than the raw text is what keeps the styling: a
-    ;; substring carries the text properties `cooked-process--text' just applied.
-    (let ((row first))
-      (dolist (text (split-string (or (cooked-process--text block) "") "\n"))
-        (when (< row height)
-          (aset cooked-process--live row text))
-        (setq row (1+ row)))))
-  (pcase-dolist (`(,row ,char-start ,char-end ,length . ,block) edits)
-    (when (< row height)
-      (let* ((old (aref cooked-process--live row))
-             (len (length old))
-             (new (concat (substring old 0 (min char-start len))
-                          (or (cooked-process--text block) "")
-                          (if char-end (substring old (min char-end len)) ""))))
-        (aset cooked-process--live row
-              (substring new 0 (min length (length new))))))))
-
 (defun cooked-process--tail-text ()
-  "`cooked-process--live' as text, or nil when the grid says nothing.
+  "The live grid as text, or nil when it says nothing.  Runs in the host.
+
+Asked of the core, which has the screen, rather than assembled here from the
+drains that have gone by.  `cooked--screen-text' hands over every row the screen
+occupies in the same block `:scrolled' arrives in, so this file needs nothing
+from `:shifts', `:rows' or `:edits' -- and the delta protocol keeps the one
+renderer, `cooked--render-block', that `delta_replay' and the Lisp oracle hold
+to the core.  A second renderer here would have been a second reading of shift
+direction, of a nil CHAR-END and of LENGTH, with nothing pinning it.
 
 Trailing blank rows are dropped rather than shown.  The grid is a fixed eight
 rows and a child using one of them would otherwise be followed by seven blank
 lines, which is a worse answer than no tail at all."
-  (when-let* ((live (and cooked-process--live
-                         ;; Right-trimmed because a bar is padded out to the
-                         ;; terminal's width with spaces, and an overlay is not a
-                         ;; screen: the trailing run would only widen the window for
-                         ;; a line whose visible text stops well short of it.
-                         (cl-map 'vector #'string-trim-right cooked-process--live)))
-              (last (cl-position-if-not #'string-empty-p live :from-end t)))
-    (mapconcat #'identity (cl-subseq live 0 (1+ last)) "\n")))
+  (when-let* ((session cooked-process--session)
+              ;; Right-trimmed because a bar is padded out to the terminal's width
+              ;; with spaces, and an overlay is not a screen: the trailing run would
+              ;; only widen the window for a line whose visible text stops well
+              ;; short of it.  Trimmed rather than left to the core, which keeps a
+              ;; row as the child wrote it.
+              (rows (mapcar #'string-trim-right
+                            (split-string (cooked-process--text
+                                           (cooked--screen-text session))
+                                          "\n")))
+              (last (cl-position-if-not #'string-empty-p rows :from-end t)))
+    (mapconcat #'identity (cl-subseq rows 0 (1+ last)) "\n")))
 
 (defun cooked-process--refresh-tail (host)
-  "Show HOST's live grid below the retired text, or take the overlay down.
+  "Show HOST's live screen below the retired text, or take the overlay down.
 
 Placed at `point-max' on every drain rather than left to a marker's insertion
 type: the retired text of this same drain has just been inserted there, and
@@ -610,10 +568,6 @@ the drain's queries have been answered."
                   (cooked--install-styles (plist-get update :styles))
                   (when scrolled
                     (cooked-process--emit (cooked-process--text scrolled)))
-                  (cooked-process--remember-rows (plist-get update :rows)
-                                                 (plist-get update :height)
-                                                 (plist-get update :shifts)
-                                                 (plist-get update :edits))
                   (if exit
                       (cooked-process--finish host exit)
                     (cooked-process--refresh-tail host)))
@@ -641,7 +595,12 @@ is not the one `compilation-mode' fails to match.
 
 What is left after that is row 0, which no scroll can reach.  It is the
 cursor's row and is usually empty; when it is not, `:head' is what says
-whether it continues the line above rather than starting one."
+whether it continues the line above rather than starting one.  That row is read
+with `cooked--screen-text', which asks the core what is on the grid, rather
+than out of the drain's `:rows', which says what changed.  Both answer the same
+thing here -- a resize sends every row again, `State::resize' in
+src/emu/term/state.rs having forgotten what Emacs holds -- and asking for the
+screen is the reading that does not depend on that."
   (with-current-buffer host
     (let ((session cooked-process--session)
           (cols cooked-process--columns))
@@ -651,13 +610,10 @@ whether it continues the line above rather than starting one."
                          (cooked--install-styles (plist-get update :styles))
                          (cooked-process--text (plist-get update :scrolled))))
              (head (plist-get update :head))
-             (rows (plist-get update :rows))
-             ;; A `:rows' entry is a run of contiguous damaged rows, but the grid
-             ;; has just been shrunk to one, so the run starting at row 0 is that
-             ;; row and nothing else -- there is no second row for it to reach.
-             (block (cdr (assq 0 rows)))
-             (last (car block))
-             (tail (unless (or (null last) (string-empty-p last))
+             ;; The grid is one row tall by now, so this is that row and nothing
+             ;; else, newlines and all: there is no second row for it to reach.
+             (block (cooked--screen-text session))
+             (tail (unless (string-empty-p (car block))
                      (let ((text (cooked-process--text block)))
                        (if (and head (> head 0)) text (concat text "\n"))))))
         (when (or scrolled tail)
