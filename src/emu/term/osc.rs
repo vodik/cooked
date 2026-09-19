@@ -39,48 +39,14 @@ pub(crate) fn validated_text(bytes: &[u8], max: usize) -> Option<String> {
     (!text::has_control(text)).then(|| text.to_owned())
 }
 
-impl State {
-    /// OSC 133: a shell's semantic mark, anchored where it fell in the stream.
-    ///
-    /// Dropped while the alternate screen is up. Its rows never become buffer text, so
-    /// a mark there has no line to name: the alternate screen scrolls without
-    /// scrollback and the mark cannot move with its row, so after `seq 1 60` a prompt
-    /// mark from a shell inside tmux names a line of output. It would be filed with a
-    /// command record all the same, and `cooked-previous-command` and the fringe would
-    /// point at that line, or, once the primary screen is back, at whatever transcript
-    /// text the position has come to hold.
-    pub(super) fn semantic(&mut self, payload: &[u8]) {
-        if self.shown.is_alternate() {
-            return;
-        }
-        // Parsed before a mark is taken, so an ignored mark leaves no id on the grid that
-        // Emacs is never told about.
-        let Some(mark) = Self::parse_mark(payload) else {
-            return;
-        };
-        let at = self.anchor();
-        // Left on the cell as well, so that a rewrap can be told where it went.
-        let id = self.take_mark(at);
-        // Only an initial prompt moves `prompt_start`. A continuation prompt is the same
-        // command still being typed, so the prompt it began at is the one
-        // `clear_to_prompt` must keep and the one Emacs files the command record under.
-        // The command marks move the input modes; see [`State::take_back`].
-        match mark {
-            Mark::PromptStart => self.prompt_start = Some(at),
-            Mark::CommandStart(_) => self.hand_over(),
-            Mark::CommandEnd(_) => self.take_back(),
-            Mark::PromptContinuation | Mark::PromptEnd => {}
-        }
-        self.events.push(Event::Mark(mark, at, id));
-    }
-
-    /// The mark PARAMS spell, or `None` for one cooked does not act on.
+impl Mark {
+    /// The mark an OSC 133 PAYLOAD spells, or `None` for one cooked does not act on.
     ///
     /// The kind is matched whole rather than on its first byte, so `Dfoo` is not read as
     /// `D`. `A` is the only spelling of a prompt start: the proposal also allows `P`, but
     /// cooked implements no fresh-line behaviour to tell the two apart, and none of the
     /// integrations that reach it send `P`.
-    fn parse_mark(payload: &[u8]) -> Option<Mark> {
+    pub(super) fn parse(payload: &[u8]) -> Option<Mark> {
         let (letter, options) = split_field(payload);
         let mut options = options.split(|&b| b == b';');
         match letter {
@@ -171,6 +137,42 @@ impl State {
             }
         }
         out
+    }
+}
+
+impl State {
+    /// OSC 133: a shell's semantic mark, anchored where it fell in the stream.
+    ///
+    /// Dropped while the alternate screen is up. Its rows never become buffer text, so
+    /// a mark there has no line to name: the alternate screen scrolls without
+    /// scrollback and the mark cannot move with its row, so after `seq 1 60` a prompt
+    /// mark from a shell inside tmux names a line of output. It would be filed with a
+    /// command record all the same, and `cooked-previous-command` and the fringe would
+    /// point at that line, or, once the primary screen is back, at whatever transcript
+    /// text the position has come to hold.
+    pub(super) fn semantic(&mut self, payload: &[u8]) {
+        if self.shown.is_alternate() {
+            return;
+        }
+        // Parsed before a mark is taken, so an ignored mark leaves no id on the grid that
+        // Emacs is never told about.
+        let Some(mark) = Mark::parse(payload) else {
+            return;
+        };
+        let at = self.anchor();
+        // Left on the cell as well, so that a rewrap can be told where it went.
+        let id = self.take_mark(at);
+        // Only an initial prompt moves `prompt_start`. A continuation prompt is the same
+        // command still being typed, so the prompt it began at is the one
+        // `clear_to_prompt` must keep and the one Emacs files the command record under.
+        // The command marks move the input modes; see [`State::take_back`].
+        match mark {
+            Mark::PromptStart => self.prompt_start = Some(at),
+            Mark::CommandStart(_) => self.hand_over(),
+            Mark::CommandEnd(_) => self.take_back(),
+            Mark::PromptContinuation | Mark::PromptEnd => {}
+        }
+        self.events.push(Event::Mark(mark, at, id));
     }
 
     /// Name the mark at ANCHOR and leave it on the cell the anchor points at, which is on

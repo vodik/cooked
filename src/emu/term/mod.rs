@@ -110,7 +110,7 @@ pub enum Mark {
     /// `133;B`: user input begins, which is where Emacs takes the line.
     PromptEnd,
     /// `133;C`: the command is running and owns the output region, with the command line
-    /// the shell said it was about to run, from `cmdline_url=`. See [`State::cmdline`]
+    /// the shell said it was about to run, from `cmdline_url=`. See [`Mark::cmdline`]
     /// for why that spelling and not kitty's `cmdline=`.
     CommandStart(Option<String>),
     /// `133;D`: the command finished, with its exit status when reported.
