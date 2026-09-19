@@ -357,28 +357,28 @@ impl State {
         Some(width)
     }
 
-    pub(super) fn osc(&mut self, code: u16, payload: Option<&[u8]>, bell_terminated: bool) {
+    pub(super) fn osc(&mut self, code: OscCode, payload: Option<&[u8]>, bell_terminated: bool) {
         let body = payload.unwrap_or_default();
-        if code == 133 {
+        if code == OscCode::SEMANTIC_PROMPT {
             self.semantic(body);
             return;
         }
         // Before the generic path, and returning: OSC 8 is grid state, and handing it to
         // Lisp as well would invite a second implementation there.
-        if code == 8 {
+        if code == OscCode::HYPERLINK {
             self.hyperlink(body);
             return;
         }
         // The same reasoning, more so: OSC 66 does not merely change grid state, it
         // *writes to the grid*. Its payload is text, and text belongs to one writer.
-        if code == 66 {
+        if code == OscCode::TEXT_SIZE {
             self.text_size(body);
             return;
         }
         // A hostile stream should not get to size our heap, and nothing legitimate -- a
         // title, a directory, a clipboard write -- comes close. 1337 carries a whole base64
         // image, so it gets the parser's own cap, `MAX_OSC_RAW`.
-        let limit = if code == 1337 {
+        let limit = if code == OscCode::ITERM {
             crate::emu::parser::MAX_OSC_RAW
         } else {
             OSC_PAYLOAD_LIMIT
@@ -388,7 +388,7 @@ impl State {
         }
         // Only `File=` is ours. The rest of iTerm2's private channel, such as `SetUserVar`,
         // goes on to Lisp as an `Event::Osc`.
-        if code == 1337 && self.iterm_file(body) {
+        if code == OscCode::ITERM && self.iterm_file(body) {
             return;
         }
         // Lisp takes the payload as fields, which is how every OSC it handles is laid
@@ -405,7 +405,7 @@ impl State {
             .map(|p| String::from_utf8_lossy(p).into_owned())
             .collect();
         self.push_for_lisp(Event::Osc(
-            code,
+            code.get(),
             parts,
             Terminator::from_bell(bell_terminated),
         ));

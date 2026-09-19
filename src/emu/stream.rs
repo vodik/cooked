@@ -62,7 +62,7 @@
 
 use super::cell::{BLANK, CONTINUATION, Cell, Color, Runs, Style};
 use super::link::{LinkId, LinkStore, MAX_URI_LEN};
-use super::parser::{Params, Parser, Perform};
+use super::parser::{OscCode, Params, Parser, Perform};
 use super::sgr;
 use super::style::{StyleId, StyleStore};
 use super::term::osc::{hyperlink_uri, validated_text};
@@ -740,12 +740,12 @@ impl Perform for Stream {
         }
     }
 
-    fn osc_dispatch(&mut self, code: u16, payload: Option<&[u8]>, _bell_terminated: bool) {
+    fn osc_dispatch(&mut self, code: OscCode, payload: Option<&[u8]>, _bell_terminated: bool) {
         self.end_cluster();
         let payload = payload.unwrap_or_default();
         match code {
-            8 => self.hyperlink(payload),
-            7 => self.set_directory(payload),
+            OscCode::HYPERLINK => self.hyperlink(payload),
+            OscCode::WORKING_DIRECTORY => self.set_directory(payload),
             // Titles, clipboard writes, colour queries, the semantic marks: every one of
             // them is a statement about a *terminal*, and the thing on the other end of
             // this is a comint buffer that has an Emacs mode line, an Emacs kill ring

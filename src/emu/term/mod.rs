@@ -10,7 +10,7 @@ use super::image::{
 };
 use super::kitty::{Kitty, Outcome, decode_base64};
 use super::link::{LinkId, LinkStore, MAX_URI_LEN};
-use super::parser::{Params, Parser, Perform};
+use super::parser::{OscCode, Params, Parser, Perform};
 use super::png::png_dimensions;
 use super::screen::{Cursor, Erase, Evicted, Resize, Screen, Shift};
 use super::sixel;

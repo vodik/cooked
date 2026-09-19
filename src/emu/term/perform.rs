@@ -271,7 +271,7 @@ impl Perform for State {
         self.decode.is_some()
     }
 
-    fn osc_dispatch(&mut self, code: u16, payload: Option<&[u8]>, bell_terminated: bool) {
+    fn osc_dispatch(&mut self, code: OscCode, payload: Option<&[u8]>, bell_terminated: bool) {
         self.end_cluster();
         self.osc(code, payload, bell_terminated);
     }
