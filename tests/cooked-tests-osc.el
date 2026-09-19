@@ -1905,13 +1905,140 @@ colours it draws, which DECSCNM exchanges."
                           'light)))))
       (delete-file out))))
 
+;;;; Every colour query, and the exact bytes it is owed
+;;
+;; One table, written against the answers as they stood while Lisp composed half of
+;; them and the core the other half, so that giving the whole of it to one answerer
+;; can be shown to have changed no byte.  The *values* are read from
+;; `cooked--child-color' and `cooked--color', which is where they come from either
+;; way; the *format* is spelled out below rather than taken from whatever writes the
+;; reply, since a formatter compared against itself agrees whatever it says.
+
+(defun cooked-tests--rgb (color)
+  "COLOR in xterm's `rgb:RRRR/GGGG/BBBB' form, written out here on purpose."
+  (apply #'format "rgb:%04x/%04x/%04x" (color-values color)))
+
+(defun cooked-tests--color-answer (code &optional payload st)
+  "The reply a query for CODE is owed, carrying PAYLOAD.
+
+PAYLOAD defaults to the colour `cooked--child-color' gives for CODE's kind,
+which is what the buffer draws with -- an OSC 10 or 11 set counts, and DECSCNM
+exchanges the two.  ST asks for the terminator xterm echoes for a query that
+used one."
+  (format "\033]%d;%s%s" code
+          (or payload
+              (cooked-tests--rgb
+               (cooked--child-color (alist-get code cooked--osc-color-sources))))
+          (if st "\033\\" "\007")))
+
 (defun cooked-tests--palette-answer (index)
-  "The payload a query for palette INDEX is owed, as `cooked--osc-palette' reads it.
-Spelled out here rather than taken from `cooked--palette-colors', so that what
-the core answers is compared against the function that paints cells and not
-against the list it was handed."
-  (or (cooked--color-to-osc (cooked--color index))
-      (and (< index 16) (cooked--color-to-osc (aref cooked-color-names index)))))
+  "The reply a query for palette INDEX is owed.
+
+The colour comes from `cooked--color', the function that paints cells, with the
+fallback `cooked--osc-palette' has always used for an `ansi-color-' face that a
+tty frame leaves unreadable."
+  (format "\033]4;%d;%s\007" index
+          (cooked-tests--rgb (if (color-values (cooked--color index))
+                                 (cooked--color index)
+                               (aref cooked-color-names index)))))
+
+(ert-deftest cooked-every-colour-query-is-answered-with-the-same-bytes ()
+  "One child, every colour query it can ask, and the whole conversation back.
+
+The queries that must be answered and the ones that must be met with silence
+are in the same stream on purpose: what has to hold is not each answer alone
+but the sequence, since a query dropped, an extra reply, or two answers swapped
+are all invisible to a test that looks at one query at a time.  So the last
+query comes after the four that say nothing, and the file is compared whole.
+
+`13' and `14' are the pointer, `15', `16' and `18' the Tektronix window that is
+not here, `17' and `19' the selection: each is answered from the face it would
+be drawn in, and several fall back to a colour `cooked--default-color'
+computes, which is exactly what a query for a colour with no face behind it has
+to be told."
+  (let ((out (make-temp-file "cooked-color-table"))
+        (queries
+         (concat
+          ;; Every code that answers one colour, alone, as a child asking one of
+          ;; them and waiting does.
+          (mapconcat (lambda (code) (format "\\033]%d;?\\007" code))
+                     (number-sequence 10 19) "")
+          ;; Chained: one sequence, one answer per field, each field the next code.
+          "\\033]10;?;?\\007"
+          ;; The terminator is echoed, because a client scanning for BEL hangs on
+          ;; an ST-terminated answer and the other way about.
+          "\\033]11;?\\033\\\\"
+          ;; The palette: the ANSI end, the cube and the grey ramp.
+          (mapconcat (lambda (index) (format "\\033]4;%d;?\\007" index))
+                     '(0 7 15 16 231 255) "")
+          "\\033]4;1;?;196;?\\007"
+          ;; Four that are owed nothing: an index that is not a number, a pair with
+          ;; no specification, a palette set, and a default set with
+          ;; `cooked-allow-color-set' off.
+          "\\033]4;x;?\\007\\033]4;1\\007\\033]4;1;#ff0000\\007\\033]12;#00ff00\\007"
+          ;; And one more, to show the silence swallowed nothing after it.
+          "\\033]4;9;?\\007")))
+    (unwind-protect
+        (cooked-tests--with-session (cooked-tests--reply-to queries out)
+          (let ((expected
+                 (concat (mapconcat #'cooked-tests--color-answer
+                                    (number-sequence 10 19) "")
+                         (cooked-tests--color-answer 10)
+                         (cooked-tests--color-answer 11)
+                         (cooked-tests--color-answer 11 nil t)
+                         (mapconcat #'cooked-tests--palette-answer
+                                    '(0 7 15 16 231 255) "")
+                         (cooked-tests--palette-answer 1)
+                         (cooked-tests--palette-answer 196)
+                         (cooked-tests--palette-answer 9))))
+            (should (cooked-tests--settle
+                     (lambda () (equal (cooked-tests--contents out) expected))))
+            (should (equal (cooked-tests--contents out) expected))))
+      (delete-file out))))
+
+(ert-deftest cooked-reverse-video-exchanges-the-two-defaults-in-a-query ()
+  "DECSCNM draws the screen with the defaults swapped, and says so when asked.
+
+Separate from the table above because it is terminal state rather than a
+question: a child that turned mode 5 on is drawing on the foreground colour,
+and xterm tells it so."
+  (let ((out (make-temp-file "cooked-color-reverse")))
+    (unwind-protect
+        (cooked-tests--with-session
+            (cooked-tests--reply-to "\\033[?5h\\033]10;?\\007\\033]11;?\\007" out)
+          (let ((expected (concat (format "\033]10;%s\007"
+                                          (cooked-tests--rgb
+                                           (cooked--default-color 'background)))
+                                  (format "\033]11;%s\007"
+                                          (cooked-tests--rgb
+                                           (cooked--default-color 'foreground))))))
+            (should (cooked-tests--settle
+                     (lambda () (equal (cooked-tests--contents out) expected))))
+            (should (equal (cooked-tests--contents out) expected))))
+      (delete-file out))))
+
+(ert-deftest cooked-a-refused-set-leaves-the-query-after-it-the-old-colour ()
+  "With sets off, the query behind one is told what the buffer still draws.
+
+The pair a child sends to change a colour and read it back, and the answer
+turns on policy: `cooked-allow-color-set' is nil here, so nothing changed and
+the old colour is the true answer.  The honoured case is
+`cooked-osc-10-and-11-answer-the-colours-the-buffer-draws'.
+
+Two sequences rather than one chained `11 ; #ff0000 ; ?', which asks about the
+*cursor*: a chained field advances the code, so the question after a set of the
+background is a question about the next colour along."
+  (let ((out (make-temp-file "cooked-color-refused"))
+        (cooked-allow-color-set nil))
+    (unwind-protect
+        (cooked-tests--with-session
+            (cooked-tests--reply-to "\\033]11;#ff0000\\007\\033]11;?\\007" out)
+          (let ((expected (cooked-tests--color-answer 11)))
+            (should (cooked-tests--settle
+                     (lambda () (equal (cooked-tests--contents out) expected))))
+            (should (equal (cooked-tests--contents out) expected))
+            (should-not cooked--color-remaps)))
+      (delete-file out))))
 
 (ert-deftest cooked-osc-4-sweep-is-answered-without-waking-lisp ()
   "A theme picker asking for all 256 palette entries never reaches Lisp at all.
@@ -1931,9 +2058,7 @@ in the form xterm uses."
         (queries (make-temp-file "cooked-osc4-queries"))
         (reached 0)
         (palette (symbol-function 'cooked--osc-palette))
-        (expected (mapconcat (lambda (index)
-                               (format "\e]4;%d;%s\a" index
-                                       (cooked-tests--palette-answer index)))
+        (expected (mapconcat #'cooked-tests--palette-answer
                              (number-sequence 0 255))))
     (unwind-protect
         (progn
