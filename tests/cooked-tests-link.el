@@ -351,10 +351,18 @@ every row of it carries the one URL."
         (should-not browsed)
         ;; Shift is the sanctioned way through, so the link stays reachable.
         (setq forwarded nil)
-        (let ((last-input-event (list 'S-mouse-2 nil)))
-          (cooked-follow-link))
-        (should browsed)
-        (should-not forwarded)))))
+        (dolist (click '(S-mouse-2 S-mouse-1))
+          (setq browsed nil)
+          (let ((last-input-event (list click nil)))
+            (cooked-follow-link))
+          (should browsed)
+          (should-not forwarded))
+        ;; And both are on the link's own keymap, which is what gets them here
+        ;; ahead of the grab.  The press is claimed so that the global
+        ;; `mouse-appearance-menu' does not open a menu under the click.
+        (should (eq (lookup-key cooked-link-map [S-mouse-1]) #'cooked-follow-link))
+        (should (eq (lookup-key cooked-link-map [S-down-mouse-1]) #'ignore))
+        (should-not (lookup-key cooked-link-map [S-drag-mouse-1]))))))
 
 (defconst cooked-tests--file-link-child
   '("/bin/sh" "-c" "printf '\033[?1000h\033[?1006h'; \

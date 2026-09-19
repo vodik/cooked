@@ -239,8 +239,8 @@ is a value a user can have set.  See `cooked--suppress-link-clicks'.")
 
 SUPPRESS is `cooked--mouse-grab', and the rule it implements is the one
 `cooked-follow-link' documents: while the child holds the mouse a plain click
-belongs to the child, and `S-mouse-2' and \\`C-c RET' are the sanctioned ways
-to a link.  `mouse-1-click-follows-link' is what breaks that rule, and it
+belongs to the child, and a shifted click and \\`C-c RET' are the sanctioned
+ways to a link.  `mouse-1-click-follows-link' is what breaks that rule, and it
 breaks it before any keymap of ours is consulted -- Emacs rewrites the release
 into `mouse-2' while reading the key sequence, so what the buffer's maps are
 offered is an event the child's own press has nothing to do with.  The press

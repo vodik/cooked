@@ -885,8 +885,8 @@ program underneath would follow a link instead.  The same holds for RET while
 keys are being forwarded.
 
 Only the unshifted case reaches here; cooked-link.el filters the rest, because
-`S-RET' and `S-mouse-2' following the link regardless of state is what keeps a
-link reachable at all inside a full-screen program."
+`S-RET' and a shifted click following the link regardless of state is what
+keeps a link reachable at all inside a full-screen program."
   (cond
    ((mouse-event-p event)
     (when (bound-and-true-p cooked--mouse-grab)

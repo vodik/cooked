@@ -96,8 +96,8 @@ belongs to Emacs and the link is opened.
 
 Set from above by whichever layer owns input; unset, every invocation follows
 the link, which is the right answer for a buffer with no child in it.  The
-shifted variants never reach here at all: `S-RET' and `S-mouse-2' are the
-sanctioned escape and must keep working whatever the child has grabbed.")
+shifted variants never reach here at all: `S-RET', `S-mouse-1' and `S-mouse-2'
+are the sanctioned escape and must keep working whatever the child has grabbed.")
 
 (defgroup cooked-link nil
   "Links in terminal output."
@@ -296,9 +296,9 @@ program underneath would follow a link instead, which is the confusion the
 shifted variant exists to settle.  The same holds for RET while keys are being
 forwarded.  So an
 unshifted invocation in either of those states forwards exactly what it would
-have forwarded had this binding not existed, and the shifted variant — `S-RET'
-and `S-mouse-2' — follows the link regardless, which is what keeps a link
-reachable at all inside a full-screen program.
+have forwarded had this binding not existed, and the shifted variant --
+`S-RET', `S-mouse-1' and `S-mouse-2' -- follows the link regardless, which is
+what keeps a link reachable at all inside a full-screen program.
 
 Once it does decide to open something, `cooked--open-link-at-point' says what
 that is."
@@ -339,9 +339,19 @@ goto-addr's overlays, so that variable is never consulted.
 character, and a `C-c' prefix in a property at point would make Emacs wait for
 a second key before letting SIGINT through.
 The command lives on `cooked-mode-map' instead, where the state that decides
-whether cooked's own `C-c' map is reachable at all already decides it."
+whether cooked's own `C-c' map is reachable at all already decides it.
+
+`S-mouse-1' stands to `S-mouse-2' as `mouse-1' stands to `mouse-2' under
+`mouse-1-click-follows-link'.  Emacs rewrites only the unmodified click, so the
+shifted one is bound outright, and it is the gesture WezTerm and Alacritty use
+for a link inside a program that has the mouse -- the one that can be made on
+a trackpad.  A drag is a different event, `S-drag-mouse-1', and is not
+claimed.  The press is: the global `S-down-mouse-1' is `mouse-appearance-menu',
+which would put a font menu up between the press and the release."
   "<mouse-2>"   #'cooked-follow-link
   "S-<mouse-2>" #'cooked-follow-link
+  "S-<mouse-1>" #'cooked-follow-link
+  "S-<down-mouse-1>" #'ignore
   "RET"         #'cooked-follow-link
   "S-<return>"  #'cooked-follow-link)
 
