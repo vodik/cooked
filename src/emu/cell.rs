@@ -172,6 +172,12 @@ pub struct Cell {
 const _: () = assert!(std::mem::size_of::<Cell>() == 16);
 const _: () = assert!(std::mem::align_of::<Cell>() == 4);
 
+/// Bytes of a cell that say whether it is a blank: the character and the rendition,
+/// which [`Cell`] declares in that order and `repr(C)` lays out in it. Eight, so that
+/// [`Cell::content_len`] can read them as one word.
+const HEAD: usize = size_of::<char>() + size_of::<StyleId>();
+const _: () = assert!(HEAD == size_of::<u64>());
+
 pub(crate) const CONTINUATION: char = '\0';
 pub(crate) const BLANK: char = ' ';
 /// U+00A0, named because `tree` indents with it: its rows read
@@ -303,6 +309,52 @@ impl Cell {
         // SAFETY: see above -- `Cell` has no padding and no uninitialised bytes, and the
         // length is the slice's own size in bytes.
         unsafe { std::slice::from_raw_parts(cells.as_ptr().cast::<u8>(), size_of_val(cells)) }
+    }
+
+    /// Columns of CELLS up to the last one that is not a trailing blank, or zero.
+    ///
+    /// The scan behind [`Row::content_len`], and the hottest loop in the emulator: every
+    /// row that scrolls off runs it over the full width of the screen, so a 400-column
+    /// grid carrying a 54-character line walks 346 blanks before it finds anything.
+    ///
+    /// Over the bytes rather than the cells, for the reason [`Cell::bytes`] gives. A cell
+    /// is a trailing blank exactly when its character and its rendition are the blank
+    /// ones, and those are the first eight bytes of it, so the test is one eight-byte
+    /// comparison instead of a load and a compare per field. The link, which trimming
+    /// ignores, is in the bytes after them and is not looked at. On the full-screen
+    /// scroll benchmark that is about three instructions a blank rather than six.
+    pub fn content_len(cells: &[Cell]) -> usize {
+        let blank = Self::blank(StyleId::DEFAULT);
+        let head = Self::head(Self::bytes(std::slice::from_ref(&blank)));
+        // `rchunks_exact` walks the cells from the end, so the position it reports counts
+        // the trailing blanks, and the content ends that far short of the row's width.
+        let blanks = Self::bytes(cells)
+            .rchunks_exact(size_of::<Self>())
+            .position(|cell| Self::head(cell) != head);
+        blanks.map_or(0, |blanks| cells.len() - blanks)
+    }
+
+    /// The character and rendition of the cell CELL's bytes begin with, as one word.
+    ///
+    /// `from_ne_bytes` because the word is only ever compared with another cell's: the
+    /// bytes are reinterpreted, never read as a number, so this says nothing about the
+    /// machine's endianness.
+    fn head(cell: &[u8]) -> u64 {
+        u64::from_ne_bytes(
+            cell[..HEAD]
+                .try_into()
+                .expect("a cell's head is eight bytes"),
+        )
+    }
+
+    /// The simplest correct statement of what [`Cell::content_len`] must produce.
+    ///
+    /// The rule that function encodes in a byte comparison, written out in its own terms
+    /// for `content_len_matches_the_reference` to check it against: a cell is a trailing
+    /// blank when it holds a blank in the default rendition, whatever link it is part of.
+    #[cfg(test)]
+    fn is_trailing_blank(self) -> bool {
+        self.ch == BLANK && self.is_default_style()
     }
 
     pub fn is_continuation(self) -> bool {
@@ -1282,11 +1334,7 @@ impl<C: Borrow<[Cell]>, M: Borrow<RowMeta>> RowOf<C, M> {
     /// its trailing blanks are interior to a line that ends somewhere below. See
     /// [`Row::line_runs`].
     pub fn content_len(&self) -> usize {
-        let cells = self
-            .cells()
-            .iter()
-            .rposition(|c| c.ch != BLANK || !c.is_default_style())
-            .map_or(0, |i| i + 1);
+        let cells = Cell::content_len(self.cells());
         // An attachment can be the last content on the row while its cell is a default
         // blank -- a combining mark on a space, or an image cell, which always is one.
         if self.meta().extras.is_none() {
@@ -2475,6 +2523,54 @@ mod tests {
                 "{context}: character {i}"
             );
         }
+    }
+
+    #[test]
+    fn content_len_matches_the_reference() {
+        // xorshift, as in `runs_to_matches_the_reference': a deterministic sequence.
+        let mut seed = 0x243F_6A88_85A3_08D3_u64;
+        let mut next = move || {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed
+        };
+
+        const COLS: usize = 24;
+        // A blank in the default rendition is the only cell that trims. The rest are
+        // there for the ways a byte comparison could go wrong: a blank carrying a link
+        // trims all the same, because trimming does not look at the link; a blank in a
+        // rendition does not, because it is a coloured bar drawn to the edge; and the
+        // second half of a wide character is a `\0`, which is not a blank.
+        let cells = [
+            Cell::blank(StyleId::DEFAULT),
+            Cell::blank(StyleId::DEFAULT),
+            Cell::blank(StyleId::DEFAULT),
+            Cell::linked(BLANK, StyleId::DEFAULT, Some(LinkId::from_index(0))),
+            Cell::blank(StyleId::from_raw(1)),
+            Cell::new('a', StyleId::DEFAULT),
+            Cell::linked('a', StyleId::from_raw(2), Some(LinkId::from_index(1))),
+            Cell::new(CONTINUATION, StyleId::DEFAULT),
+        ];
+
+        let mut all_blank = 0;
+        let mut full = 0;
+        for _ in 0..4_000 {
+            let width = (next() % (COLS as u64 + 1)) as usize;
+            let row: Vec<Cell> = (0..width)
+                .map(|_| cells[(next() % cells.len() as u64) as usize])
+                .collect();
+            let want = row
+                .iter()
+                .rposition(|c| !c.is_trailing_blank())
+                .map_or(0, |at| at + 1);
+            assert_eq!(Cell::content_len(&row), want, "over {row:?}");
+            all_blank += usize::from(want == 0 && width > 0);
+            full += usize::from(want == width && width > 0);
+        }
+        // Both ends of the scan, since one of them is the early return and the other the
+        // walk off the front of the row.
+        assert!(all_blank > 0 && full > 0, "{all_blank} blank, {full} full");
     }
 
     #[test]
