@@ -134,7 +134,9 @@ const INTERACTION_WINDOW: std::time::Duration = std::time::Duration::from_millis
 /// [`POLL_TIMEOUT_MS`] away. One extra sample in the wake of output catches the prompt
 /// promptly without shortening the base tick, and a session with no output arms nothing.
 const RESAMPLE_DELAY: std::time::Duration = std::time::Duration::from_millis(50);
-/// How long to wait for a child that closed the pty to become reapable.
+/// How long to wait for a child that closed the pty to become reapable before settling
+/// in for a longer wait on the exit watch; see [`Shared::linger_for_exit`], which is also
+/// where this bounds how promptly teardown is noticed.
 const REAP_PATIENCE: std::time::Duration = std::time::Duration::from_millis(500);
 
 /// What `exit` holds for a session whose reader gave up on the pty with the child still
@@ -1742,7 +1744,7 @@ impl Shared {
             }
 
             match self.pty.read(&mut buf) {
-                Ok([]) => return self.finish(Ended::ChildGone),
+                Ok([]) => return self.finish_at_hangup(),
                 Ok(data) => {
                     #[cfg(test)]
                     if self.panic_on_read.swap(false, Ordering::SeqCst) {
@@ -1777,7 +1779,7 @@ impl Shared {
                 }
                 // EIO is how Linux reports the last slave closing.
                 Err(e) if e.is(Errno::EIO) => {
-                    return self.finish(Ended::ChildGone);
+                    return self.finish_at_hangup();
                 }
                 // The master is non-blocking, and a poll that reported a hangup or an error
                 // can find nothing to read after all.
@@ -1807,9 +1809,78 @@ impl Shared {
         })
     }
 
+    /// The end of the reader for a pty that hung up, with the wait for a child that has
+    /// not exited yet included.
+    ///
+    /// Teardown is the one thing that cuts that wait short, and it leaves this thread
+    /// holding the obligation the ordinary end of [`Shared::read_loop`] holds: the grace
+    /// the hangup bought is the reader's to wait out, because [`Session::drop`] hands it
+    /// over rather than hold Emacs' garbage collector still for it.
+    fn finish_at_hangup(&self) {
+        self.finish(Ended::ChildGone);
+        if self.shutdown.load(Ordering::SeqCst) {
+            self.reap_after_hangup();
+        }
+    }
+
+    /// Wait for a child that hung the pty up without exiting, so that the status it does
+    /// exit with is still the one reported.
+    ///
+    /// Reached only from [`Shared::finish`], once the first [`REAP_PATIENCE`] has gone by
+    /// with nothing to collect. The case is a direct child that let go of its tty and
+    /// kept running -- `exec 0<&- 1>&- 2>&-; sleep 30` in the shell we started, or
+    /// anything else that daemonises itself the classical way: the last descriptor on the
+    /// slave is gone, so the master reports EIO at once, while the child is still running
+    /// and still ours to reap. (A background job holding the slave open is the opposite
+    /// case and does not come here: the master never hangs up at all.)
+    ///
+    /// Waiting rather than escalating to the hangup and kill `Ended::Aborted` sends. A
+    /// child that closed its tty on purpose has not asked to be killed, and no terminal
+    /// kills one for it. Walking away instead -- which is what recording nothing amounted
+    /// to -- is worse than either: the child is ours, so nobody else will ever reap it,
+    /// and it would sit in Emacs as a zombie for as long as Emacs runs, with `alive`
+    /// answering yes about it the whole time.
+    ///
+    /// The cost of waiting is one thread parked in `poll` on the exit watch -- a pidfd on
+    /// Linux, a kqueue on macOS -- which is the reader, and it has nothing else left to
+    /// do. It is woken the moment the child exits, and otherwise once every
+    /// [`REAP_PATIENCE`], which is what bounds how long teardown takes to be noticed.
+    ///
+    /// `None` only for a wait teardown stopped, and then the child is
+    /// [`Shared::reap_after_hangup`]'s, which is where the grace, the kill and [`LOST`]
+    /// are.
+    fn linger_for_exit(&self) -> Option<i32> {
+        while !self.shutdown.load(Ordering::SeqCst) {
+            if let Some(status) = self.pty.reap(REAP_PATIENCE) {
+                return Some(status);
+            }
+            // `Pty::reap` answers `None` three ways and only one of them, the timeout, is
+            // worth another turn. A child somebody else collected -- an explicit
+            // `Session::shutdown` on Emacs' thread, racing this -- left its status in
+            // `Pty::collected` for us to read.
+            if let Some(status) = self.pty.collected() {
+                return Some(status);
+            }
+            match self.pty.try_wait() {
+                Ok(None) => {}
+                Ok(Some(status)) => return Some(status),
+                // A `waitpid` that refuses the pid outright -- `ECHILD` for a child that
+                // is not ours any more -- will refuse it just as flatly in another half
+                // second, and there is no status left to be had.
+                Err(_) => return Some(LOST),
+            }
+        }
+        None
+    }
+
     fn finish(&self, why: Ended) {
         let status = match why {
-            Ended::ChildGone => self.pty.reap(REAP_PATIENCE),
+            // A child can hang the pty up without being reapable yet, and even without
+            // exiting at all; see [`Shared::linger_for_exit`].
+            Ended::ChildGone => self
+                .pty
+                .reap(REAP_PATIENCE)
+                .or_else(|| self.linger_for_exit()),
             // The reader is leaving with the child still there. Nothing will read the pty
             // again, so the session is over whether or not the child agrees, and a
             // session that ends has to say so: left as it was, `alive` went on
@@ -1967,7 +2038,8 @@ impl Shared {
 }
 
 enum Ended {
-    /// The pty reported EOF, so the child is on its way out and can be reaped.
+    /// The pty hung up, so the child is on its way out -- though not always reapable
+    /// yet, and not always even exiting; see [`Shared::linger_for_exit`].
     ChildGone,
     /// We are tearing down; the child may well still be running.
     Aborted,
@@ -3493,6 +3565,45 @@ mod tests {
         assert!(!session.alive());
         assert_eq!(alive(pid), Err(Errno::ESRCH));
         assert_eq!(session.drain().exit, Some(128 + Signal::SIGKILL as i32));
+    }
+
+    /// A child that closes its tty and keeps running is waited out, not killed.
+    ///
+    /// The shell closes the last descriptors on the slave and sleeps, so the master hangs
+    /// up while the direct child is still running and still ours to reap. The first reap
+    /// has nothing to collect, and what used to follow was nothing at all: no status, no
+    /// wakeup, and `alive` answering yes for good with the reader already gone. Now the
+    /// session stays alive for exactly as long as the child does -- it is alive -- and
+    /// reports the status the child really exits with, 7 rather than a signal, which is
+    /// what says it was waited for rather than hung up on and killed.
+    #[test]
+    fn a_child_that_closed_its_tty_is_waited_out_rather_than_killed() {
+        // The `echo` is so the test can wait for the child to be up; the sleep outlasts
+        // `REAP_PATIENCE` twice over, which is what leaves the first reap empty-handed.
+        let (session, read) = session(&[
+            "/bin/sh",
+            "-c",
+            "echo ready; exec 0<&- 1>&- 2>&-; sleep 1; exit 7",
+        ]);
+        let pid = session.pid().as_raw();
+        wait_for(&session, |u| rendered(u).contains("ready"));
+        assert!(
+            session.alive(),
+            "the session gave up on a child that is still running"
+        );
+        // The wakeups for the output so far, so the one asserted below is the exit's own.
+        while woke_within(&read, Duration::from_millis(50)) {}
+        let update = wait_for_within(&session, 10.0, |u| u.exit.is_some());
+        assert_eq!(update.exit, Some(7), "the child's own exit status");
+        assert_eq!(
+            alive(pid),
+            Err(Errno::ESRCH),
+            "the child is still there after its exit was reported"
+        );
+        assert!(
+            woke_within(&read, patience(1.0)),
+            "the session ended without waking Emacs"
+        );
     }
 
     /// A panic on the reader thread ends the session as an abort does, rather than
