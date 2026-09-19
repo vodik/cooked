@@ -155,10 +155,20 @@ const RESAMPLE_DELAY: std::time::Duration = std::time::Duration::from_millis(50)
 /// where this bounds how promptly teardown is noticed.
 const REAP_PATIENCE: std::time::Duration = std::time::Duration::from_millis(500);
 
-/// What `exit` holds for a session whose reader gave up on the pty with the child still
-/// unreapable: not an exit status, since there is none, but Lisp still needs the session
-/// to end. `cooked--on-exit' spells it out. Negative because no `waitpid` status is.
-pub(crate) const LOST: i32 = -1;
+/// How a session ended, once it has.
+///
+/// An enum rather than the bare status it crosses to Lisp as, because the second variant
+/// is not a status: there is none to be had, and it used to ride in the same `i32` as the
+/// sentinel -1, which no `waitpid` status is but which the type did not say. See
+/// [`crate::wire::LOST`], where it becomes that number and nowhere else.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Exit {
+    /// What `waitpid` reported, as `cooked--on-exit' reads it.
+    Status(i32),
+    /// The reader gave up on the pty with the child still unreapable, so nobody will ever
+    /// have a status for it. Lisp still needs the session to end.
+    Lost,
+}
 
 /// How quiet the pty must go before a frame is drawn; see [`NotifyState::quiescent_until`].
 ///
@@ -229,7 +239,7 @@ impl Input {
 pub(crate) struct Update {
     pub delta: Delta,
     pub mode: Mode,
-    pub exit: Option<i32>,
+    pub exit: Option<Exit>,
 }
 
 /// Where everything that paces a frame reads the time.
@@ -357,26 +367,40 @@ struct NotifyState {
     /// the minimum each time leaves the second change's answer standing, which is exactly
     /// what the two-field version spelled with a `get_or_insert`.
     ceiling_at: Option<std::time::Instant>,
-    /// When the window a keystroke opened for its echo closes; see [`ECHO_WINDOW`].
+    /// Where a keystroke's echo has got to; see [`Echo`] and [`ECHO_WINDOW`].
+    echo: Echo,
+}
+
+/// How far along a keystroke's echo is, which is what lets one frame skip `min_interval`.
+///
+/// One value rather than the deadline and the flag this was, which could each be read
+/// without the other: the deadline said a keystroke was waiting and the flag said the
+/// frame being assembled carries its echo, and every path touched both.
+///
+/// Only the throttle is waived because it is the only gate that is a pure clock.
+/// [`QUIESCENCE`] is what keeps a line editor redrawing its line in several writes from
+/// being drawn half done, and echo is exactly that write, so the echo still waits for the
+/// pty to go quiet. A child that never goes quiet is still drawn at `frame_ceiling`, which
+/// this leaves alone: waiving it would hold the frame for [`HOLD_CEILING`] instead.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Echo {
+    /// No keystroke is waiting for its echo and no frame is carrying one.
+    Idle,
+    /// A keystroke has been written and its echo is worth a waived frame until this
+    /// instant. Taken by the first drawable read on a shown screen, whether or not it has
+    /// expired, so one keystroke can turn into at most one waived frame however much the
+    /// child writes after it.
+    Expected(std::time::Instant),
+    /// The frame being assembled carries a keystroke's echo, so it skips `min_interval`;
+    /// the other three gates in [`Notifier::flush`] still apply. Cleared by the flush that
+    /// sends the frame, so under a flood with a key held down the wake rate rises by at
+    /// most one frame per keystroke.
     ///
-    /// Taken by the first drawable read on a shown screen, whether or not it has expired,
-    /// so one keystroke can turn into at most one waived frame however much the child
-    /// writes after it. `None` while no keystroke is waiting.
-    echo_until: Option<std::time::Instant>,
-    /// Whether the frame being assembled carries a keystroke's echo, which lets it skip
-    /// `min_interval`; the other three gates in [`Notifier::flush`] still apply.
-    ///
-    /// Only the throttle is waived because it is the only gate that is a pure clock.
-    /// [`QUIESCENCE`] is what keeps a line editor redrawing its line in several writes
-    /// from being drawn half done, and echo is exactly that write, so the echo still waits
-    /// for the pty to go quiet. A child that never goes quiet is still drawn at
-    /// `frame_ceiling`, which this leaves alone: waiving it would hold the frame for
-    /// [`HOLD_CEILING`] instead.
-    ///
-    /// Set by [`Notifier::fed`] from `echo_until`, and cleared by the flush that sends the
-    /// frame, so under a flood with a key held down the wake rate rises by at most one
-    /// frame per keystroke.
-    echo: bool,
+    /// A keystroke typed while that frame waits on one of the other gates is still owed an
+    /// echo of its own, and its window rides along here to become [`Echo::Expected`] again
+    /// once the frame has gone: the alternative, overwriting the state, would either drop
+    /// that keystroke's window or unwaive a frame already carrying an echo.
+    Seen(Option<std::time::Instant>),
 }
 
 /// What is keeping the frame being assembled off the screen; see [`NotifyState::decide`].
@@ -410,7 +434,7 @@ impl NotifyState {
             self.sync_until,
             // The redisplay floor, which a keystroke's echo waives; see [`Self::echo`].
             self.last
-                .filter(|_| !self.echo)
+                .filter(|_| !matches!(self.echo, Echo::Seen(_)))
                 .map(|t| t + self.min_interval),
             self.quiescent_until(now),
         ];
@@ -462,8 +486,7 @@ impl Notifier {
                 sync_until: None,
                 last_read: None,
                 ceiling_at: None,
-                echo_until: None,
-                echo: false,
+                echo: Echo::Idle,
             }),
             clock: options.clock.clone(),
         }
@@ -520,7 +543,14 @@ impl Notifier {
     /// Called before the write rather than after it, because the child's echo can reach
     /// the reader thread before the writing thread gets the lock back.
     fn expect_echo(&self) {
-        self.state.held().echo_until = Some(self.clock.now() + ECHO_WINDOW);
+        let at = self.clock.now() + ECHO_WINDOW;
+        let mut state = self.state.held();
+        state.echo = match state.echo {
+            // A frame already carrying an echo keeps the waiver it earned, and this
+            // keystroke's window waits behind it; see [`Echo::Seen`].
+            Echo::Seen(_) => Echo::Seen(Some(at)),
+            Echo::Idle | Echo::Expected(_) => Echo::Expected(at),
+        };
     }
 
     /// Note a read from the pty, `drawable` saying whether it changed anything Emacs
@@ -541,8 +571,16 @@ impl Notifier {
         let now = self.clock.now();
         let mut state = self.state.held();
         state.last_read = Some(now);
-        if drawable && shown && remaining(state.echo_until.take(), now).is_some() {
-            state.echo = true;
+        if drawable && shown {
+            state.echo = match state.echo {
+                Echo::Expected(at) if remaining(Some(at), now).is_some() => Echo::Seen(None),
+                // An expired window is spent rather than carried: the echo it was opened
+                // for is long since drawn, and the read that arrives now is the child's
+                // own output.
+                Echo::Expected(_) => Echo::Idle,
+                Echo::Idle => Echo::Idle,
+                Echo::Seen(_) => Echo::Seen(None),
+            };
         }
         if drawable {
             if self.dirty.swap(true, Ordering::SeqCst) {
@@ -577,7 +615,10 @@ impl Notifier {
         }
         state.last = Some(now);
         state.ceiling_at = None;
-        state.echo = false;
+        state.echo = match state.echo {
+            Echo::Seen(pending) => pending.map_or(Echo::Idle, Echo::Expected),
+            unsent => unsent,
+        };
         drop(state);
         self.dirty.store(false, Ordering::SeqCst);
         self.notify()
@@ -762,7 +803,7 @@ struct Shared {
     /// that ends because the user let go decays on its own.
     interacted_until: Mutex<Option<std::time::Instant>>,
     interrupt: Interrupt,
-    exited: Mutex<Option<i32>>,
+    exited: Mutex<Option<Exit>>,
     /// Make the next read from the pty panic, to stand in for a defect in the parser or
     /// a decoder; see [`Shared::run_reader`]. Compiled out of a release build.
     #[cfg(test)]
@@ -1078,11 +1119,11 @@ impl Shared {
             // them collect it. Losing that race is not losing the status: `Pty::collected`
             // is where the winner left it, and reading it here rather than waiting for the
             // reader to record it is what keeps `alive` answering no the moment this
-            // returns. `LOST` is left for a child nobody reaped at all.
+            // returns. [`Exit::Lost`] is left for a child nobody reaped at all.
             *exited = Some(
                 self.reap_or_kill()
                     .or_else(|| self.pty.collected())
-                    .unwrap_or(LOST),
+                    .map_or(Exit::Lost, Exit::Status),
             );
         }
     }
@@ -1869,27 +1910,27 @@ impl Shared {
     /// [`REAP_PATIENCE`], which is what bounds how long teardown takes to be noticed.
     ///
     /// `None` only for a wait teardown stopped, and then the child is
-    /// [`Shared::reap_after_hangup`]'s, which is where the grace, the kill and [`LOST`]
-    /// are.
-    fn linger_for_exit(&self) -> Option<i32> {
+    /// [`Shared::reap_after_hangup`]'s, which is where the grace, the kill and
+    /// [`Exit::Lost`] are.
+    fn linger_for_exit(&self) -> Option<Exit> {
         while !self.shutdown.load(Ordering::SeqCst) {
             if let Some(status) = self.pty.reap(REAP_PATIENCE) {
-                return Some(status);
+                return Some(Exit::Status(status));
             }
             // `Pty::reap` answers `None` three ways and only one of them, the timeout, is
             // worth another turn. A child somebody else collected -- an explicit
             // `Session::shutdown` on Emacs' thread, racing this -- left its status in
             // `Pty::collected` for us to read.
             if let Some(status) = self.pty.collected() {
-                return Some(status);
+                return Some(Exit::Status(status));
             }
             match self.pty.try_wait() {
                 Ok(None) => {}
-                Ok(Some(status)) => return Some(status),
+                Ok(Some(status)) => return Some(Exit::Status(status)),
                 // A `waitpid` that refuses the pid outright -- `ECHILD` for a child that
                 // is not ours any more -- will refuse it just as flatly in another half
                 // second, and there is no status left to be had.
-                Err(_) => return Some(LOST),
+                Err(_) => return Some(Exit::Lost),
             }
         }
         None
@@ -1902,6 +1943,7 @@ impl Shared {
             Ended::ChildGone => self
                 .pty
                 .reap(REAP_PATIENCE)
+                .map(Exit::Status)
                 .or_else(|| self.linger_for_exit()),
             // The reader is leaving with the child still there. Nothing will read the pty
             // again, so the session is over whether or not the child agrees, and a
@@ -1909,7 +1951,7 @@ impl Shared {
             // answering yes for a buffer nothing would ever write to again.
             Ended::Aborted => {
                 let _ = self.pty.hangup();
-                self.reap_or_kill().or(Some(LOST))
+                Some(self.reap_or_kill().map_or(Exit::Lost, Exit::Status))
             }
         };
         let Some(status) = status else {
@@ -3035,6 +3077,54 @@ mod tests {
         );
     }
 
+    /// A key typed while the frame carrying the last echo is still held is owed an echo of
+    /// its own, and gets it once that frame has gone.
+    ///
+    /// The state both keystrokes are in at the same moment, which is what [`Echo::Seen`]
+    /// carries a pending window for: the frame in flight has earned its waiver and must
+    /// keep it, and the second key's window must outlive the flush that sends that frame,
+    /// or a key pressed in the sub-millisecond gap [`QUIESCENCE`] holds a frame for would
+    /// wait out the whole interval for its echo.
+    #[test]
+    fn a_key_typed_while_an_echo_is_held_is_still_echoed_at_once() {
+        const QUIET: Duration = Duration::from_millis(2);
+        let (notifier, read, clock) = paced_notifier(Options {
+            quiescence: QUIET,
+            ..Options::with_min_redisplay_interval(PACED)
+        });
+        // A frame first, so there is a `last` for the throttle to be measured from.
+        notifier.fed(true, true);
+        clock.advance(QUIET * 2);
+        notifier.flush();
+        assert!(woke(&read), "the first frame has no interval to wait on");
+        notifier.acknowledge();
+
+        // The first key, whose echo arrives while the pty is still loud.
+        notifier.expect_echo();
+        notifier.fed(true, true);
+        notifier.flush();
+        assert!(!woke(&read), "the frame went out before the pty went quiet");
+
+        // The second key, typed into that gap.
+        notifier.expect_echo();
+        clock.advance(QUIET * 2);
+        notifier.flush();
+        assert!(
+            woke(&read),
+            "the frame carrying the first echo lost its waiver to the key typed after it"
+        );
+        notifier.acknowledge();
+
+        // And the second key's own echo, on the far side of that flush.
+        notifier.fed(true, true);
+        clock.advance(QUIET * 2);
+        notifier.flush();
+        assert!(
+            woke(&read),
+            "the second key's echo waited out the {PACED:?} interval the first one started"
+        );
+    }
+
     /// The frame ceiling is armed by a frame's *second* drawable change, not its first.
     ///
     /// One cursor move followed by a long silent image transfer has nothing further to
@@ -3555,7 +3645,7 @@ mod tests {
                 .is_ok_and(|fg| fg != session.pid())
         });
         assert!(session.shutdown());
-        assert_eq!(session.drain().exit, Some(3));
+        assert_eq!(session.drain().exit, Some(Exit::Status(3)));
     }
 
     /// An interrupt reaches the foreground group, whichever way the platform sends it.
@@ -3568,7 +3658,7 @@ mod tests {
         std::thread::sleep(Duration::from_millis(150));
         session.signal(Signal::SIGINT).expect("signal");
         let update = wait_for(&session, |u| u.exit.is_some());
-        assert_eq!(update.exit, Some(5));
+        assert_eq!(update.exit, Some(Exit::Status(5)));
     }
 
     /// A reader that leaves with the child still there ends the session anyway.
@@ -3586,7 +3676,10 @@ mod tests {
         session.shared.finish(Ended::Aborted);
         assert!(!session.alive());
         assert_eq!(alive(pid), Err(Errno::ESRCH));
-        assert_eq!(session.drain().exit, Some(128 + Signal::SIGKILL as i32));
+        assert_eq!(
+            session.drain().exit,
+            Some(Exit::Status(128 + Signal::SIGKILL as i32))
+        );
     }
 
     /// A child that closes its tty and keeps running is waited out, not killed.
@@ -3616,7 +3709,11 @@ mod tests {
         // The wakeups for the output so far, so the one asserted below is the exit's own.
         while woke_within(&read, Duration::from_millis(50)) {}
         let update = wait_for_within(&session, 10.0, |u| u.exit.is_some());
-        assert_eq!(update.exit, Some(7), "the child's own exit status");
+        assert_eq!(
+            update.exit,
+            Some(Exit::Status(7)),
+            "the child's own exit status"
+        );
         assert_eq!(
             alive(pid),
             Err(Errno::ESRCH),
@@ -3655,7 +3752,10 @@ mod tests {
             Err(Errno::ESRCH),
             "the child outlived its reader"
         );
-        assert_eq!(session.drain().exit, Some(128 + Signal::SIGKILL as i32));
+        assert_eq!(
+            session.drain().exit,
+            Some(Exit::Status(128 + Signal::SIGKILL as i32))
+        );
     }
 
     #[test]
@@ -3804,7 +3904,7 @@ mod tests {
     fn exit_status_is_reported() {
         let (session, _read) = session(&["/bin/sh", "-c", "exit 7"]);
         let update = wait_for(&session, |u| u.exit.is_some());
-        assert_eq!(update.exit, Some(7));
+        assert_eq!(update.exit, Some(Exit::Status(7)));
         assert!(!session.alive());
     }
 

@@ -60,6 +60,93 @@ pub struct Shift {
     pub direction: Direction,
 }
 
+/// The row moves since the last drain, and whether the log of them is complete.
+///
+/// One value rather than a `Vec<Shift>` beside a `bool`, which let a reader consult one
+/// and not the other: whether anything is missing from the log decides whether its first
+/// entry may be read as the scroll that took a promoted row off the top, so the two are
+/// one question and [`Shifts::leading_scroll`] is where it is asked.
+///
+/// A field rather than the payload of two enum variants, because the log is there either
+/// way: moves recorded *after* a drop are a real state and not a contradiction. Dropping
+/// empties the log and damages every row, and the scroll after that is recorded as usual,
+/// so what [`Tracking`] says is whether the log begins where the drain window does.
+#[derive(Debug, Clone, Default)]
+struct Shifts {
+    /// The moves in the order they happened; see [`Shift`]. Written only by
+    /// [`Screen::shift`].
+    log: Vec<Shift>,
+    /// Whether [`Shifts::log`] covers the whole window since the last drain.
+    tracking: Tracking,
+}
+
+/// Whether a [`Shifts`] log has a hole in it; see [`Screen::shift`], which is the one
+/// place a hole is made, and why it is safe there.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+enum Tracking {
+    /// Every move since the last drain is in the log.
+    #[default]
+    Tracked,
+    /// The log grew as long as the screen is tall and was thrown away, so it holds only
+    /// the moves recorded since.
+    Dropped,
+}
+
+impl Shifts {
+    /// The move the drain window opened with, or `None` if the log cannot say.
+    ///
+    /// The one question a promotion turns on: the rows handed to scrollback left by this
+    /// scroll, so Emacs may keep its own text for them and be told to open blanks at the
+    /// bottom of the region instead -- see `Front::promote`. A log with a hole in it
+    /// cannot answer it. A 2-row screen that scrolls up twice, down twice and up twice
+    /// more in one drain records the first two moves, drops them at the fifth and records
+    /// the sixth alone, so rows promoted by the first scroll would be taken out of the
+    /// sixth, which moved other rows.
+    fn leading_scroll(&self) -> Option<Shift> {
+        match self.tracking {
+            Tracking::Tracked => self.log.first().copied(),
+            Tracking::Dropped => None,
+        }
+    }
+
+    /// How many rows the moves since the last drain have taken off the top of the screen,
+    /// or `None` when the log holds a move other than one scroll of a region from the top
+    /// row, or cannot account for them all.
+    fn scrolled_off(&self) -> Option<usize> {
+        match (self.tracking, self.log.as_slice()) {
+            (Tracking::Tracked, []) => Some(0),
+            (Tracking::Tracked, [shift]) if shift.top == 0 && shift.direction == Direction::Up => {
+                Some(shift.count)
+            }
+            _ => None,
+        }
+    }
+
+    /// Forget the moves without claiming the log is complete again; see
+    /// [`Screen::touch_all`], whose caller is about to send every row whole.
+    fn forget(&mut self) {
+        self.log.clear();
+    }
+
+    /// Throw the log away and say so, so nothing may be promoted out of it until the next
+    /// drain. The allocation is kept, since a flood fills it again at once.
+    fn dropped(&mut self) {
+        self.log.clear();
+        self.tracking = Tracking::Dropped;
+    }
+
+    /// The moves, for a drain that hands them to Emacs, and a complete log again.
+    ///
+    /// Saturated entries are dropped here, since a region that turned over completely has
+    /// every row damaged; see [`Screen::shift`] for why they stay in the log until then.
+    fn take(&mut self) -> Vec<Shift> {
+        self.tracking = Tracking::Tracked;
+        let mut shifts = std::mem::take(&mut self.log);
+        shifts.retain(|s| s.count < s.bottom + 1 - s.top);
+        shifts
+    }
+}
+
 /// Which way a [`Shift`] moved its rows.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Direction {
@@ -238,19 +325,14 @@ pub struct Screen {
     /// What DECSC saved, for DECRC to put back.
     saved: Option<Cursor>,
     dirty: Vec<bool>,
-    /// Row moves since the last drain, in the order they happened; see [`Shift`].
+    /// Row moves since the last drain, in the order they happened; see [`Shift`] and
+    /// [`Shifts`].
     ///
     /// A log rather than one accumulated move, because a TUI with a `DECSTBM` status area
     /// can scroll two different regions in one drain, and the buffer has to replay them in
     /// order. Consecutive moves of the same rows the same way coalesce, so a thousand-line
     /// `cat` is not a thousand pairs of buffer edits.
-    shifts: Vec<Shift>,
-    /// Whether moves were dropped from `shifts` since the last drain, because the log grew
-    /// as long as the screen is tall; see [`Screen::shift`].
-    ///
-    /// A row promoted before then left by a scroll that is no longer in the log, so there
-    /// is nothing left to take its share from; see [`Screen::dropped_shifts`].
-    dropped_shifts: bool,
+    shifts: Shifts,
     /// How many times a row has been marked damaged; see [`Screen::touches`].
     touches: u64,
     tabs: Vec<bool>,
@@ -319,8 +401,7 @@ impl Screen {
             region: Region::full(rows),
             saved: None,
             dirty: vec![true; rows],
-            shifts: Vec::new(),
-            dropped_shifts: false,
+            shifts: Shifts::default(),
             touches: 0,
             tabs: default_tabs(cols),
             carried: 0,
@@ -535,40 +616,24 @@ impl Screen {
         // Every row is about to be sent whole, so pending shifts can go -- and must, after
         // a resize, since a shift naming a `bottom` the grid no longer has cannot be
         // applied.
-        self.shifts.clear();
+        self.shifts.forget();
     }
 
-    /// Row moves since the last drain, as logged, including a move that has turned its
-    /// region over and which [`Screen::drain_shifts`] will drop.
-    pub fn shifts(&self) -> &[Shift] {
-        &self.shifts
+    /// The move the drain window opened with, as far as the log can say; see
+    /// [`Shifts::leading_scroll`].
+    pub fn leading_scroll(&self) -> Option<Shift> {
+        self.shifts.leading_scroll()
     }
 
-    /// How many rows the moves since the last drain have taken off the top of the screen,
-    /// or `None` when a move other than one scroll of a region from the top row is among
-    /// them.
+    /// How many rows the moves since the last drain have taken off the top of the screen;
+    /// see [`Shifts::scrolled_off`].
     ///
-    /// Only then are the rows handed to scrollback the rows the screen held at its top, in
-    /// order, with nothing else moved, so a row leaving can be matched against what Emacs
-    /// holds; see `Front::promote`. Saturates at the region's height, as the log does.
+    /// Only when they are one scroll from the top row are the rows handed to scrollback
+    /// the rows the screen held at its top, in order, with nothing else moved, so a row
+    /// leaving can be matched against what Emacs holds; see `Front::promote`. Saturates at
+    /// the region's height, as the log does.
     pub fn scrolled_off(&self) -> Option<usize> {
-        match self.shifts.as_slice() {
-            [] => Some(0),
-            [shift] if shift.top == 0 && shift.direction == Direction::Up => Some(shift.count),
-            _ => None,
-        }
-    }
-
-    /// Whether the log has dropped moves since the last drain, having grown as long as the
-    /// screen is tall; see [`Screen::shift`].
-    ///
-    /// The first scroll in the log is then not always the one that took the rows handed
-    /// to scrollback off the top. A 2-row screen that scrolls up twice, down twice and up
-    /// twice more in one drain logs the first two moves, drops them at the fifth, and
-    /// logs the sixth alone, so rows promoted by the first scroll would be taken out of
-    /// the sixth, which moved other rows.
-    pub fn dropped_shifts(&self) -> bool {
-        self.dropped_shifts
+        self.shifts.scrolled_off()
     }
 
     /// Row moves since the last drain, taken with the damage they go with.
@@ -576,14 +641,8 @@ impl Screen {
     /// Ordered, and Lisp must apply them in this order and *before* it renders the
     /// damaged rows: the damage indices are in post-shift coordinates, because the dirty
     /// flags travel with their rows through every move (see [`Screen::scroll_up`]).
-    ///
-    /// Saturated entries are dropped here, since a region that turned over completely has
-    /// every row damaged; see [`Screen::shift`] for why they stay in the log until then.
     pub fn drain_shifts(&mut self) -> Vec<Shift> {
-        self.dropped_shifts = false;
-        let mut shifts = std::mem::take(&mut self.shifts);
-        shifts.retain(|s| s.count < s.bottom + 1 - s.top);
-        shifts
+        self.shifts.take()
     }
 
     /// Record that `n` rows moved within `top..=bottom`, returning whether it was worth
@@ -612,23 +671,22 @@ impl Screen {
     /// damaged instead. Dropping the moves is safe because Emacs has applied none of them:
     /// its text and the core's copy of that text still agree row for row, so the rows
     /// that match the copy are still left out. A promotion is one of those moves, so the
-    /// drain drops it too; see [`Screen::dropped_shifts`].
+    /// drain drops it too; see [`Shifts::leading_scroll`].
     fn shift(&mut self, top: usize, bottom: usize, n: usize, direction: Direction) -> bool {
         let height = bottom + 1 - top;
-        if let Some(last) = self.shifts.last_mut() {
+        if let Some(last) = self.shifts.log.last_mut() {
             if last.top == top && last.bottom == bottom && last.direction == direction {
                 last.count = (last.count + n).min(height);
                 return last.count < height;
             }
         }
-        if self.shifts.len() >= self.height() {
-            self.shifts.clear();
-            self.dropped_shifts = true;
+        if self.shifts.log.len() >= self.height() {
+            self.shifts.dropped();
             self.dirty.fill(true);
             self.touches += 1;
             return false;
         }
-        self.shifts.push(Shift {
+        self.shifts.log.push(Shift {
             top,
             bottom,
             count: n.min(height),
@@ -1500,7 +1558,7 @@ impl Screen {
         // Every row is damaged, and the row count has just changed under any pending
         // shift's indices; see `Screen::touch_all`, which drops the log for the same
         // two reasons.
-        self.shifts.clear();
+        self.shifts.forget();
         self.reset_region();
         evicted
     }
@@ -1610,7 +1668,7 @@ impl Screen {
         // Every row is damaged, and the row count has just changed under any pending
         // shift's indices; see `Screen::touch_all`, which drops the log for the same
         // two reasons.
-        self.shifts.clear();
+        self.shifts.forget();
         self.reset_region();
         Evicted(history)
     }

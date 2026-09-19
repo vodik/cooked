@@ -441,16 +441,11 @@ impl State {
         let damaged = self.screen_mut().drain_damage();
         let promoted = self.front.take_promoted();
         // The scroll the promoted rows left by, read before the log is taken, which drops a
-        // scroll that turned its region over. Unless the log has dropped moves since, when
-        // the first scroll in it can be a later one, and the rows go as text instead.
-        let scroll = self.screen().shifts().first().copied();
+        // scroll that turned its region over. `None` where the log cannot name it -- an
+        // empty log, or one moves have been dropped from -- and the rows go as text instead.
+        let scroll = self.screen().leading_scroll();
         let promoted = scroll
-            .filter(|_| {
-                promote
-                    && promoted > 0
-                    && !self.shown.is_alternate()
-                    && !self.screen().dropped_shifts()
-            })
+            .filter(|_| promote && promoted > 0 && !self.shown.is_alternate())
             .map(|scroll| Shift {
                 count: promoted,
                 ..scroll

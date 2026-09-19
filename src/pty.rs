@@ -189,7 +189,7 @@ pub(crate) struct Pty {
     /// `waitpid` hands a status to exactly one caller, and since `Session::shutdown`
     /// stopped joining the reader either thread may be that caller. The loser needs the
     /// real status all the same -- `Session::alive` answers from it -- and without this it
-    /// had only `LOST` to record, or nothing at all, which would leave a killed session
+    /// had only `Exit::Lost` to record, or nothing at all, which would leave a killed session
     /// reporting itself alive for as long as the winner took to write the status down.
     ///
     /// Written under `reap_lock` before `reaped` is set, so anyone who sees that flag sees
@@ -1173,7 +1173,7 @@ mod tests {
     /// `waitpid` hands a status to one caller, and the other one needs it too.
     ///
     /// Since `Session::shutdown` stopped joining the reader, either thread may be the one
-    /// that collects, and the loser reads the status here instead of recording `LOST` over
+    /// that collects, and the loser reads the status here instead of recording `Exit::Lost` over
     /// it -- or recording nothing, which left `Session::alive` answering yes for a session
     /// that had just been killed. The second `reap` below is the loser.
     #[test]

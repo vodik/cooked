@@ -13,7 +13,7 @@ use crate::emu::{
 };
 use crate::env::{self, Env, Result, Value, lisp_enum, list, plist, sym};
 use crate::pty::Mode;
-use crate::session::Update;
+use crate::session::{Exit, Update};
 use nix::unistd::Pid;
 
 /// The crate's id newtypes, which are all one integer wide.
@@ -30,6 +30,22 @@ macro_rules! into_lisp_id {
 }
 
 into_lisp_id!(MarkId, LinkId, ImageId);
+
+/// What `:exit' says for a session whose reader gave up on the pty with the child still
+/// unreapable: not an exit status, since there is none, but Lisp still needs the session
+/// to end. `cooked--on-exit' spells it out. Negative because no `waitpid` status is.
+///
+/// The one place [`Exit::Lost`] becomes a number, so the core carries the distinction in
+/// its type for as long as it is the core's.
+const LOST: i64 = -1;
+
+/// The child's status as `:exit' reports it; see [`LOST`].
+fn exit_to_lisp(exit: Exit) -> i64 {
+    match exit {
+        Exit::Status(status) => status.into(),
+        Exit::Lost => LOST,
+    }
+}
 
 // Every enum this module sends as a bare symbol, and the symbol each variant is. One
 // list per type, so the drain's `:mode' and `cooked--sample-mode' cannot disagree about
@@ -295,7 +311,7 @@ pub(crate) fn update_to_lisp<'e>(env: Env<'e>, update: &Update, rejoin: bool) ->
         ":links"       => links_to_lisp(env, &update.delta.links)?,
         ":styles"      => styles_to_lisp(env, &update.delta.styles)?,
         ":events"      => events,
-        ":exit"        => update.exit.map(i64::from),
+        ":exit"        => update.exit.map(exit_to_lisp),
         ":withheld"    => update.delta.withheld,
     })
 }
