@@ -1905,7 +1905,7 @@ colours it draws, which DECSCNM exchanges."
                           'light)))))
       (delete-file out))))
 
-(ert-deftest cooked-osc-4-sweep-is-answered-in-one-write ()
+(ert-deftest cooked-osc-4-sweep-comes-back-in-a-handful-of-writes ()
   "A theme picker asking for all 256 palette entries gets them back in barely any writes.
 
 Each answer used to be its own synchronous write to the pty, so the sweep cost
