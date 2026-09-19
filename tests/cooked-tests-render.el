@@ -1285,6 +1285,37 @@ move under it without the window going anywhere."
         (cooked--pin-transcript-bottom (list window) target)
         (should (= (window-start window) start))))))
 
+(ert-deftest cooked-pin-follows-a-tail-that-grows-and-shrinks-with-no-redisplay-between ()
+  "The shrink branch of `cooked--pin-transcript-bottom' reads `(window-end w)'
+with no UPDATE, against a buffer whose tail was just edited and has not been
+redisplayed since -- the read this task was written to put to the test.
+
+BOTTOM defaults to `point-max' here, which is the production call from
+`cooked--scroll-transcript': it is the *tail* growing and shrinking past the
+cursor that this exercises, not POS moving.  Two edits happen back to back with
+no `redisplay' call between the pins that follow them, so if the unforced read
+ever answered from a redisplay behind rather than from the arithmetic
+`cooked--pin-transcript-bottom's docstring describes, the second pin would
+believe the window was still short of the true end and leave the blank lines
+in."
+  (cooked-tests--with-session (list "/bin/sh" "-c" cooked-tests--two-stage-output-script)
+    (should (cooked-tests--settle
+             (lambda () (string-match-p "line40" (cooked-tests--text)))))
+    (set-window-buffer (selected-window) (current-buffer))
+    (let ((window (selected-window)))
+      (cooked--pin-transcript-bottom (list window))
+      (let ((start (window-start window)))
+        (let ((inhibit-read-only t))
+          (save-excursion (goto-char (point-max)) (insert "\n\n\n")))
+        (cooked--pin-transcript-bottom (list window))
+        (should (> (window-start window) start))
+        (let ((inhibit-read-only t))
+          (save-excursion
+            (goto-char (point-max))
+            (delete-region (- (point-max) 3) (point-max))))
+        (cooked--pin-transcript-bottom (list window))
+        (should (= (window-start window) start))))))
+
 (ert-deftest cooked-wrapped-lines-rejoin-in-scrollback ()
   "A line the terminal wrapped is one line again, so yanking history does not
 pick up newlines nobody typed, and a wider window re-wraps it for free."
