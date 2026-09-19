@@ -1906,12 +1906,25 @@ colours it draws, which DECSCNM exchanges."
       (delete-file out))))
 
 (ert-deftest cooked-osc-4-sweep-is-answered-in-one-write ()
-  "A theme picker asking for all 256 palette entries gets them back in one write.
+  "A theme picker asking for all 256 palette entries gets them back in barely any writes.
 
 Each answer used to be its own synchronous write to the pty, so the sweep cost
 256 of them, each able to stall on a child that had stopped reading.  The
-queries go out from a file in one `cat', so they reach the core in one read and
-Lisp in one drain."
+queries go out from a file in one `cat', so they ordinarily reach the core in
+one read and Lisp in one drain, and the whole sweep goes out as a single
+write.
+
+Under real contention on a shared machine this was measured landing in the
+reader thread as two reads about 16ms apart -- the `cat' that owns the write
+lost the CPU mid-copy -- which is far past `QUIESCENCE' in src/session.rs,
+500 microseconds tuned against a 32us median and 102us 99th-percentile gap
+between reads on a quiet machine.  Widening that window to cover a 16ms
+stall would hold every frame for as long as a slow client keeps writing,
+trading the latency `QUIESCENCE' exists to bound for a property this test
+does not actually need: what must never come back is the one-write-per-query
+answer this guards against, not literal atomicity the reader cannot promise
+under an adversarial scheduler.  So the bound below is generous -- room for a
+few genuine splits -- and nowhere near 256."
   (let ((out (make-temp-file "cooked-osc4-sweep"))
         (queries (make-temp-file "cooked-osc4-queries"))
         (writes nil)
@@ -1930,8 +1943,9 @@ Lisp in one drain."
               (should (cooked-tests--settle
                        (lambda () (string-match-p "4;255;rgb:"
                                                   (cooked-tests--contents out)))))
-              (should (= 1 (length writes)))
-              (should (equal (cooked-tests--contents out) (car writes)))
+              (setq writes (nreverse writes))
+              (should (< (length writes) 8))
+              (should (equal (cooked-tests--contents out) (apply #'concat writes)))
               (should (string-prefix-p "\e]4;0;rgb:" (car writes))))))
       (delete-file out)
       (delete-file queries))))
