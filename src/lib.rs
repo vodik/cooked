@@ -1190,9 +1190,9 @@ fn foreground_pid(env: Env, args: &[Value]) -> Result<Value> {
 ///
 /// Wrapped in a `RefCell` because [`Env::get_user_ptr`] hands back a shared reference --
 /// a session is behind a mutex and needs no more than that -- while a filter is plain
-/// single-threaded state that a feed mutates. The cell is also the type tag Emacs
-/// carries: a user-pointer holding a `Session` cannot be passed to these, because the
-/// finalizer it was made with is a different function. See [`Env::get_user_ptr`].
+/// single-threaded state that a feed mutates. The cell is also the type this user-pointer
+/// is tagged with: a user-pointer holding a `Session` cannot be passed to these, because
+/// the tag in it says `Session`. See [`Env::get_user_ptr`].
 type FilterCell = std::cell::RefCell<emu::stream::Filter>;
 
 fn make_filter(env: Env, _args: &[Value]) -> Result<Value> {

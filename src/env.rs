@@ -9,6 +9,7 @@
 //! Every entry point funnels through [`trampoline`], which converts panics and
 //! [`Error`]s into Lisp signals so that nothing unwinds across the FFI boundary.
 
+use std::any::TypeId;
 use std::ffi::{CString, c_char, c_int, c_void};
 use std::marker::PhantomData;
 use std::os::fd::{FromRawFd, OwnedFd, RawFd};
@@ -493,36 +494,43 @@ impl<'e> Env<'e> {
     }
 
     /// Wrap `data` in an opaque Lisp user-pointer; Emacs' GC runs the destructor.
-    pub fn user_ptr<T>(&self, data: T) -> Result<Value> {
-        let boxed = Box::into_raw(Box::new(data)).cast::<c_void>();
+    pub fn user_ptr<T: 'static>(&self, data: T) -> Result<Value> {
+        let boxed = Tagged::into_raw(data);
         ffi!(self, make_user_ptr, Some(finalizer_of::<T>()), boxed).inspect_err(|_| {
-            drop(unsafe { Box::from_raw(boxed.cast::<T>()) });
+            drop(unsafe { Box::from_raw(boxed.cast::<Tagged<T>>()) });
         })
     }
 
     /// Borrow a user-pointer *this module* created for `T`.
     ///
     /// Emacs signals for a value that is not a user-pointer at all, but it has no notion
-    /// of what kind of thing a user-pointer holds — so without this check, handing
-    /// `cooked--send` a user-pointer from some other dynamic module would reinterpret that
-    /// module's memory as a `T`. The finalizer is the only identity Emacs carries, so it
-    /// is the tag.
-    pub fn get_user_ptr<T>(&self, v: Value) -> Result<&'e T> {
+    /// of what kind of thing a user-pointer holds — so without a check of our own,
+    /// handing `cooked--send` a user-pointer from some other dynamic module would
+    /// reinterpret that module's memory as a `T`.
+    ///
+    /// Two gates, and the order between them is the point. The finalizer address is the
+    /// only identity Emacs carries, and it answers the one question that cannot be
+    /// answered by reading the pointed-at memory: whether this module made the
+    /// allocation at all. Only once it has is the [`Tagged`] header there to read, and
+    /// the header is what says which of our own types the allocation holds.
+    pub fn get_user_ptr<T: 'static>(&self, v: Value) -> Result<&'e T> {
         // Propagate first: for a non-user-ptr this is already a pending
         // `wrong-type-argument`, which must not be overwritten with ours.
         //
         // `fn_addr_eq` rather than `==` because comparing function pointers is only as
-        // meaningful as the guarantee that the two cannot be folded together — see
-        // [`finalize`] for why they cannot be here. Note this only has to distinguish our
-        // finalizer from *another module's*, and those live in a different shared object,
-        // so nothing could fold them even in principle.
+        // meaningful as the guarantee that the two cannot be folded together. Two of our
+        // own finalizers may fold, and the tag is why that is now harmless; a finalizer
+        // of ours cannot fold with another module's, because those live in a different
+        // shared object.
         let ours = ffi!(self, get_user_finalizer, v)?
             .is_some_and(|f| std::ptr::fn_addr_eq(f, finalizer_of::<T>()));
         if !ours {
             return Err(self.signal_wrong_type("cooked-session-p", v));
         }
         let p = ffi!(self, get_user_ptr, v)?;
-        unsafe { p.cast::<T>().as_ref() }.ok_or(Error)
+        // SAFETY: the finalizer said this module allocated `p` through `Tagged::into_raw`,
+        // and Emacs keeps it alive for as long as the Lisp value is reachable.
+        unsafe { Tagged::from_raw(p) }.ok_or_else(|| self.signal_wrong_type("cooked-session-p", v))
     }
 
     /// The write end of a `make-pipe-process` channel, owned and safe to use off-thread.
@@ -641,18 +649,59 @@ struct Registered {
 type Finalizer = extern "C" fn(*mut c_void);
 
 extern "C" fn finalize<T>(p: *mut c_void) {
-    // `type_name` is load-bearing, not decoration. Identical-code-folding may merge two
-    // monomorphisations whose bodies are byte-identical — and for two `Drop`-free types
-    // of the same size, `Box::from_raw` plus drop glue is exactly that. Merging them
-    // would collapse the distinct addresses `get_user_ptr` relies on, turning the type
-    // tag back into the confusion it exists to prevent. One dead load, once per session.
-    let _ = std::hint::black_box(std::any::type_name::<T>());
-    drop(unsafe { Box::from_raw(p.cast::<T>()) });
+    drop(unsafe { Box::from_raw(p.cast::<Tagged<T>>()) });
 }
 
 /// The address identifying user-pointers this module made for `T`.
+///
+/// Identical-code-folding may merge two monomorphisations whose bodies are
+/// byte-identical, and for two `Drop`-free payloads of the same size, `Box::from_raw`
+/// plus drop glue is exactly that. Folding those two is harmless: the merged body frees
+/// the right number of bytes either way, and [`Env::get_user_ptr`] reads the type out of
+/// the [`Tagged`] header rather than out of this address. What the address still settles
+/// is whether the allocation is ours at all, and no linker can fold a function in this
+/// shared object with one in another module's.
 const fn finalizer_of<T>() -> Finalizer {
     finalize::<T>
+}
+
+/// A user-pointer payload with the type it was made for written in ahead of it.
+///
+/// Every allocation this module hands Emacs is one of these, and `tag` sits at offset
+/// zero of all of them whatever `T` is, which is what makes it readable before anything
+/// has committed to a `T`. `TypeId` rather than a constant written out per type, so two
+/// types cannot be given the same tag by a copy-paste: the compiler mints them, and it
+/// mints a distinct one per type by construction.
+#[repr(C)]
+struct Tagged<T> {
+    tag: TypeId,
+    value: T,
+}
+
+impl<T: 'static> Tagged<T> {
+    /// Allocate `value` behind its tag and give up ownership, as Emacs' GC now owns it.
+    fn into_raw(value: T) -> *mut c_void {
+        let tagged = Box::new(Self {
+            tag: TypeId::of::<T>(),
+            value,
+        });
+        Box::into_raw(tagged).cast::<c_void>()
+    }
+
+    /// The payload at `p`, or `None` if this module made that allocation for some other
+    /// type.
+    ///
+    /// # Safety
+    /// `p` must point at a live allocation made by [`Tagged::into_raw`], for any payload
+    /// type. Reading the tag is then in bounds and aligned whichever type that was,
+    /// because `#[repr(C)]` puts a `TypeId` first in every one of them; nothing else is
+    /// read until the tag has said the payload really is a `T`.
+    unsafe fn from_raw<'a>(p: *mut c_void) -> Option<&'a T> {
+        if unsafe { *p.cast::<TypeId>() } != TypeId::of::<T>() {
+            return None;
+        }
+        Some(unsafe { &(*p.cast::<Self>()).value })
+    }
 }
 
 unsafe extern "C" fn trampoline(
@@ -899,20 +948,30 @@ mod tests {
     use super::*;
 
     struct Dummy;
+    struct Other;
 
     #[test]
-    fn each_type_gets_its_own_finalizer() {
-        // The whole user-pointer type check rests on this. Two `Drop`-free types are
-        // exactly the case identical-code-folding would merge, so assert it under the
-        // release profile too — that is where it would bite.
-        assert!(!std::ptr::fn_addr_eq(
-            finalizer_of::<Dummy>(),
-            finalizer_of::<u64>()
-        ));
+    fn a_type_keeps_one_finalizer_address() {
+        // What the first gate in `get_user_ptr` rests on: the address registered by
+        // `user_ptr::<T>` is the address compared against by `get_user_ptr::<T>`.
         assert!(std::ptr::fn_addr_eq(
             finalizer_of::<Dummy>(),
             finalizer_of::<Dummy>()
         ));
+    }
+
+    #[test]
+    fn a_tagged_box_is_refused_for_another_type() {
+        // `Dummy` and `Other` are the case the tag exists for: both `Drop`-free and the
+        // same size, so their finalizers have byte-identical bodies and
+        // identical-code-folding is free to give them one address. The gate cannot tell
+        // those two apart even in principle. The tag does not have to: it is read out of
+        // the allocation rather than out of a function address, so folding changes
+        // nothing.
+        let p = Tagged::into_raw(Dummy);
+        assert!(unsafe { Tagged::<Dummy>::from_raw(p) }.is_some());
+        assert!(unsafe { Tagged::<Other>::from_raw(p) }.is_none());
+        drop(unsafe { Box::from_raw(p.cast::<Tagged<Dummy>>()) });
     }
 
     #[test]
