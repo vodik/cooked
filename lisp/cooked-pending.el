@@ -52,9 +52,20 @@ should go through."
     (set-marker mark position)))
 
 (defun cooked--clear-input-region ()
-  "Forget the pending input region, leaving its text alone."
+  "Forget the pending input region, leaving its text alone.
+
+`cooked--input-end' is detached rather than dropped: a detached marker already
+reads as \"no region\" everywhere it is consulted, through `marker-position',
+and keeping the marker object around is what lets
+`cooked--restore-pending-input' move it back into place with `set-marker' on
+the next drain instead of making a fresh one.  A marker `setq' away from every
+variable that named it is not gone -- Emacs walks the buffer's whole marker
+chain on every insertion and deletion regardless of who still references it --
+so a drain that leaves one behind on every call is a marker chain that only
+grows."
   (cooked--set-input-mark nil)
-  (setq cooked--input-end nil))
+  (when cooked--input-end
+    (set-marker cooked--input-end nil)))
 
 (defun cooked--input-region ()
   "The pending input's bounds as (START . END), or nil when there is no region.
@@ -275,7 +286,17 @@ The paste mark comes with it; see `cooked--input-substring'."
 
 The near edge goes on the process mark, whose insertion type stays nil so that
 typing at the very start of the prompt lands inside the region rather than
-pushing it along."
+pushing it along.
+
+The far edge is `cooked--input-end', moved rather than replaced: the first
+call in a buffer makes it with `copy-marker' (insertion type t, so text typed
+at point pushes it along rather than being typed past it), and every call
+after reuses that same marker object with `set-marker', the way
+`cooked--hold-link-row' moves its pair rather than making a fresh one.  This
+runs on every drain in input state, and a marker `set-marker' can revisit
+costs nothing on the buffer's marker chain, while a new one made and orphaned
+each time is one more link Emacs walks on every insertion and deletion for the
+rest of the session."
   (when (cooked--input-state-p)
     (save-excursion
       (goto-char (cooked--cursor-position))
@@ -294,7 +315,9 @@ pushing it along."
       ;; ever changes, this marker needs a cell rather than a position behind it.
       (set-marker comint-last-input-start (point))
       (when text (insert text))
-      (setq cooked--input-end (copy-marker (point) t))
+      (if cooked--input-end
+          (set-marker cooked--input-end (point))
+        (setq cooked--input-end (copy-marker (point) t)))
       (cooked--mark-input-syntax))))
 
 (defun cooked--point-after-input ()

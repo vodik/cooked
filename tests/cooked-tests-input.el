@@ -4599,6 +4599,47 @@ far as `cooked--input-state-p' alone can tell."
     (call-interactively #'cooked-toggle-peek)
     (should cooked--mouse-grab)))
 
+(ert-deftest cooked-restore-pending-input-reuses-cooked-input-end-across-drains ()
+  "A background job printing at a prompt drains repeatedly while the pending
+input never changes, and each drain used to make a fresh marker for
+`cooked--input-end' without detaching the one it replaced -- a marker Emacs
+keeps walking on every insertion and deletion in the buffer's marker chain
+even though nothing references it any more.  Reusing the same marker object
+with `set-marker' is the fix; this checks the identity holds across two
+drains of a real session, not just that the position is right."
+  (cooked-tests--with-session
+      '("/bin/sh" "-c" "(sleep 0.2; echo one; sleep 0.4; echo two) & exec cat")
+    (should (cooked-tests--settle (lambda () (eq cooked--mode 'cooked))))
+    (cooked--restore-pending-input "typing")
+    (let ((first cooked--input-end))
+      (should (markerp first))
+      (should (cooked-tests--settle
+               (lambda () (string-match-p "one" (cooked-tests--text)))))
+      (should (eq cooked--input-end first))
+      (should (cooked-tests--settle
+               (lambda () (string-match-p "two" (cooked-tests--text)))))
+      (should (eq cooked--input-end first)))))
+
+(ert-deftest cooked-clear-input-region-detaches-rather-than-drops-the-marker ()
+  "`cooked--clear-input-region' used to `setq' `cooked--input-end' to nil and
+leave the marker it had been pointing at still in the buffer's marker chain,
+reachable by nothing.  It now detaches the marker instead, which
+`cooked--input-region' and `cooked--point-after-input' already read as \"no
+region\" through `marker-position', and which lets the next
+`cooked--restore-pending-input' bring the same object back rather than make a
+new one."
+  (cooked-tests--with-session '("/bin/cat")
+    (should (cooked-tests--settle (lambda () (eq cooked--mode 'cooked))))
+    (cooked--restore-pending-input "typing")
+    (let ((marker cooked--input-end))
+      (should (markerp marker))
+      (should (marker-buffer marker))
+      (cooked--clear-input-region)
+      (should (eq cooked--input-end marker))
+      (should-not (marker-buffer marker))
+      (should-not (marker-position marker))
+      (should-not (cooked--input-region)))))
+
 ;;;; Re-entrancy, attention and the state that outlives the child
 ;;
 ;; What 0b288bc opened up by decoupling `cooked--frozen-p' from
