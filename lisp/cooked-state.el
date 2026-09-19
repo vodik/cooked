@@ -674,30 +674,76 @@ at a prompt there are none."
               ((memq policy '(command prompt)) 'command)
               (t 'raw)))))
 
+(defvar-local cooked--ownership-memo nil
+  "The (INPUTS . RECORD) memo `cooked--ownership' last computed, or nil.
+
+INPUTS is a vector of the ten values `cooked--derive-ownership' was last
+called with, in the order `cooked--ownership' passes them; RECORD is the
+`cooked-ownership' they produced.  Nil before the first call, which is what
+makes the first call always a miss.
+
+This is a pure memo on a pure function's inputs, not a latch on the
+derivation's *sources*: `cooked--ownership' still reads every variable and
+struct field itself on every call, at whatever their cost is, and only skips
+the keyword parsing and the record allocation inside
+`cooked--derive-ownership' when none of the ten has moved since last time.
+That is what needs no invalidation calls at the nine call sites that set one
+of the ten -- the next read of the input notices the change on its own -- and
+what stays sound as long as `cooked-ownership' is treated as read-only
+everywhere else; nothing in the tree calls `setf' on one.")
+
 (defun cooked--ownership ()
   "This buffer's `cooked-ownership', derived from its state as it stands now.
 
-Derived on every call rather than latched, because the inputs move in nine
-different files and on their own schedules -- a termios poll, an OSC 133 mark,
-the alternate screen going up mid-drain -- and a latch would need every one of
-them to remember to invalidate it.  The record is small and the derivation is a
-`cond'; what a latch would buy is not worth a stale answer about who the next
-keystroke belongs to.
+The derivation itself -- `cooked--derive-ownership' -- is a pure function of
+ten inputs, and that purity is what `cooked--ownership-memo' banks on: this
+reads the ten inputs fresh every time, the same nine files and schedules that
+made a latch on the derivation wrong in the first place, but returns the
+record `eq' to last time's when all ten still are, rather than re-parsing the
+keywords and reallocating a record with the same ten fields.  Measured in
+tests/cooked-bench.el's harness, `cooked--input-state-p' -- one of six
+predicates that call this on every drain and more on every keystroke -- cost
+about nine microseconds a call before this memo, against roughly a fifth of a
+microsecond to read a bound variable; the ten `eq' comparisons below are
+priced the same as that variable read.
 
 `cooked--refresh-keymap' is the one caller that derives it once and acts on
 several fields at a time, and it stores what it decided in
 `cooked--announced-ownership'."
-  (cooked--derive-ownership
-   :mode cooked--mode
-   :alt cooked--alt
-   :semantic cooked--semantic
-   :semantic-seen cooked--semantic-seen
-   :delegated (cooked-line-delegated (cooked--line))
-   :license (cooked--ownership-license)
-   :input-mode cooked--input-mode
-   :peek-explicit cooked--peek-explicit
-   :attention cooked--attention
-   :session (and cooked--session t)))
+  (let ((mode cooked--mode)
+        (alt cooked--alt)
+        (semantic cooked--semantic)
+        (semantic-seen cooked--semantic-seen)
+        (delegated (cooked-line-delegated (cooked--line)))
+        (license (cooked--ownership-license))
+        (input-mode cooked--input-mode)
+        (peek-explicit cooked--peek-explicit)
+        (attention cooked--attention)
+        (session (and cooked--session t)))
+    (if-let* ((memo cooked--ownership-memo)
+              (last (car memo))
+              ((eq mode (aref last 0)))
+              ((eq alt (aref last 1)))
+              ((eq semantic (aref last 2)))
+              ((eq semantic-seen (aref last 3)))
+              ((eq delegated (aref last 4)))
+              ((eq license (aref last 5)))
+              ((eq input-mode (aref last 6)))
+              ((eq peek-explicit (aref last 7)))
+              ((eq attention (aref last 8)))
+              ((eq session (aref last 9))))
+        (cdr memo)
+      (let ((record (cooked--derive-ownership
+                     :mode mode :alt alt :semantic semantic
+                     :semantic-seen semantic-seen :delegated delegated
+                     :license license :input-mode input-mode
+                     :peek-explicit peek-explicit :attention attention
+                     :session session)))
+        (setq cooked--ownership-memo
+              (cons (vector mode alt semantic semantic-seen delegated license
+                            input-mode peek-explicit attention session)
+                    record))
+        record))))
 
 (defun cooked--policy ()
   "How the buffer should behave right now.

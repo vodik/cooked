@@ -1813,6 +1813,64 @@ than failing four files away in something about evil."
         (should (eq (cooked-ownership-peek o) (plist-get expected :peek)))
         (should (eq (cooked-ownership-secret o) (plist-get expected :secret)))))))
 
+(defun cooked-tests--set-ownership-inputs ()
+  "Set this buffer's ten `cooked--ownership' inputs to one fixed starting row.
+
+Shared by `cooked-ownership-memoizes-on-its-ten-inputs' so each of the ten
+changes it tries starts from the same baseline rather than from whatever the
+previous change in the loop left behind."
+  (setq-local cooked--mode 'raw
+              cooked--alt nil
+              cooked--semantic 'input
+              cooked--semantic-seen t
+              cooked--input-mode 'still
+              cooked--peek-explicit t
+              cooked--attention 'here
+              cooked--host nil
+              cooked--line-record nil
+              cooked--session t
+              cooked--ownership-memo nil))
+
+(ert-deftest cooked-ownership-memoizes-on-its-ten-inputs ()
+  "The hit path returns the very record kept, and any of the ten inputs busts it.
+
+Called twice with nothing between, `cooked--ownership' has to answer `eq' the
+second time -- not merely `equal', which a derivation that happened to land on
+the same field values would also satisfy, but the exact record
+`cooked--ownership-memo' kept from the first call.  That is the property
+`cooked--ownership-memo''s docstring claims and the reverted-fix check for
+this test: revert the memo and the record is freshly allocated every time,
+which `eq' catches and `equal' would not.
+
+Then, from the same starting row, each of the ten inputs is changed on its own
+-- `delegated' through the line record's field rather than a variable, and
+`license' through `cooked--host' rather than the flag it recombines with the
+nonce -- and the record has to change identity every time.  A memo comparing
+the wrong thing, or too few of the ten, passes on whichever input it forgot to
+watch and this is what would catch it."
+  (with-temp-buffer
+    (cooked-tests--set-ownership-inputs)
+    (let ((first (cooked--ownership)))
+      (should (eq first (cooked--ownership))))
+    (pcase-dolist
+        (`(,name . ,change)
+         (list
+          (cons 'mode (lambda () (setq cooked--mode 'cooked)))
+          (cons 'alt (lambda () (setq cooked--alt t)))
+          (cons 'semantic (lambda () (setq cooked--semantic 'output)))
+          (cons 'semantic-seen (lambda () (setq cooked--semantic-seen nil)))
+          (cons 'delegated (lambda () (setf (cooked-line-delegated (cooked--line)) t)))
+          (cons 'license (lambda () (setq cooked--host "some.other.host")))
+          (cons 'input-mode (lambda () (setq cooked--input-mode 'frozen)))
+          (cons 'peek-explicit (lambda () (setq cooked--peek-explicit nil)))
+          (cons 'attention (lambda () (setq cooked--attention 'away)))
+          (cons 'session (lambda () (setq cooked--session nil)))))
+      (cooked-tests--set-ownership-inputs)
+      (let ((baseline (cooked--ownership)))
+        (funcall change)
+        (ert-info ((format "%S" name))
+          (should-not (eq baseline (cooked--ownership))))))))
+
 (ert-deftest cooked-the-predicates-are-field-reads-of-the-record ()
   "The nine names the tree is written in, answering out of the one record.
 
