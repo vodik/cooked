@@ -27,9 +27,11 @@ const X10_BIAS: u32 = 32;
 /// the same for buttons 8 to 11.
 ///
 /// So a whole byte is exactly the room the encoding has, and a byte is what this accepts.
-/// Lisp sends a good deal less than that -- `cooked--mouse-buttons` names 0 to 2 and 64 to
-/// 67, and `cooked--report-motion` adds `cooked--mouse-motion-bit` to one of those or to
-/// `cooked--mouse-no-button' -- but the bound worth stating is the encoding's rather than
+/// Lisp sends less than that -- `cooked--mouse-buttons` names 0 to 2 and 64 to 67,
+/// `cooked--report-motion` adds `cooked--mouse-motion-bit` to one of those or to
+/// `cooked--mouse-no-button', and `cooked--mouse-modifier-bits' adds meta and control but
+/// never shift, which stays Emacs' so that a shifted drag can select text out of a
+/// program that has the mouse -- but the bound worth stating is the encoding's rather than
 /// the caller's, since both wire forms carry the byte and neither carries more: X10 biases
 /// it by 32 into a single character, and SGR prints it as a number the child reads back
 /// as these same bits. A larger number is a caller that has confused a button with
@@ -95,10 +97,7 @@ impl Button {
     /// wheel turned, and why `Mouse` prefers 1006 wherever the child has offered it. xterm's
     /// ctlseqs still has the modifiers surviving a release, so shift, meta and control are
     /// kept; the motion bit, the wheel bit and 128 are not, since none of them describes the
-    /// keyboard and a wheel byte kept whole would report a release as a notch. Lisp sets
-    /// none of the three today -- `cooked--mouse-buttons` and `cooked--report-motion` never
-    /// add a modifier bit -- so no byte cooked currently emits changes; this only stops
-    /// being true once one is added.
+    /// keyboard and a wheel byte kept whole would report a release as a notch.
     fn x10(self, pressed: bool) -> u32 {
         if pressed {
             self.get()

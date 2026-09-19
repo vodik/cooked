@@ -84,6 +84,26 @@ reports it for every release, having no field to name the button being let go
 of, but that is the core's substitution rather than this one: see
 `cooked--send-mouse-report'.")
 
+;; Meta is 8 and Control is 16, as xterm numbers them, and they are added to the
+;; button number exactly as `cooked--mouse-motion-bit' is.  Shift would be 4 and
+;; is not here, and that is a decision rather than an omission: a shifted click
+;; never reaches the child, because `S-down-mouse-1' running
+;; `mouse-drag-region' is the universal way to select text out of a program that
+;; has taken the mouse.  xterm, kitty and foot all keep Shift back for the same
+;; purpose, so no program can be relying on seeing it.
+(defconst cooked--mouse-modifier-bits '((meta . 8) (control . 16))
+  "Bits added to a button number for the modifiers held with it.")
+
+(defconst cooked--modified-button-events
+  (let (events)
+    (dolist (modifiers '((control) (meta) (control meta)) (nreverse events))
+      (dolist (event cooked--button-events)
+        (push (event-convert-list (append modifiers (list event))) events))))
+  "`cooked--button-events' with Control, Meta, or both held.
+
+Buttons only.  A modified wheel stays Emacs': `C-wheel-up' scales text and a
+shifted wheel scrolls sideways, as they do in any other buffer.")
+
 (defconst cooked--mouse-events
   (append cooked--button-events cooked--wheel-events)
   "Every mouse event cooked forwards to the child, in either map that does it.
@@ -98,6 +118,11 @@ read.")
 (defconst cooked--mouse-map
   (let ((map (make-sparse-keymap)))
     (dolist (event cooked--mouse-events)
+      (define-key map (vector event) #'cooked-mouse-event))
+    ;; Here and not in `cooked--mouse-events', which the passthrough map shares: a
+    ;; child doing a raw read has not asked for the mouse, and has no claim on
+    ;; `C-down-mouse-1'.
+    (dolist (event cooked--modified-button-events)
       (define-key map (vector event) #'cooked-mouse-event))
     ;; Reached only where `track-mouse' is on outside a gesture, which cooked
     ;; arranges only under `cooked-mouse-hover-motion'; see `cooked-mouse-hover'.
@@ -123,8 +148,16 @@ and release; it delivers `drag-mouse-1' instead.  Unbound, that would fall
 through to the global `mouse-set-region', so the child would never learn the
 button had come up and would see it held forever.
 
-Modified variants are deliberately absent: `C-wheel-up' should keep scaling
-text, and shift-scrolling should keep working, as they do in any other buffer.
+A button with Control or Meta held is claimed too, and reported with the
+modifier in the button number, which is what a program that gives a
+control-click a meaning of its own is waiting for.  Unclaimed, the press
+went to `mouse-buffer-menu' and the child heard nothing -- or heard half: a
+button pressed bare and let go with Control down arrived here as a press and
+left as `C-mouse-1', so the child held it forever.
+
+The rest of the modified variants are deliberately absent: `C-wheel-up' should
+keep scaling text, and shift-scrolling should keep working, as they do in any
+other buffer.
 
 The shifted left button is claimed as well, and for Emacs rather than for the
 child: `mouse-drag-region' on the press, `mouse-set-region' on a drag and
@@ -137,7 +170,8 @@ gesture every other terminal taught opened a font menu.  Only here, so outside
 a grab the menu is where the user left it.  The release is bound too, so that
 what happens to it does not rest on Emacs looking an unbound `S-mouse-1' up
 again without the Shift, which would find `cooked-mouse-event' and report a
-release to a child that was never told of the press.")
+release to a child that was never told of the press.  See
+`cooked--mouse-modifier-bits'.")
 
 (defconst cooked--wheel-map
   (let ((map (make-sparse-keymap)))
@@ -296,6 +330,15 @@ land on a cell of ours: let go below the last row, or over the fringe, and
 button it can never put down, so this is what says a release is owed.  It also
 supplies the button a motion report has to name -- 1002 asks which button is
 being dragged, and the event Emacs hands us for a movement names none.")
+
+(defvar-local cooked--mouse-modifiers 0
+  "The `cooked--mouse-modifier-bits' of the button gesture in flight, or 0.
+
+Taken from each press and release as it arrives, and kept between them for the
+same reason `cooked--mouse-held' is: a motion report has to say what is held,
+and the `mouse-movement' event Emacs hands over names no modifier any more than
+it names a button.  So a drag carries the modifiers its press had, which is
+right unless they change mid-drag, and the release corrects it if they did.")
 
 (defvar-local cooked--mouse-last-cell nil
   "Cell of the last report sent, as a (ROW . COL) cons.
@@ -642,6 +685,13 @@ that reports itself as a mouse."
                    (eq (device-class last-event-frame last-event-device) 'mouse)))
          delta)))
 
+(defun cooked--mouse-modifier-number (modifiers)
+  "The `cooked--mouse-modifier-bits' for MODIFIERS, an `event-modifiers' list.
+Everything else in that list -- `down', `drag', `click', `shift' -- is 0."
+  (apply #'+ (mapcar (lambda (modifier)
+                       (alist-get modifier cooked--mouse-modifier-bits 0))
+                     modifiers)))
+
 (defun cooked--report-button (button row col pressed &optional offset)
   "Report BUTTON at ROW/COL as PRESSED or released, remembering that it is held.
 OFFSET is passed on to `cooked--send-mouse'."
@@ -649,19 +699,27 @@ OFFSET is passed on to `cooked--send-mouse'."
         (pressed (unless (memq button cooked--mouse-held)
                    (push button cooked--mouse-held)))
         (t (setq cooked--mouse-held (delq button cooked--mouse-held))))
-  (cooked--send-mouse button row col pressed offset))
+  ;; Added here rather than by the caller, so that `cooked--mouse-held' goes on
+  ;; naming buttons: the same button is held whatever was down when it was
+  ;; pressed, and a release has to find it.
+  (cooked--send-mouse (+ button cooked--mouse-modifiers) row col pressed offset)
+  ;; The gesture is over once nothing is held, and a pointer moving with nothing
+  ;; held has no modifiers to report.
+  (unless cooked--mouse-held
+    (setq cooked--mouse-modifiers 0)))
 
 (defun cooked--report-motion (row col &optional offset keep-region)
   "Report the pointer arriving at ROW/COL, if it is a cell it was not already in.
 OFFSET and KEEP-REGION are passed on to `cooked--send-mouse'.
 
 `cooked--mouse-motion-bit' is added to the button being dragged, or to
-`cooked--mouse-no-button' where nothing is held.  Suppressing
+`cooked--mouse-no-button' where nothing is held, along with the modifiers the
+drag began with; see `cooked--mouse-modifiers'.  Suppressing
 a repeat of the last cell is not an optimisation so much as the contract: Emacs
 tracks the pointer by pixel, and a child that asked for cells would otherwise
 receive several dozen identical reports per cell crossed."
   (unless (equal cooked--mouse-last-cell (cons row col))
-    (cooked--send-mouse (+ cooked--mouse-motion-bit
+    (cooked--send-mouse (+ cooked--mouse-motion-bit cooked--mouse-modifiers
                            (or (car cooked--mouse-held) cooked--mouse-no-button))
                         row col t offset keep-region)))
 
@@ -986,6 +1044,12 @@ into by the time it comes up."
             ;; A wheel notch may be worth more than one report, or none at all,
             ;; when the pointing device speaks in pixels; everything else is
             ;; worth exactly one.  See `cooked--wheel-presses'.
+            ;;
+            ;; A notch leaves the modifiers alone: it cannot be held, so it has
+            ;; none of its own to report, and one turned in the middle of a drag
+            ;; must not take the drag's away.
+            (unless wheel
+              (setq cooked--mouse-modifiers (cooked--mouse-modifier-number modifiers)))
             (dotimes (_ (if wheel (cooked--wheel-presses event) 1))
               (cooked--report-button button (car cell) (cdr cell) pressed offset))
             ;; Take the whole gesture or none of it: having reported a press to a

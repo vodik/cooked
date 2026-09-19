@@ -3085,6 +3085,59 @@ unable to know whether motion reports were asked for at all."
       (cooked--report-motion 6 9)
       (should (equal (car sent) '(35 6 9 t nil nil))))))
 
+(ert-deftest cooked-a-modified-click-names-its-modifiers ()
+  "Control is 16 and Meta is 8, added to the button as xterm adds them, and held
+through the drag because a movement event names no modifier of its own."
+  (with-temp-buffer
+    (cooked-mode)
+    (cooked-tests--mouse :sgr t)
+    (setq cooked--mouse-modifiers (cooked--mouse-modifier-number '(control down)))
+    (cooked-tests--recording-reports sent
+      (cooked--report-button 0 4 9 t)
+      (should (equal (car sent) '(16 4 9 t nil nil)))
+      (cooked--report-motion 5 9)
+      (should (equal (car sent) '(48 5 9 t nil nil)))
+      ;; Still button 0 as far as the release is concerned: the modifiers are in
+      ;; the report, not in what is remembered as held.
+      (should (equal cooked--mouse-held '(0)))
+      (cooked--report-button 0 5 9 nil)
+      (should (equal (car sent) '(16 5 9 nil nil nil)))
+      ;; And the gesture takes them with it, so hover is bare again.
+      (cooked--report-motion 6 9)
+      (should (equal (car sent) '(35 6 9 t nil nil))))
+    (should (= (cooked--mouse-modifier-number '(control meta click)) 24))
+    ;; Shift is Emacs', so that a shifted drag can select out of the program.
+    (should (= (cooked--mouse-modifier-number '(shift down)) 0))))
+
+(ert-deftest cooked-the-mouse-map-claims-control-and-meta-but-not-shift ()
+  "A control-click is the child's while it has the mouse; a shifted one never
+is, and neither is a modified wheel, which scales text and scrolls sideways."
+  (dolist (key '([C-down-mouse-1] [C-mouse-1] [C-drag-mouse-1] [M-down-mouse-3]
+                 [C-M-mouse-2] [down-mouse-1] [wheel-up]))
+    (should (eq (lookup-key cooked--mouse-map key) #'cooked-mouse-event)))
+  (dolist (key '([C-S-down-mouse-1] [C-wheel-up] [S-wheel-up] [M-wheel-down]))
+    (should-not (lookup-key cooked--mouse-map key)))
+  ;; The shifted left button is claimed, but for Emacs' selection and not for
+  ;; the child: unclaimed, the press is the global `mouse-appearance-menu'.
+  (should (eq (lookup-key cooked--mouse-map [S-down-mouse-1]) #'mouse-drag-region))
+  (should (eq (lookup-key cooked--mouse-map [S-mouse-1]) #'mouse-set-point))
+  ;; A child that has not asked for the mouse has no claim on `C-down-mouse-1'.
+  (should-not (memq 'C-down-mouse-1 cooked--mouse-events)))
+
+(ert-deftest cooked-a-release-with-control-down-still-puts-the-button-down ()
+  "Pressed bare and let go with Control held arrives as `C-mouse-1', which used
+to be nobody's binding, so the child held the button forever."
+  (with-temp-buffer
+    (cooked-mode)
+    (cooked-tests--mouse :enabled t :sgr t)
+    (setq cooked--mouse-held '(0) cooked--mouse-last-cell '(4 . 9))
+    (cooked-tests--recording-reports sent
+      (let ((last-input-event (list 'C-mouse-1 (cooked-tests--posn nil))))
+        (cooked-mouse-event))
+      (should (equal sent '((16 4 9 nil nil nil)))))
+    (should-not cooked--mouse-held)
+    (should (= cooked--mouse-modifiers 0))))
+
 (ert-deftest cooked-a-release-off-the-screen-still-reaches-the-child ()
   "Let go past the last row and `posn-point' is nil, but the button is still down
 as far as the child knows.  Falling through to Emacs there left it held forever."
