@@ -44,7 +44,7 @@ fn replies(events: Vec<Event>) -> Vec<String> {
     events
         .into_iter()
         .filter_map(|e| match e {
-            Event::Reply(bytes) => Some(String::from_utf8(bytes).unwrap()),
+            Event::Reply(bytes, ReplyKind::Answer) => Some(String::from_utf8(bytes).unwrap()),
             _ => None,
         })
         .collect()

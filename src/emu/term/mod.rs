@@ -120,6 +120,20 @@ pub enum Mark {
     CommandEnd(Option<i32>),
 }
 
+/// What a reply is, which decides whether a later one may replace it.
+///
+/// It rides on [`Event::Reply`] from where the reply is composed to the session's reply
+/// queue, which is what acts on it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReplyKind {
+    /// An answer to something the child asked. Each is kept, in order.
+    Answer,
+    /// A mode 2048 size report. Only the newest describes the terminal, so a resize
+    /// replaces one that has not started to go out; ten thousand resizes of a window over
+    /// a child that is not reading queue one report, not ten thousand.
+    SizeReport,
+}
+
 /// Something the Lisp side must react to, beyond redrawing cells.
 ///
 /// The division of labour with [`Delta`]'s fields is deliberate: the drain's fields carry
@@ -155,11 +169,13 @@ pub enum Event {
     /// The child changed its mind about mouse reporting. An occurrence rather than a
     /// field because nothing in redisplay depends on it: its one consumer swaps a keymap.
     Mouse(Mouse),
-    /// Bytes the terminal owes the child (device attributes, cursor reports).
-    Reply(Vec<u8>),
-    /// The mode 2048 report, which is a [`Event::Reply`] in every respect but one: a resize
-    /// supersedes it. See [`Term::set_size`], which drops an undrained one by this variant.
-    SizeReport(Vec<u8>),
+    /// Bytes the terminal owes the child (device attributes, cursor reports), and which
+    /// kind of reply they are.
+    ///
+    /// The kind is a field rather than a second variant because the two kinds are the same
+    /// thing in every respect but one: a resize supersedes a [`ReplyKind::SizeReport`] that
+    /// has not gone out yet. See [`Term::set_size`], which drops an undrained one by it.
+    Reply(Vec<u8>, ReplyKind),
     /// `CSI 3 J` — the child asked to erase saved lines, xterm's `clear -x`.
     ///
     /// Unlike `CSI 2 J`, xterm's `3 J` touches only the scrollback, so the grid does
@@ -202,6 +218,18 @@ pub enum Event {
     /// the one window it is laid out for, and that is `18t` and `14t`; the frame
     /// around it is Emacs' to measure.
     FrameSize(Unit),
+}
+
+impl Event {
+    /// The reply to something the child asked, BYTES.
+    pub fn answer(bytes: Vec<u8>) -> Self {
+        Self::Reply(bytes, ReplyKind::Answer)
+    }
+
+    /// The mode 2048 size report, BYTES.
+    pub fn size_report(bytes: Vec<u8>) -> Self {
+        Self::Reply(bytes, ReplyKind::SizeReport)
+    }
 }
 
 impl Event {
@@ -717,17 +745,17 @@ impl State {
 
     fn reply(&mut self, framing: Framing, body: std::fmt::Arguments<'_>) {
         if let Some(bytes) = reply::frame(framing, body) {
-            self.push_reply(Event::Reply(bytes));
+            self.push_reply(Event::answer(bytes));
         }
     }
 
-    /// Owe the child REPLY, an [`Event::Reply`] or [`Event::SizeReport`].
+    /// Owe the child REPLY, an [`Event::Reply`] of either kind.
     ///
     /// Straight to [`Term::take_outbound`] when the session has asked for that and nothing
     /// Lisp has yet to answer came first; otherwise with the drain, as every reply once
     /// went. See [`ReplyRoute`].
     pub(super) fn push_reply(&mut self, reply: Event) {
-        debug_assert!(matches!(reply, Event::Reply(_) | Event::SizeReport(_)));
+        debug_assert!(matches!(reply, Event::Reply(..)));
         let route = &mut self.replies;
         if route.direct && !route.undrained && !route.handling {
             route.outbound.push(reply);
@@ -951,8 +979,8 @@ impl Term {
         self.state.replies.direct = true;
     }
 
-    /// The replies owed to the child that need nothing from Lisp, oldest first, as
-    /// [`Event::Reply`] and [`Event::SizeReport`].
+    /// The replies owed to the child that need nothing from Lisp, oldest first, each an
+    /// [`Event::Reply`] of either kind.
     pub fn take_outbound(&mut self) -> Vec<Event> {
         std::mem::take(&mut self.state.replies.outbound)
     }
@@ -982,7 +1010,7 @@ impl Term {
         state.events.retain(|event| {
             let before = index < ahead;
             index += 1;
-            let reply = matches!(event, Event::Reply(_) | Event::SizeReport(_));
+            let reply = matches!(event, Event::Reply(..));
             if before && reply {
                 outbound.push(event.clone());
             }
@@ -1040,11 +1068,11 @@ impl Term {
         }
         self.state
             .events
-            .retain(|e| !matches!(e, Event::SizeReport(_)));
+            .retain(|e| !matches!(e, Event::Reply(_, ReplyKind::SizeReport)));
         self.state
             .replies
             .outbound
-            .retain(|e| !matches!(e, Event::SizeReport(_)));
+            .retain(|e| !matches!(e, Event::Reply(_, ReplyKind::SizeReport)));
         Some(report)
     }
 

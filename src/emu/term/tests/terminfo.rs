@@ -484,7 +484,7 @@ fn terminfo_entry_matches_what_decrqm_says() {
             .events
             .iter()
             .find_map(|event| match event {
-                Event::Reply(bytes) => bytes
+                Event::Reply(bytes, ReplyKind::Answer) => bytes
                     .strip_prefix(prefix.as_bytes())
                     .and_then(|rest| rest.strip_suffix(b"$y"))
                     .map(|status| status[0] - b'0'),
@@ -672,7 +672,10 @@ fn terminfo_sequences_are_all_recognised() {
             );
 
             let events = t.drain().events;
-            if events.iter().any(|event| matches!(event, Event::Reply(_))) {
+            if events
+                .iter()
+                .any(|event| matches!(event, Event::Reply(_, ReplyKind::Answer)))
+            {
                 assert!(
                     replies_expected.contains(&name),
                     "`{name}' ({shown}) is answered, and TERMINFO_QUERIES has no pattern for it"

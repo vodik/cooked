@@ -33,7 +33,7 @@ fn decrqm_answers_honestly_about_every_mode() {
     ] {
         let mut t = term(4, 8, setup);
         t.feed(format!("\x1b[?{mode}$p").as_bytes());
-        let want = Event::Reply(format!("\x1b[?{mode};{want}$y").into_bytes());
+        let want = Event::answer(format!("\x1b[?{mode};{want}$y").into_bytes());
         assert!(
             t.drain().events.contains(&want),
             "mode {mode} after {setup:?}"
@@ -54,7 +54,7 @@ fn every_flag_mode_sets_reports_and_soft_resets() {
         t.feed(format!("\x1b[?{mode}$p").as_bytes());
         let powered_on = t.drain().events;
         assert!(
-            !powered_on.contains(&Event::Reply(format!("\x1b[?{mode};0$y").into_bytes())),
+            !powered_on.contains(&Event::answer(format!("\x1b[?{mode};0$y").into_bytes())),
             "mode {mode} reports itself unrecognised"
         );
 
@@ -63,7 +63,7 @@ fn every_flag_mode_sets_reports_and_soft_resets() {
         assert!(
             t.drain()
                 .events
-                .contains(&Event::Reply(format!("\x1b[?{mode};1$y").into_bytes())),
+                .contains(&Event::answer(format!("\x1b[?{mode};1$y").into_bytes())),
             "mode {mode} does not report itself set"
         );
 
@@ -76,9 +76,9 @@ fn every_flag_mode_sets_reports_and_soft_resets() {
             2
         };
         assert!(
-            t.drain()
-                .events
-                .contains(&Event::Reply(format!("\x1b[?{mode};{want}$y").into_bytes())),
+            t.drain().events.contains(&Event::answer(
+                format!("\x1b[?{mode};{want}$y").into_bytes()
+            )),
             "mode {mode} survives a soft reset"
         );
     }
@@ -106,7 +106,7 @@ fn decrqm_answers_for_ansi_modes_too() {
     ] {
         let mut t = term(2, 8, setup);
         t.feed(format!("\x1b[{mode}$p").as_bytes());
-        let want = Event::Reply(format!("\x1b[{mode};{want}$y").into_bytes());
+        let want = Event::answer(format!("\x1b[{mode};{want}$y").into_bytes());
         assert!(
             t.drain().events.contains(&want),
             "ANSI mode {mode} after {setup:?}"
@@ -123,13 +123,13 @@ fn decrqm_for_a_mode_past_the_parameter_range_is_unknown() {
         .drain()
         .events
         .into_iter()
-        .filter(|event| matches!(event, Event::Reply(_)))
+        .filter(|event| matches!(event, Event::Reply(_, ReplyKind::Answer)))
         .collect();
     assert_eq!(
         replies,
         vec![
-            Event::Reply(b"\x1b[?65535;0$y".to_vec()),
-            Event::Reply(b"\x1b[65535;0$y".to_vec()),
+            Event::answer(b"\x1b[?65535;0$y".to_vec()),
+            Event::answer(b"\x1b[65535;0$y".to_vec()),
         ]
     );
 }
@@ -222,7 +222,7 @@ fn a_reset_puts_the_screen_the_right_way_round() {
     assert!(
         t.drain()
             .events
-            .contains(&Event::Reply(b"\x1b[?5;2$y".to_vec()))
+            .contains(&Event::answer(b"\x1b[?5;2$y".to_vec()))
     );
 }
 
@@ -343,7 +343,7 @@ fn resetting_any_tracking_mode_turns_tracking_off() {
         assert!(
             t.drain()
                 .events
-                .contains(&Event::Reply(b"\x1b[?1002;2$y".to_vec())),
+                .contains(&Event::answer(b"\x1b[?1002;2$y".to_vec())),
             "?{reset}l leaves 1002 reporting reset"
         );
     }
@@ -355,7 +355,7 @@ fn resetting_any_tracking_mode_turns_tracking_off() {
     let events = t.drain().events;
     for (mode, answer) in [(1000, 1), (1002, 2), (1003, 2)] {
         let reply = format!("\x1b[?{mode};{answer}$y").into_bytes();
-        assert!(events.contains(&Event::Reply(reply)), "{mode}: {events:?}");
+        assert!(events.contains(&Event::answer(reply)), "{mode}: {events:?}");
     }
 }
 
@@ -369,7 +369,7 @@ fn mouse_coordinate_modes_replace_each_other() {
         let events = t.drain().events;
         [1u8, 2]
             .into_iter()
-            .find(|v| events.contains(&Event::Reply(format!("\x1b[?{mode};{v}$y").into_bytes())))
+            .find(|v| events.contains(&Event::answer(format!("\x1b[?{mode};{v}$y").into_bytes())))
     };
 
     let mut t = term(4, 20, b"\x1b[?1000h\x1b[?1006h\x1b[?1016h");
@@ -406,7 +406,7 @@ fn xtsave_restores_a_private_mode() {
     assert!(
         t.drain()
             .events
-            .contains(&Event::Reply(b"\x1b[?1006;1$y".to_vec()))
+            .contains(&Event::answer(b"\x1b[?1006;1$y".to_vec()))
     );
 
     // And the other direction: saved off, turned on, restored off.

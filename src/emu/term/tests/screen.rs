@@ -365,7 +365,7 @@ fn a_reset_leaves_the_alternate_screen() {
     assert!(
         t.drain()
             .events
-            .contains(&Event::Reply(b"\x1b[?1049;2$y".to_vec()))
+            .contains(&Event::answer(b"\x1b[?1049;2$y".to_vec()))
     );
     // Nothing the program saved on the way in survives to be restored on a stray
     // `rmcup` afterwards.

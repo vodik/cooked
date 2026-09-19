@@ -12,6 +12,7 @@
 //! write starts, and takes the write itself as a closure. That is what lets the policy be
 //! tested without a child, and it keeps every syscall in `session`.
 
+use crate::emu::ReplyKind;
 use std::collections::VecDeque;
 
 /// Queued bytes past which a further reply is dropped rather than kept.
@@ -26,17 +27,6 @@ use std::collections::VecDeque;
 /// than this is still admitted into an empty queue, so raising that option cannot make
 /// the clipboard unreadable; the bound is then one reply rather than this number.
 pub(crate) const REPLY_QUEUE_LIMIT: usize = 1 << 20;
-
-/// What a queued reply is, which decides whether a later one may replace it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum ReplyKind {
-    /// An answer to something the child asked. Each is kept, in order.
-    Answer,
-    /// A mode 2048 size report. Only the newest describes the terminal, so a resize
-    /// replaces one that has not started to go out; ten thousand resizes of a window over
-    /// a child that is not reading queue one report, not ten thousand.
-    SizeReport,
-}
 
 /// One reply's place in [`ReplyQueue::bytes`].
 #[derive(Debug, Clone, Copy)]

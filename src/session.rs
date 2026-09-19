@@ -4,13 +4,13 @@
 //! the reader never touches Lisp. It parses into the shared [`Term`] and pokes a pipe
 //! descriptor obtained from `open_channel`; Emacs' filter then drains on the main thread.
 
-use crate::emu::{Delta, Event, Feed, Term};
+use crate::emu::{Delta, Event, Feed, ReplyKind, Term};
 use crate::error::Result;
 use crate::lock::LockExt;
 use crate::pty::{
     AtomicMode, HANGUP_GRACE, JobControl, KILL_GRACE, Mode, Pty, WRITE_TIMEOUT, Wait, Winsize,
 };
-use crate::replies::{ReplyKind, ReplyQueue};
+use crate::replies::ReplyQueue;
 use nix::errno::Errno;
 use nix::poll::{PollFd, PollFlags};
 use nix::sys::signal::{SigSet, Signal};
@@ -1564,8 +1564,7 @@ impl Shared {
         let mut queue = self.replies.held();
         for event in outbound {
             match event {
-                Event::Reply(bytes) => queue.push(ReplyKind::Answer, &bytes),
-                Event::SizeReport(bytes) => queue.push(ReplyKind::SizeReport, &bytes),
+                Event::Reply(bytes, kind) => queue.push(kind, &bytes),
                 _ => continue,
             };
         }

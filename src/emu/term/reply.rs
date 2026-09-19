@@ -244,7 +244,9 @@ mod tests {
                 .events
                 .into_iter()
                 .filter_map(|event| match event {
-                    super::super::Event::Reply(bytes) => Some(bytes),
+                    super::super::Event::Reply(bytes, super::super::ReplyKind::Answer) => {
+                        Some(bytes)
+                    }
                     _ => None,
                 })
                 .collect();

@@ -900,9 +900,7 @@ fn event_to_lisp<'e>(
                 m.pixels(),
             ]
         ),
-        Event::Reply(bytes) | Event::SizeReport(bytes) => {
-            env.cons(sym!(env, "reply")?, env.into_lisp(bytes.as_slice())?)
-        }
+        Event::Reply(bytes, _) => env.cons(sym!(env, "reply")?, env.into_lisp(bytes.as_slice())?),
         Event::EraseScrollback => list!(env, [sym!(env, "erase-scrollback")?]),
         Event::DisplayCleared => list!(env, [sym!(env, "display-cleared")?]),
         Event::Reset => list!(env, [sym!(env, "reset")?]),

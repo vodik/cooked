@@ -264,7 +264,7 @@ impl State {
                 self.set_flag_mode(mode, on);
                 if on {
                     let report = self.current_size_report();
-                    self.push_reply(Event::SizeReport(report));
+                    self.push_reply(Event::size_report(report));
                 }
             }
             DecMode::ReverseScreen => {
@@ -1075,7 +1075,7 @@ impl State {
             // DSRs such as `CSI ? 15 n` unimplemented rather than swallowed.
             (Some(b'?'), 'n') if params.arg(0, 0) == 996 => {
                 if let Some(scheme) = self.color_scheme {
-                    self.push_reply(Event::Reply(color_scheme_report(scheme)));
+                    self.push_reply(Event::answer(color_scheme_report(scheme)));
                 }
             }
             _ => return false,

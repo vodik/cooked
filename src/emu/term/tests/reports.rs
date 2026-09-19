@@ -15,7 +15,9 @@ fn size_reports(events: &[Event]) -> Vec<String> {
     events
         .iter()
         .filter_map(|e| match e {
-            Event::SizeReport(bytes) => Some(String::from_utf8(bytes.clone()).unwrap()),
+            Event::Reply(bytes, ReplyKind::SizeReport) => {
+                Some(String::from_utf8(bytes.clone()).unwrap())
+            }
             _ => None,
         })
         .collect()
@@ -85,7 +87,7 @@ fn a_resize_supersedes_an_undrained_subscription_report() {
     assert!(
         events
             .iter()
-            .any(|e| matches!(e, Event::Reply(b) if b.ends_with(b"c"))),
+            .any(|e| matches!(e, Event::Reply(b, ReplyKind::Answer) if b.ends_with(b"c"))),
         "and only that reply is dropped"
     );
 }
@@ -107,7 +109,7 @@ fn xtwinops_pixel_geometry_stays_silent_without_a_cell_size() {
         !t.drain()
             .events
             .iter()
-            .any(|e| matches!(e, Event::Reply(_))),
+            .any(|e| matches!(e, Event::Reply(_, ReplyKind::Answer))),
     );
 }
 
@@ -117,7 +119,7 @@ fn xtwinops_reports_the_text_area_in_cells() {
     assert!(
         t.drain()
             .events
-            .contains(&Event::Reply(b"\x1b[8;24;80t".to_vec()))
+            .contains(&Event::answer(b"\x1b[8;24;80t".to_vec()))
     );
 }
 
@@ -130,7 +132,7 @@ fn xtversion_names_cooked_and_its_own_version() {
     assert!(
         t.drain()
             .events
-            .contains(&Event::Reply(want.clone().into_bytes())),
+            .contains(&Event::answer(want.clone().into_bytes())),
         "expected {want:?}"
     );
 }
@@ -145,7 +147,7 @@ fn xtsmgraphics_answers_the_questions_a_sixel_producer_asks() {
     assert_eq!(
         events
             .iter()
-            .filter(|e| **e == Event::Reply(want.clone()))
+            .filter(|e| **e == Event::answer(want.clone()))
             .count(),
         2,
         "{events:?}"
@@ -158,7 +160,7 @@ fn xtsmgraphics_answers_the_questions_a_sixel_producer_asks() {
     assert!(
         t.drain()
             .events
-            .contains(&Event::Reply(b"\x1b[?2;0;800;480S".to_vec()))
+            .contains(&Event::answer(b"\x1b[?2;0;800;480S".to_vec()))
     );
 }
 
@@ -170,7 +172,7 @@ fn xtsmgraphics_declines_out_loud_rather_than_leaving_a_producer_waiting() {
     assert!(
         t.drain()
             .events
-            .contains(&Event::Reply(b"\x1b[?2;3S".to_vec()))
+            .contains(&Event::answer(b"\x1b[?2;3S".to_vec()))
     );
 
     // Setting either item is refused: the palette is a compile-time array and the window
@@ -178,9 +180,9 @@ fn xtsmgraphics_declines_out_loud_rather_than_leaving_a_producer_waiting() {
     let mut t = term(24, 80, b"\x1b[?1;3S\x1b[?3;1S");
     let events = t.drain().events;
     let registers = format!("\x1b[?1;3;{}S", crate::emu::sixel::PALETTE_SIZE).into_bytes();
-    assert!(events.contains(&Event::Reply(registers)), "{events:?}");
+    assert!(events.contains(&Event::answer(registers)), "{events:?}");
     assert!(
-        events.contains(&Event::Reply(b"\x1b[?3;1S".to_vec())),
+        events.contains(&Event::answer(b"\x1b[?3;1S".to_vec())),
         "{events:?}"
     );
 }
@@ -249,7 +251,7 @@ fn xtwinops_reports_not_iconified_and_asks_lisp_for_the_frame() {
     assert_eq!(
         t.drain().events,
         vec![
-            Event::Reply(b"\x1b[1t".to_vec()),
+            Event::answer(b"\x1b[1t".to_vec()),
             Event::FrameSize(Unit::Cells),
             Event::FrameSize(Unit::Pixels),
         ],
@@ -261,8 +263,8 @@ fn xtwinops_reports_not_iconified_and_asks_lisp_for_the_frame() {
 fn device_attributes_name_only_what_we_implement() {
     let mut t = term(2, 10, b"\x1b[c\x1b[>c");
     let events = t.drain().events;
-    assert!(events.contains(&Event::Reply(b"\x1b[?62;4;22c".to_vec())));
-    assert!(events.contains(&Event::Reply(b"\x1b[>0;0;0c".to_vec())));
+    assert!(events.contains(&Event::answer(b"\x1b[?62;4;22c".to_vec())));
+    assert!(events.contains(&Event::answer(b"\x1b[>0;0;0c".to_vec())));
 }
 
 #[test]
@@ -272,12 +274,12 @@ fn tertiary_device_attributes_answer_a_zero_unit_id() {
         .drain()
         .events
         .into_iter()
-        .filter(|event| matches!(event, Event::Reply(_)))
+        .filter(|event| matches!(event, Event::Reply(_, ReplyKind::Answer)))
         .collect();
     // `=1c` is not DA3, and answering it would put a reply where no child waits.
     assert_eq!(
         replies,
-        vec![Event::Reply(b"\x1bP!|00000000\x1b\\".to_vec()); 2]
+        vec![Event::answer(b"\x1bP!|00000000\x1b\\".to_vec()); 2]
     );
 }
 
@@ -287,7 +289,7 @@ fn cursor_position_report_is_answered() {
     assert!(
         t.drain()
             .events
-            .contains(&Event::Reply(b"\x1b[3;5R".to_vec()))
+            .contains(&Event::answer(b"\x1b[3;5R".to_vec()))
     );
 }
 
@@ -297,7 +299,7 @@ fn extended_cursor_position_report_is_answered() {
     assert!(
         t.drain()
             .events
-            .contains(&Event::Reply(b"\x1b[?3;5R".to_vec()))
+            .contains(&Event::answer(b"\x1b[?3;5R".to_vec()))
     );
 }
 
@@ -310,13 +312,13 @@ fn cursor_position_reports_count_from_the_region_under_origin_mode() {
         .drain()
         .events
         .into_iter()
-        .filter(|event| matches!(event, Event::Reply(_)))
+        .filter(|event| matches!(event, Event::Reply(_, ReplyKind::Answer)))
         .collect();
     assert_eq!(
         replies,
         vec![
-            Event::Reply(b"\x1b[2;4R".to_vec()),
-            Event::Reply(b"\x1b[?2;4R".to_vec()),
+            Event::answer(b"\x1b[2;4R".to_vec()),
+            Event::answer(b"\x1b[?2;4R".to_vec()),
         ]
     );
 }
@@ -327,7 +329,7 @@ fn status_report_is_answered() {
     assert!(
         t.drain()
             .events
-            .contains(&Event::Reply(b"\x1b[0n".to_vec()))
+            .contains(&Event::answer(b"\x1b[0n".to_vec()))
     );
 }
 
@@ -340,7 +342,7 @@ fn the_colour_scheme_is_unanswered_until_emacs_has_said() {
         t.drain()
             .events
             .iter()
-            .all(|e| !matches!(e, Event::Reply(_)))
+            .all(|e| !matches!(e, Event::Reply(_, ReplyKind::Answer)))
     );
 }
 
@@ -354,7 +356,7 @@ fn the_colour_scheme_is_answered_once_reported() {
         t.set_color_scheme(scheme);
         t.feed(b"\x1b[?996n");
         assert!(
-            t.drain().events.contains(&Event::Reply(want.to_vec())),
+            t.drain().events.contains(&Event::answer(want.to_vec())),
             "{scheme:?}"
         );
     }
@@ -380,7 +382,7 @@ fn only_a_subscriber_is_pushed_the_colour_scheme() {
     assert!(
         t.drain()
             .events
-            .contains(&Event::Reply(b"\x1b[?997;1n".to_vec()))
+            .contains(&Event::answer(b"\x1b[?997;1n".to_vec()))
     );
 }
 
@@ -400,7 +402,7 @@ fn a_soft_reset_ends_the_subscription_and_keeps_the_scheme() {
     assert!(
         t.drain()
             .events
-            .contains(&Event::Reply(b"\x1b[?997;1n".to_vec()))
+            .contains(&Event::answer(b"\x1b[?997;1n".to_vec()))
     );
 }
 
@@ -415,6 +417,6 @@ fn a_private_status_report_we_do_not_implement_is_not_answered() {
         t.drain()
             .events
             .iter()
-            .all(|e| !matches!(e, Event::Reply(_)))
+            .all(|e| !matches!(e, Event::Reply(_, ReplyKind::Answer)))
     );
 }
