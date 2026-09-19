@@ -425,9 +425,56 @@ residue the flush retires."
       (should-not (cooked-tests-process--tail)))))
 
 (ert-deftest cooked-process-reports-the-exit-code ()
-  "The status is the child's, not a pipe process's idea of one."
+  "The status is the child's, not a stand-in process's idea of one."
   (cooked-tests-process--with "exit 3"
     (should (string-match-p "abnormally with code 3" (buffer-string)))))
+
+(ert-deftest cooked-process-exit-status-is-the-process-objects-own ()
+  "`process-status' itself says the process exited, with nothing rebound.
+
+The accessors are captured before the run and called through, so what is
+asserted is what the C primitives answer rather than what any Lisp standing in
+front of them would.  That is the difference a natively compiled
+`compilation-sentinel' sees: it reaches a primitive directly, so a `cl-letf' on
+the symbol reaches it only through a subr trampoline, and with
+`native-comp-enable-subr-trampolines' nil there is no trampoline and the
+sentinel reads `run' and ignores the exit.  Batch Emacs 31 with trampolines off
+left such a build annotated \"started\" and never finished, and
+`compilation-in-progress' holding a process that was already gone."
+  (let* ((status (symbol-function 'process-status))
+         (code (symbol-function 'process-exit-status))
+         (seen nil)
+         (probe (lambda (proc &rest _)
+                  (setq seen (cons (funcall status proc) (funcall code proc))))))
+    (unwind-protect
+        (progn
+          (advice-add 'compilation-sentinel :before probe)
+          (cooked-tests-process--with "exit 5"
+            (should (equal seen '(exit . 5)))))
+      (advice-remove 'compilation-sentinel probe))))
+
+(ert-deftest cooked-process-stand-in-ignores-what-it-is-not-told ()
+  "Writing to the process object cannot end the build.
+
+The stand-in is a shell reading a line, so a consumer that wrote to the object
+it was handed -- comint does, and nothing stops anyone else -- could otherwise
+make it leave with a status the child never had.  It answers to one line and
+drops every other."
+  (let ((cooked-process-mode nil)
+        (compilation-ask-about-save nil)
+        (compilation-in-progress nil)
+        (compilation-buffer-name-function (lambda (_) "*cooked-test-compile*"))
+        buffer)
+    (unwind-protect
+        (progn
+          (cooked-process-mode 1)
+          (setq buffer (compilation-start "sleep 0.4; exit 4"))
+          (with-current-buffer buffer
+            (process-send-string (get-buffer-process buffer) "exit 1\ncooked-exit\n")
+            (cooked-tests--settle (lambda () (null (get-buffer-process buffer))) 10)
+            (should (string-match-p "abnormally with code 4" (buffer-string)))))
+      (cooked-process-mode -1)
+      (when (buffer-live-p buffer) (kill-buffer buffer)))))
 
 (ert-deftest cooked-process-annotates-the-exit-once ()
   "`compilation-handle-exit' runs once, however the sentinel is reached.

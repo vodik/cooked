@@ -101,24 +101,37 @@
 ;; the default, which covers every progress meter I have found (cargo uses two
 ;; lines, ninja one) while keeping the tail under a screenful.
 ;;
-;; ## Two processes, and why the visible one is a fake
+;; ## Two processes, and why the visible one is a stand-in
 ;;
 ;; `cooked--spawn' wants a pipe process to wake, and the consumer wants a
 ;; process object of its own to hang a filter and a sentinel on.  These cannot
 ;; be the same object: `compilation-start' calls `set-process-filter' on what we
 ;; return, and that would tear out the pump.  So the wake pipe stays private and
-;; a second pipe process is what the consumer sees.  It never carries a byte.
-;; `process-buffer', `process-mark', `set-process-filter' and
-;; `set-process-sentinel' are real on it and are all the consumer uses; the pump
-;; reads the filter back off it and calls it.
+;; a second process is what the consumer sees.  It carries none of the child's
+;; output: `process-buffer', `process-mark', `set-process-filter' and
+;; `set-process-sentinel' are real on it and are all the consumer uses, and the
+;; pump reads the filter back off it and calls it with text the emulator has
+;; finished with.
 ;;
-;; The one thing that object cannot do is exit with the child's status, and
-;; `compilation-sentinel' asks it to -- `(memq (process-status proc) '(exit
-;; signal))' before it will hand anything to `compilation-handle-exit'.  So the
-;; sentinel is called with those two accessors rebound, for that one call and
-;; that one process.  It is a cute trick and the alternative was worse: calling
-;; `compilation-handle-exit' ourselves would mean this file knowing the consumer
-;; it is feeding, which is exactly what it is trying not to know.
+;; The one thing the consumer needs beyond that is an exit status, and
+;; `compilation-sentinel' will not proceed without a real one: `(memq
+;; (process-status proc) (quote (exit signal)))' before it hands anything to
+;; `compilation-handle-exit'.  A pipe process can never say that.  So the
+;; stand-in is not a pipe but a real child of Emacs -- a shell doing nothing but
+;; waiting to be told which status to leave with, `cooked-process--stand-in'.
+;; When the pty's child exits, the residue is flushed and the shell is sent the
+;; code; it exits with it, and Emacs reports that to the consumer's sentinel the
+;; way it reports any process' exit.
+;;
+;; The cost is one sleeping `sh' for the life of a build.  It buys a process
+;; object that is honest to every accessor rather than to the two a `cl-letf'
+;; could cover -- and that rebinding was not merely inelegant.  Emacs'
+;; primitives are reached directly from natively compiled code, so `compile.el'
+;; saw a rebinding of `process-status' only through a subr trampoline, and with
+;; `native-comp-enable-subr-trampolines' nil it saw none: the build's exit
+;; vanished and the buffer sat at "run" forever.  Calling
+;; `compilation-handle-exit' by hand instead would mean this file knowing the
+;; consumer it is feeding, which is exactly what it is trying not to know.
 
 ;;; Code:
 
@@ -211,7 +224,12 @@ sometimes, and the argument in `cooked-process-columns' would stop holding.")
 (defvar-local cooked-process--wake nil
   "The private pipe `cooked--spawn' wakes.  Not the consumer's process.")
 (defvar-local cooked-process--proc nil
-  "The pipe process the consumer sees.")
+  "The stand-in process the consumer sees.")
+(defvar-local cooked-process--reported nil
+  "Set once the stand-in has been told which status to exit with.
+
+From then on it is Emacs' to finish with: the reap must leave it alone rather
+than kill it, or the exit it was asked for never reaches the sentinel.")
 (defvar-local cooked-process--columns nil
   "Columns the session was spawned at, needed by the flush at exit.")
 (defvar-local cooked-process--reaped nil
@@ -250,6 +268,43 @@ than ever, since a real tty is precisely what makes git reach for `less'."
               (window-max-chars-per-line window))
             80)))
 
+(defconst cooked-process--stand-in-script
+  "while read -r reply; do
+  case $reply in
+    cooked-exit:[0-9]*) exit \"${reply#cooked-exit:}\" ;;
+  esac
+done
+exit 255"
+  "The shell the consumer's process object runs while the build does.
+
+It reads nothing but the one line `cooked-process--report' writes, and every
+other line it is handed is ignored rather than acted on -- a consumer that
+wrote to the process it was given would otherwise end the build with a status
+nobody chose.  Losing the channel altogether, which is what reaching the end of
+the loop means, is reported as 255 rather than as the success an empty `exit'
+would have claimed.")
+
+(defun cooked-process--stand-in (name buffer)
+  "Start the process object the consumer sees, named NAME and showing BUFFER.
+
+It is a real child of Emacs, and the Commentary says why: the consumer's
+sentinel wants a status `process-status' will vouch for, which a pipe process
+has no way to produce.  This one produces it by exiting, once
+`cooked-process--report' has told it what to exit with.
+
+It gets a pipe rather than a pty -- there is already a pty in this file and it
+belongs to the child that matters -- and it starts in the directory named by
+the variable `temporary-file-directory', because the directory it runs in is
+not a thing it can observe, while a remote `default-directory' inherited from
+the caller would be one `make-process' cannot honour at all."
+  (let ((default-directory temporary-file-directory)
+        (process-connection-type nil))
+    (make-process :name name :buffer buffer :noquery t
+                  :connection-type 'pipe
+                  :command (list shell-file-name shell-command-switch
+                                 cooked-process--stand-in-script)
+                  :filter #'ignore :sentinel #'ignore)))
+
 (defun cooked-process-start (name buffer argv &optional directory)
   "Run ARGV on a pty and return a process object feeding BUFFER.
 
@@ -257,14 +312,13 @@ NAME names the process.  DIRECTORY is where the child starts, defaulting to
 BUFFER's `default-directory'; a remote one is refused the same way
 `cooked--start' refuses it, the pty being local either way.
 
-The object returned is a pipe process that carries nothing: its filter and
-sentinel are called by this file, with the text the emulator has finished with
-and with the child's real exit status.  See this file's Commentary for why it
-cannot be the child's own process."
+The object returned carries none of the child's output: its filter is called by
+this file, with the text the emulator has finished with, and it is a stand-in
+process that exits with the child's status once the child has one.  See this
+file's Commentary for why it cannot be the child's own process."
   (cooked--load-module)
   (let* ((host (generate-new-buffer (format " *cooked-process %s*" name)))
-         (proc (make-pipe-process :name name :buffer buffer :noquery t
-                                  :filter #'ignore :sentinel #'ignore))
+         (proc (cooked-process--stand-in name buffer))
          (directory (or directory (buffer-local-value 'default-directory buffer))))
     (set-marker-insertion-type (process-mark proc) nil)
     (set-marker (process-mark proc) (point-max) buffer)
@@ -614,9 +668,9 @@ whether it continues the line above rather than starting one."
 
 The order is the whole of it.  The reader thread may still be holding the tail
 of the output when the child dies -- which is where a build puts its error
-summary -- so the residue is flushed before anything is told the process is
-over, and `compilation-handle-exit' therefore runs after the last line it is
-meant to have parsed rather than before it."
+summary -- so the residue is flushed through the consumer's filter before the
+stand-in is told to exit, and `compilation-handle-exit' therefore runs after
+the last line it is meant to have parsed rather than before it."
   (with-current-buffer host
     (unless cooked-process--reaped
       (setq cooked-process--reaped t)
@@ -627,36 +681,28 @@ meant to have parsed rather than before it."
       (cooked-process-reap host))))
 
 (defun cooked-process--report (host exit)
-  "Call HOST's consumer's sentinel for EXIT, as a real process would.
+  "Hand EXIT to HOST's stand-in process, which leaves with it.
 
-EXIT is the child's status.  `compilation-sentinel' will not look at a message
-until `process-status' says the process is over, and a pipe process can never
-say that, so both accessors are rebound for the duration of this one call and
-for this one process.  Everything else they are asked about is passed through."
+EXIT is the child's status as the core reports it, and it is the shell's
+convention throughout: a code from 0 to 255, or 128 plus the signal for a child
+a signal killed -- `Pty::reap' in src/pty.rs is where the second is made to
+look like the first.  The one value that is neither is -1, which means a
+session whose reader gave up with the child still unreapable, and it is
+reported as 255, the same answer as any other channel that ended without
+saying why.
+
+Nothing is called back here.  The stand-in exits, Emacs notices, and the
+consumer's sentinel runs from Emacs' own status-reporting machinery with
+`process-status' and `process-exit-status' answering for real -- which is what
+`compilation-sentinel' demands before it will hand anything to
+`compilation-handle-exit', and what it could not be given while this was a pipe
+process with the two accessors rebound around the call."
   (with-current-buffer host
-    (let* ((proc cooked-process--proc)
-           (sentinel (process-sentinel proc))
-           (signalled (and (consp exit) (eq (car exit) 'signal)))
-           (code (if (consp exit) (cdr exit) exit))
-           (status (if signalled 'signal 'exit))
-           (message (cond (signalled (format "signal %s\n" code))
-                          ((eql code 0) "finished\n")
-                          (t (format "exited abnormally with code %s\n" code))))
-           (real-status (symbol-function 'process-status))
-           (real-code (symbol-function 'process-exit-status)))
-      (when sentinel
-        ;; Detached before it is called, not after.  `compilation-sentinel'
-        ;; deletes the process it was handed, and a deletion runs the sentinel
-        ;; -- so leaving ours installed means `compilation-handle-exit' running
-        ;; a second time, from inside the first, still under the rebinding that
-        ;; makes it look like a fresh exit.  The buffer ends up annotated twice
-        ;; and the mode line reports whichever ran last.
-        (set-process-sentinel proc #'ignore)
-        (cl-letf (((symbol-function 'process-status)
-                   (lambda (p) (if (eq p proc) status (funcall real-status p))))
-                  ((symbol-function 'process-exit-status)
-                   (lambda (p) (if (eq p proc) code (funcall real-code p)))))
-          (funcall sentinel proc message))))))
+    (let ((proc cooked-process--proc)
+          (code (if (and (integerp exit) (<= 0 exit 255)) exit 255)))
+      (when (process-live-p proc)
+        (setq cooked-process--reported t)
+        (process-send-string proc (format "cooked-exit:%d\n" code))))))
 
 ;;;; Teardown
 
@@ -667,7 +713,7 @@ Idempotent, because every path out ends here: a normal exit, `kill-buffer' on
 the consumer's buffer while the child still runs, and `recompile' reusing a
 buffer whose last session was never asked to stop.  What has to go is not
 anything in Lisp -- no keymap or hook was ever installed for a headless
-session -- but the reader thread, the pty, and the two pipe processes."
+session -- but the reader thread, the pty, the wake pipe and the stand-in."
   (when (and host (buffer-live-p host))
     (with-current-buffer host
       (when cooked-process--session
@@ -680,12 +726,15 @@ session -- but the reader thread, the pty, and the two pipe processes."
       (cooked-process--drop-tail)
       (when (process-live-p cooked-process--wake)
         (delete-process cooked-process--wake))
-      (when (process-live-p cooked-process--proc)
-        ;; Silenced first.  `delete-process' runs the sentinel, and the
-        ;; consumer's is written for a process that has just ended -- so a
-        ;; `compilation-handle-exit' that has already run for the child's real
-        ;; status runs a second time for the pipe's fictional one, and the
-        ;; buffer ends "finished" whatever the build did.
+      ;; A stand-in that has been told what to exit with is left to do it:
+      ;; killing it here would replace the status the child actually had with
+      ;; the one `delete-process' gives, and that is the whole of what the
+      ;; consumer is waiting for.  One that has not -- a `recompile' over a
+      ;; running build, or a buffer killed mid-run -- is killed, and silenced
+      ;; first, because the consumer's sentinel is written for a build that
+      ;; ended and this one is being abandoned rather than finished.
+      (when (and (process-live-p cooked-process--proc)
+                 (not cooked-process--reported))
         (set-process-sentinel cooked-process--proc #'ignore)
         (delete-process cooked-process--proc))
       (let ((buffer (and cooked-process--proc (process-buffer cooked-process--proc))))
@@ -789,9 +838,9 @@ happens to sit at the same path."
 (defun cooked-process--around-kill-compilation (fn &rest args)
   "Interrupt the pty's process group, or fall back to FN with ARGS.
 
-`kill-compilation' reaches for `interrupt-process', which a pipe process
-cannot honour and which would in any case reach only the shell rather than
-the tree beneath it."
+`kill-compilation' reaches for `interrupt-process', which would reach the
+stand-in shell -- a process with no part in the build -- rather than the child
+on the pty or the tree beneath it."
   (or (cooked-process-interrupt (current-buffer)) (apply fn args)))
 
 ;;;###autoload
