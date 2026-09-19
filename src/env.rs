@@ -682,7 +682,7 @@ impl<'e> Env<'e> {
     }
 
     #[allow(clippy::wrong_self_convention, reason = "converts `v`, not `self`")]
-    pub fn from_lisp<T: FromLisp>(&self, v: Value<'e>) -> Result<T> {
+    pub fn from_lisp<T: FromLisp<'e>>(&self, v: Value<'e>) -> Result<T> {
         T::from_lisp(self, v)
     }
 
@@ -691,7 +691,7 @@ impl<'e> Env<'e> {
     /// A `&optional` Lisp argument can be absent or present-and-nil, and both mean the
     /// same thing to every caller here. Written out, that was five combinators --
     /// `.get(i).copied().map(..).transpose()?.flatten()` -- at each of four call sites.
-    pub fn opt<T: FromLisp>(&self, args: &[Value<'e>], index: usize) -> Result<Option<T>> {
+    pub fn opt<T: FromLisp<'e>>(&self, args: &[Value<'e>], index: usize) -> Result<Option<T>> {
         match args.get(index) {
             Some(&v) if !self.is_nil(v) => T::from_lisp(self, v).map(Some),
             _ => Ok(None),
@@ -855,8 +855,14 @@ pub trait IntoLisp<'e> {
     fn into_lisp(self, env: &Env<'e>) -> Result<Value<'e>>;
 }
 
-pub trait FromLisp: Sized {
-    fn from_lisp(env: &Env, v: Value) -> Result<Self>;
+/// Conversion out of a handle belonging to the environment doing the converting.
+///
+/// Parametric in `'e` for the same reason [`IntoLisp`] is: a conversion may answer a
+/// borrow of something the handle names, and `&'e Session` -- what a defun asks for when
+/// it wants the session behind its first argument -- can only be tied to the environment
+/// that handed the handle over.
+pub trait FromLisp<'e>: Sized {
+    fn from_lisp(env: &Env<'e>, v: Value<'e>) -> Result<Self>;
 }
 
 impl<'e> IntoLisp<'e> for Value<'e> {
@@ -958,35 +964,35 @@ impl<'e> IntoLisp<'e> for () {
     }
 }
 
-impl FromLisp for i64 {
-    fn from_lisp(env: &Env, v: Value) -> Result<Self> {
+impl<'e> FromLisp<'e> for i64 {
+    fn from_lisp(env: &Env<'e>, v: Value<'e>) -> Result<Self> {
         ffi!(env, extract_integer, v)
     }
 }
 
-impl FromLisp for usize {
-    fn from_lisp(env: &Env, v: Value) -> Result<Self> {
+impl<'e> FromLisp<'e> for usize {
+    fn from_lisp(env: &Env<'e>, v: Value<'e>) -> Result<Self> {
         i64::from_lisp(env, v)?
             .try_into()
             .map_err(|_| env.signal("args-out-of-range", "negative"))
     }
 }
 
-impl FromLisp for u16 {
-    fn from_lisp(env: &Env, v: Value) -> Result<Self> {
+impl<'e> FromLisp<'e> for u16 {
+    fn from_lisp(env: &Env<'e>, v: Value<'e>) -> Result<Self> {
         i64::from_lisp(env, v)?
             .try_into()
             .map_err(|_| env.signal("args-out-of-range", "not a u16"))
     }
 }
 
-impl FromLisp for bool {
-    fn from_lisp(env: &Env, v: Value) -> Result<Self> {
+impl<'e> FromLisp<'e> for bool {
+    fn from_lisp(env: &Env<'e>, v: Value<'e>) -> Result<Self> {
         Ok(!env.is_nil(v))
     }
 }
 
-impl FromLisp for Vec<u8> {
+impl<'e> FromLisp<'e> for Vec<u8> {
     /// The string's UTF-8 bytes, copied straight out of the Lisp string.
     ///
     /// Straight out, with no Lisp copy in between, whatever the string holds: since
@@ -996,7 +1002,7 @@ impl FromLisp for Vec<u8> {
     /// this `Vec`, which `send` zeroes, and nothing else behind in Emacs' heap. A
     /// multibyte string holding raw eight-bit bytes is refused by Emacs instead of
     /// re-encoded.
-    fn from_lisp(env: &Env, v: Value) -> Result<Self> {
+    fn from_lisp(env: &Env<'e>, v: Value<'e>) -> Result<Self> {
         let mut len = 0isize;
         ffi!(
             env,
@@ -1018,15 +1024,15 @@ impl FromLisp for Vec<u8> {
     }
 }
 
-impl FromLisp for String {
-    fn from_lisp(env: &Env, v: Value) -> Result<Self> {
+impl<'e> FromLisp<'e> for String {
+    fn from_lisp(env: &Env<'e>, v: Value<'e>) -> Result<Self> {
         String::from_utf8(Vec::from_lisp(env, v)?)
             .map_err(|_| env.signal("wrong-type-argument", "invalid utf-8"))
     }
 }
 
-impl<T: FromLisp> FromLisp for Option<T> {
-    fn from_lisp(env: &Env, v: Value) -> Result<Self> {
+impl<'e, T: FromLisp<'e>> FromLisp<'e> for Option<T> {
+    fn from_lisp(env: &Env<'e>, v: Value<'e>) -> Result<Self> {
         if env.is_nil(v) {
             Ok(None)
         } else {
