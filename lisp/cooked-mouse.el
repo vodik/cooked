@@ -102,6 +102,10 @@ read.")
     ;; Reached only where `track-mouse' is on outside a gesture, which cooked
     ;; arranges only under `cooked-mouse-hover-motion'; see `cooked-mouse-hover'.
     (define-key map [mouse-movement] #'cooked-mouse-hover)
+    ;; The shifted left button is Emacs', spelled out.  See the docstring.
+    (define-key map [S-down-mouse-1] #'mouse-drag-region)
+    (define-key map [S-drag-mouse-1] #'mouse-set-region)
+    (define-key map [S-mouse-1] #'mouse-set-point)
     map)
   "Mouse bindings for when the child has asked to receive them.
 
@@ -121,10 +125,19 @@ button had come up and would see it held forever.
 
 Modified variants are deliberately absent: `C-wheel-up' should keep scaling
 text, and shift-scrolling should keep working, as they do in any other buffer.
-Shift is more than a convenience here: `S-down-mouse-1' reaching
-`mouse-drag-region' is the universal escape hatch for selecting text out of a
-program that has grabbed the mouse, and it works precisely because this map
-never claims it.")
+
+The shifted left button is claimed as well, and for Emacs rather than for the
+child: `mouse-drag-region' on the press, `mouse-set-region' on a drag and
+`mouse-set-point' on a click, which is what the plain button does in any other
+buffer.  Shift and drag is the universal escape hatch for selecting text out of
+a program that has grabbed the mouse -- xterm, VTE, kitty, foot and the rest
+all keep it back -- and leaving the press unclaimed does not give it to Emacs'
+selection: the global `S-down-mouse-1' is `mouse-appearance-menu', so the
+gesture every other terminal taught opened a font menu.  Only here, so outside
+a grab the menu is where the user left it.  The release is bound too, so that
+what happens to it does not rest on Emacs looking an unbound `S-mouse-1' up
+again without the Shift, which would find `cooked-mouse-event' and report a
+release to a child that was never told of the press.")
 
 (defconst cooked--wheel-map
   (let ((map (make-sparse-keymap)))

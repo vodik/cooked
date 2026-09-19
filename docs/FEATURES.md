@@ -597,6 +597,10 @@ child holds the mouse: the option is turned off in that buffer for as long as th
 lasts, since Emacs rewrites such a click into `mouse-2` before any keymap is consulted,
 and a rewritten click is one the child would never be told had ended.
 
+Shift and drag selects text while the child holds the mouse, as it does in xterm, kitty
+and every other terminal. cooked binds the shifted left button itself for as long as the
+grab lasts, because Emacs' own binding for that press is the font menu.
+
 `C-c M-n` and `C-c M-p` move to the next and previous link of any kind, wrapping around
 the buffer, and with `repeat-mode` on a plain `n` and `p` keep going. A URL wrapped over
 several rows is one stop. The search scans the scrollback for URLs as it reaches it, so

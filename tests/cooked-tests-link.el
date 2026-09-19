@@ -359,9 +359,19 @@ every row of it carries the one URL."
           (should-not forwarded))
         ;; And both are on the link's own keymap, which is what gets them here
         ;; ahead of the grab.  The press is claimed so that the global
-        ;; `mouse-appearance-menu' does not open a menu under the click.
+        ;; `mouse-appearance-menu' does not open a menu under the click,
+        ;; and by the command that lets a drag begun on a link still select.
         (should (eq (lookup-key cooked-link-map [S-mouse-1]) #'cooked-follow-link))
-        (should (eq (lookup-key cooked-link-map [S-down-mouse-1]) #'ignore))
+        (should (eq (lookup-key cooked-link-map [S-down-mouse-1])
+                    #'mouse-drag-region))
+        ;; Off a link the grab's own map answers, and gives the shifted button
+        ;; to Emacs' selection instead of to `mouse-appearance-menu'.
+        (should (eq (lookup-key cooked--mouse-map [S-down-mouse-1])
+                    #'mouse-drag-region))
+        (should (eq (lookup-key cooked--mouse-map [S-drag-mouse-1])
+                    #'mouse-set-region))
+        (should (eq (lookup-key cooked--mouse-map [S-mouse-1])
+                    #'mouse-set-point))
         (should-not (lookup-key cooked-link-map [S-drag-mouse-1]))))))
 
 (defconst cooked-tests--file-link-child

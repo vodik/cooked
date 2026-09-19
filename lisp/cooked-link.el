@@ -346,12 +346,16 @@ whether cooked's own `C-c' map is reachable at all already decides it.
 shifted one is bound outright, and it is the gesture WezTerm and Alacritty use
 for a link inside a program that has the mouse -- the one that can be made on
 a trackpad.  A drag is a different event, `S-drag-mouse-1', and is not
-claimed.  The press is: the global `S-down-mouse-1' is `mouse-appearance-menu',
-which would put a font menu up between the press and the release."
+claimed.  The press is, and by `mouse-drag-region': the global
+`S-down-mouse-1' is `mouse-appearance-menu', which would put a font menu up
+between the press and the release, and `ignore' would stop a shifted drag that
+happens to begin on a link from selecting anything.  `mouse-drag-region' reads
+the gesture through a transient map and leaves the release to be looked up as
+any other key, so a press that goes nowhere still arrives here as `S-mouse-1'."
   "<mouse-2>"   #'cooked-follow-link
   "S-<mouse-2>" #'cooked-follow-link
   "S-<mouse-1>" #'cooked-follow-link
-  "S-<down-mouse-1>" #'ignore
+  "S-<down-mouse-1>" #'mouse-drag-region
   "RET"         #'cooked-follow-link
   "S-<return>"  #'cooked-follow-link)
 
