@@ -985,7 +985,26 @@ impl Session {
     ///
     /// The grace is a bound and not a cost: the reader reaps the child the moment its
     /// side of the pty closes, so a shell that exits at once is reaped at once.
+    ///
+    /// The wait is paid here, on the caller's thread, and that is deliberate for the
+    /// explicit kill: `cooked--kill-emacs' runs this from `kill-emacs-hook', where the
+    /// reader has no future to finish anything in, so a child that ignores SIGHUP has to
+    /// be killed before this returns or it outlives the Emacs that started it. [`Drop`]
+    /// is the path that cannot afford the wait; see [`Session::drop`].
     pub(crate) fn shutdown(&self) -> bool {
+        if !self.begin_shutdown() {
+            return false;
+        }
+        self.shared.reap_after_hangup();
+        true
+    }
+
+    /// The half of teardown that costs nothing: stop the reader, hang up on the child,
+    /// and stop talking to Emacs. Reports whether this call was the first.
+    ///
+    /// Both paths out of a session start here. What they differ on is who waits out the
+    /// grace afterwards.
+    fn begin_shutdown(&self) -> bool {
         if self.shared.shutdown.swap(true, Ordering::SeqCst) {
             return false;
         }
@@ -996,26 +1015,8 @@ impl Session {
         // no lock and checks no flag, so joining it parked *this* thread -- the one holding
         // the `emacs_env`, which `Drop` reaches from the garbage collector -- for the length
         // of a decode bounded only by `sixel::MAX_PIXELS` and the kitty caps. It observes
-        // `shutdown` on its next turn instead and leaves without touching the pty, which is
-        // what `finish` already did for `Aborted`.
+        // `shutdown` on its next turn instead and leaves without reading the pty again.
         drop(self.reader.held().take());
-
-        let mut exited = self.shared.exited.held();
-        if exited.is_none() {
-            // Held across the reap, so the reader cannot record a status in the middle of
-            // it. The two can still race for the `waitpid` itself -- a reader already past
-            // its own `shutdown` check is the window -- and `reap_lock` lets exactly one of
-            // them collect it. Losing that race is not losing the status: `Pty::collected`
-            // is where the winner left it, and reading it here rather than waiting for the
-            // reader to record it is what keeps `alive` answering no the moment this
-            // returns. `LOST` is left for a child nobody reaped at all.
-            *exited = Some(
-                self.shared
-                    .reap_or_kill()
-                    .or_else(|| self.shared.pty.collected())
-                    .unwrap_or(LOST),
-            );
-        }
         true
     }
 
@@ -1033,7 +1034,36 @@ impl Session {
     pub(crate) fn term(&self) -> MutexGuard<'_, Term> {
         self.shared.term_for_lisp()
     }
+}
 
+impl Shared {
+    /// Wait out the grace [`Session::begin_shutdown`]'s hangup bought, kill a child that
+    /// ignored it, and record what it exited with.
+    ///
+    /// Whichever thread gets here first does the work, and the other finds the status
+    /// already written and returns at once. Idempotent, and after the first call it is
+    /// three atomic reads: [`Pty::reap`] answers `None` immediately once the child has
+    /// been collected, and [`Pty::kill`] refuses to signal a reaped pid.
+    fn reap_after_hangup(&self) {
+        let mut exited = self.exited.held();
+        if exited.is_none() {
+            // Held across the reap, so the reader cannot record a status in the middle of
+            // it. The two can still race for the `waitpid` itself -- a reader already past
+            // its own `shutdown` check is the window -- and `reap_lock` lets exactly one of
+            // them collect it. Losing that race is not losing the status: `Pty::collected`
+            // is where the winner left it, and reading it here rather than waiting for the
+            // reader to record it is what keeps `alive` answering no the moment this
+            // returns. `LOST` is left for a child nobody reaped at all.
+            *exited = Some(
+                self.reap_or_kill()
+                    .or_else(|| self.pty.collected())
+                    .unwrap_or(LOST),
+            );
+        }
+    }
+}
+
+impl Session {
     /// [`Session::drain_with`] for a consumer that promotes nothing, which is what the
     /// tests here read.
     #[cfg(test)]
@@ -1351,11 +1381,23 @@ impl Session {
 }
 
 impl Drop for Session {
+    /// Normally a no-op: `cooked--kill` runs from `kill-buffer-hook`, so by the time the
+    /// garbage collector finalises the handle there is nothing left to do. This is the
+    /// backstop for a session nobody killed explicitly.
+    ///
+    /// It hangs up and returns, rather than calling [`Session::shutdown`] and waiting.
+    /// This runs inside Emacs' garbage collector, and a child that ignores SIGHUP --
+    /// `nohup`, `trap '' HUP` -- would hold the whole editor still for
+    /// [`HANGUP_GRACE`] plus [`KILL_GRACE`], half a second, at a moment nothing in Lisp
+    /// asked for. The grace, the kill and the reap are left to the reader thread, which
+    /// outlives this handle -- it holds an `Arc` of its own -- and which
+    /// [`Shared::read_loop`] sends through [`Shared::reap_after_hangup`] on its way out.
+    ///
+    /// Nobody is left to hear the status, which is why it need not be waited for: the
+    /// notifier is closed, the handle is being finalised, and a `Session` Lisp can no
+    /// longer reach is one nothing will ask `alive` or drain again.
     fn drop(&mut self) {
-        // Normally a no-op: `cooked--kill` runs from `kill-buffer-hook`, so by the time
-        // the garbage collector finalises the handle there is nothing left to do. This is
-        // the backstop for a session nobody killed explicitly.
-        self.shutdown();
+        self.begin_shutdown();
     }
 }
 
@@ -1657,13 +1699,13 @@ impl Shared {
             if !ready && !interrupted && is_tick {
                 self.quiet_tick();
             }
-            // Either teardown asked us to stop -- in which case do not touch the pty on the
-            // way out -- or a drain left a throttled notification for the `flush` below,
-            // and all that was wanted was this iteration itself.
+            // Either teardown asked us to stop -- in which case read no further, and finish
+            // the teardown below -- or a drain left a throttled notification for the
+            // `flush` below, and all that was wanted was this iteration itself.
             if interrupted {
                 self.interrupt.clear();
                 if self.shutdown.load(Ordering::SeqCst) {
-                    return;
+                    break;
                 }
             }
 
@@ -1744,10 +1786,14 @@ impl Shared {
             }
         }
 
-        // Either teardown set `shutdown`, in which case [`Session::shutdown`] is reaping the
-        // child on its own thread and is no longer waiting for this one, or the poll failed
-        // and this session has to end itself.
-        if !self.shutdown.load(Ordering::SeqCst) {
+        // Either teardown set `shutdown`, in which case the grace the hangup bought is
+        // this thread's to wait out -- `Session::drop` hands it over rather than hold
+        // Emacs' garbage collector still for it, and an explicit `Session::shutdown` has
+        // already done the same work, so this costs nothing after it -- or the poll
+        // failed and this session has to end itself.
+        if self.shutdown.load(Ordering::SeqCst) {
+            self.reap_after_hangup();
+        } else {
             self.finish(Ended::Aborted);
         }
     }
@@ -3575,6 +3621,38 @@ mod tests {
             std::thread::sleep(Duration::from_millis(5));
         }
         panic!("the child was left unreaped");
+    }
+
+    /// Finalising a handle nobody killed must not park Emacs' garbage collector.
+    ///
+    /// `Drop` is reached from a collection, at a moment no Lisp asked for, and it used to
+    /// run the whole of `shutdown`: for a child that ignores SIGHUP that is `HANGUP_GRACE`
+    /// and then `KILL_GRACE`, better than half a second with all of Emacs stopped. It now
+    /// hangs up and leaves the grace to the reader thread, which is still there and still
+    /// has to kill and reap the child -- the second half of this test.
+    #[test]
+    fn dropping_a_session_hands_the_grace_to_the_reader() {
+        let (session, _read) = session(&["/bin/sh", "-c", "trap '' HUP; sleep 300"]);
+        let pid = session.pid().as_raw();
+        // Long enough for the shell to have installed the trap, so the hangup below is one
+        // the child really does ignore.
+        std::thread::sleep(Duration::from_millis(150));
+        let start = Instant::now();
+        drop(session);
+        let elapsed = start.elapsed();
+        assert!(
+            elapsed < patience(0.010),
+            "the drop took {elapsed:?}, which is the grace and not a hangup"
+        );
+        let deadline = Instant::now() + patience(5.0);
+        while Instant::now() < deadline {
+            // ESRCH rather than a zombie: the reader killed the child *and* collected it.
+            if alive(pid) == Err(Errno::ESRCH) {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        panic!("the child outlived the handle nobody waited for");
     }
 
     #[test]
