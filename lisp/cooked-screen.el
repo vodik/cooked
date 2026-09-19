@@ -286,6 +286,17 @@ Returns the position the text was inserted at."
       ;; `cooked-rewriting-a-row-still-gets-it-scanned', and for where this
       ;; binding sits,
       ;; `cooked-a-repaint-announces-its-rewrite-and-not-its-properties'.
+      ;;
+      ;; What is left outside is not one hook call per run: a repaint of 24 rows
+      ;; of eight styled spans each makes *three* `after-change-functions' calls,
+      ;; measured, because this binding already covers every property write and
+      ;; `cooked--render-rows' coalesces the rewrite into a handful of edits.
+      ;; Inhibiting the hooks for the whole of `cooked--apply' was measured
+      ;; against leaving them: 12.72 against 13.24 ms per fifty styled frames,
+      ;; ten microseconds a frame, which is not worth blinding a hook the user
+      ;; added.  Nothing cooked has is on either hook -- `before-change-functions'
+      ;; is empty in a cooked buffer and `after-change-functions' holds
+      ;; `jit-lock-after-change' alone, or `evil-track-last-insertion' beside it.
       (let ((inhibit-modification-hooks t)
             (links nil))
         ;; Links are collected on the same walk and applied after the decorations,
