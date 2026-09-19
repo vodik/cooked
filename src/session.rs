@@ -160,7 +160,7 @@ const REAP_PATIENCE: std::time::Duration = std::time::Duration::from_millis(500)
 /// An enum rather than the bare status it crosses to Lisp as, because the second variant
 /// is not a status: there is none to be had, and it used to ride in the same `i32` as the
 /// sentinel -1, which no `waitpid` status is but which the type did not say. See
-/// [`crate::wire::LOST`], where it becomes that number and nowhere else.
+/// `LOST` in `wire.rs`, where it becomes that number and nowhere else.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Exit {
     /// What `waitpid` reported, as `cooked--on-exit' reads it.
