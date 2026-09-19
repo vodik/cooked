@@ -229,6 +229,33 @@ fn an_osc_abandoned_midway_does_not_poison_the_next_one() {
 }
 
 #[test]
+fn an_osc_split_at_every_offset_dispatches_the_same_as_unsplit() {
+    // `advance_osc_bulk` has two stops a bulk scan of a DCS or an APC does not: the
+    // first `;`, which ends the code only while `code_end` is still `None`, and the
+    // C0 bytes OSC drops silently rather than treats as a terminator. A split that
+    // lands the boundary on either -- mid-run, right before it, or right after -- must
+    // still dispatch exactly what one unbroken `advance` would.
+    let mut input = b"\x1b]52;pa".to_vec();
+    input.extend([0x01, 0x02, 0x08, 0x19, 0x1F]); // ignored C0 bytes, mid-payload
+    input.extend(b";more;semicolons;stay;in;the;payload");
+    input.push(0x07);
+
+    let whole = {
+        let mut dispatcher = Dispatcher::default();
+        Parser::new().advance(&mut dispatcher, &input);
+        dispatcher.dispatched
+    };
+
+    for at in 0..=input.len() {
+        let mut dispatcher = Dispatcher::default();
+        let mut parser = Parser::new();
+        parser.advance(&mut dispatcher, &input[..at]);
+        parser.advance(&mut dispatcher, &input[at..]);
+        assert_eq!(dispatcher.dispatched, whole, "split at {at}");
+    }
+}
+
+#[test]
 fn parse_csi_max_params() {
     // This will build a list of repeating '1;'s
     // The length is MAX_PARAMS - 1 because the last semicolon is interpreted

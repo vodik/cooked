@@ -17,9 +17,10 @@
 //! * **APC is delivered.** Upstream discards it along with SOS and PM, and APC is where
 //!   the kitty graphics protocol lives. [`Perform::apc_dispatch`] receives a payload
 //!   whole.
-//! * **DCS payloads arrive as slices**, through [`Perform::put`], and both string states
-//!   are scanned in bulk. Upstream calls `put` per byte, which is the wrong shape for a
-//!   sixel image megabytes long.
+//! * **DCS and OSC payloads are scanned in bulk.** DCS arrives as slices through
+//!   [`Perform::put`]; upstream calls `put` per byte, which is the wrong shape for a
+//!   sixel image megabytes long. OSC is collected the same way, for the same reason: an
+//!   OSC 52 clipboard write or an OSC 1337 image is base64 megabytes long too.
 //! * **An OSC is a code and a payload**, not a list of parameters. Upstream cut the
 //!   string at every `;`, into at most sixteen pieces, and everything downstream whose
 //!   payload could contain one glued it back together. See [`Perform::osc_dispatch`].
@@ -122,10 +123,13 @@ impl Parser {
         while i != bytes.len() {
             match self.state {
                 State::Ground => i += self.advance_ground(performer, &bytes[i..]),
-                // The two string states run in bulk, so that a sixel or a kitty image
-                // costs a scan and one call rather than a state dispatch per byte.
+                // The string states run in bulk, so that a sixel, a kitty image or an
+                // OSC 52 costs a scan and one call rather than a state dispatch per byte.
                 State::DcsPassthrough => i += self.advance_dcs_bulk(performer, &bytes[i..]),
                 State::ApcString => i += self.advance_apc_bulk(performer, &bytes[i..]),
+                State::OscString { code_end } => {
+                    i += self.advance_osc_bulk(performer, code_end, &bytes[i..])
+                }
                 _ => {
                     // Inlining it results in worse codegen.
                     let byte = bytes[i];
@@ -176,6 +180,40 @@ impl Parser {
         end + 1
     }
 
+    /// Collect the longest run of OSC payload before anything needing a decision.
+    ///
+    /// Every C0 byte is a decision -- terminator, cancel, or one of the codes
+    /// [`Self::advance_osc_string`] silently drops -- so the scan stops at the first byte
+    /// below `0x20` and hands it to the per-byte arm exactly as [`Self::advance_apc_bulk`]
+    /// does. The one thing APC does not have: while `code_end` is still `None`, a `;` is
+    /// also a decision, the one that ends the code, so the scan stops there too and
+    /// records where the code ended without storing the `;` itself. Once `code_end` is
+    /// `Some`, every later `;` is payload and the scan runs past it like any other byte
+    /// from `0x20` up.
+    #[inline]
+    fn advance_osc_bulk<P: Perform>(
+        &mut self,
+        performer: &mut P,
+        code_end: Option<usize>,
+        bytes: &[u8],
+    ) -> usize {
+        let end = bytes
+            .iter()
+            .position(|&b| b < 0x20 || (code_end.is_none() && b == 0x3B))
+            .unwrap_or(bytes.len());
+        self.string.extend(&bytes[..end]);
+        if end == bytes.len() {
+            return end;
+        }
+        if code_end.is_none() && bytes[end] == 0x3B {
+            let code_end = Some(self.string.len());
+            self.state = State::OscString { code_end };
+            return end + 1;
+        }
+        self.change_state(performer, bytes[end]);
+        end + 1
+    }
+
     /// Partially advance the parser state.
     ///
     /// This is equivalent to [`Self::advance`], but stops when
@@ -203,6 +241,9 @@ impl Parser {
                 State::Ground => i += self.advance_ground(performer, &bytes[i..]),
                 State::DcsPassthrough => i += self.advance_dcs_bulk(performer, &bytes[i..]),
                 State::ApcString => i += self.advance_apc_bulk(performer, &bytes[i..]),
+                State::OscString { code_end } => {
+                    i += self.advance_osc_bulk(performer, code_end, &bytes[i..])
+                }
                 _ => {
                     // Inlining it results in worse codegen.
                     let byte = bytes[i];

@@ -643,3 +643,23 @@ fn osc_dispatch() {
         }
     });
 }
+
+/// A clipboard write megabytes long, the shape `advance_osc_bulk` exists for: `OSC 52`
+/// base64-encodes whatever the child put on the clipboard into one string, and that
+/// string arrives across many `READ_CHUNK` reads whose boundaries land inside it at
+/// arbitrary offsets, not just at its start and end.
+#[test]
+#[ignore = "benchmark"]
+fn osc_52_clipboard() {
+    let payload = b64(&vec![0u8; 4 * 1024 * 1024]);
+    let mut data = b"\x1b]52;c;".to_vec();
+    data.extend_from_slice(payload.as_bytes());
+    data.push(0x07);
+    let mut term = Term::new(50, 200);
+    timed("OSC 52, 4 MB clipboard write", data.len(), || {
+        for piece in data.chunks(READ_CHUNK) {
+            term.feed(piece);
+        }
+        term.drain();
+    });
+}
