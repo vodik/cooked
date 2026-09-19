@@ -298,10 +298,15 @@ are resolved from the *click*, not from point.
 `C-c C-c`, `C-c C-z` and `C-c C-\` do not send a hardcoded signal. A terminal writes the
 character in the tty's `c_cc` and lets the line discipline decide what it means, so cooked
 reads it — which is what makes `stty intr ^X` work. `ISIG` is the other half: a program
-that cleared it did so to read the byte itself, and signalling it behind its own back
-would be wrong. The signal is the fallback for the two cases where writing cannot mean
-anything: `ISIG` off, or the character disabled (`_POSIX_VDISABLE` — zero on Linux,
-`0xff` on the BSDs, which is why it lives in `src/platform/`). The fallback signal is
+that cleared it did so to read the key itself, and signalling it behind its own back
+would be wrong. So it gets the key — `C-c`, `C-z` or `C-\`, spelled by the key encoder so
+the kitty keyboard protocol is honoured. It matters: a full-screen program that handles
+`^Z` leaves raw mode, stops itself and re-enters raw mode on `SIGCONT`, and one stopped
+from outside does none of that, so after `fg` the shell's cooked termios stays and the
+kernel echoes every keystroke onto its screen. The signal is the fallback for the one
+case where there is nothing to write: `ISIG` on but the character disabled
+(`_POSIX_VDISABLE` — zero on Linux, `0xff` on the BSDs, which is why it lives in
+`src/platform/`). The fallback signal is
 named rather than numbered for the same reason: `SIGTSTP` is 20 on Linux and 18 on the
 BSDs, where 20 is `SIGCHLD`, so the Lisp says `sigtstp` and the core — which links libc
 and can see which platform it is on — turns that into a number.

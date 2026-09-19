@@ -267,30 +267,50 @@ Which byte that is comes from the tty -- see `cooked--eof-byte'."
   (cooked--resume-forwarding)
   (cooked--send-to-child (string (cooked--eof-byte))))
 
+(defconst cooked--job-control-keys
+  '((:intr . ?\C-c) (:quit . ?\C-\\) (:susp . ?\C-z))
+  "The key a keyboard has for each job-control character, by convention.
+
+What `cooked--send-job-control' presses when the child has cleared ISIG.  The
+tty's own `c_cc' is not consulted for that case: with ISIG off the line
+discipline gives those characters no meaning, so the only meaning left is the
+one the program reading the keyboard gives the key, and the key is this one.")
+
 (defun cooked--send-job-control (session key signal)
   "Ask SESSION for job control the way a terminal does.
 
 KEY is `:intr', `:quit' or `:susp'.  A terminal sends no signal of its own:
 it writes the character the tty has in `c_cc' and lets the line discipline
 decide.  Reading that character rather than assuming ^C/^\\/^Z is what makes
-`stty intr ^X' work, and honouring ISIG is what keeps a program that
-deliberately cleared it -- so as to read the byte itself -- from being
-signalled behind its own back.
+`stty intr ^X' work.
 
-SIGNAL is the fallback, for the two cases where writing cannot mean anything:
-ISIG is off, so no byte would be turned into one; or the character is disabled
-\(`_POSIX_VDISABLE'), so there is no byte to write.  It names the signal
+With ISIG off the line discipline decides nothing, and the child is a program
+that cleared it so as to read the key itself.  It gets the key, from
+`cooked--job-control-keys' and through `cooked--encode-event', so that a child
+which negotiated the kitty keyboard protocol reads it spelled that way.  This
+branch used to send SIGNAL instead, which is precisely the signalling behind a
+program's back that honouring ISIG exists to prevent, and it was not harmless.
+A full-screen program that handles ^Z leaves raw mode, stops itself, and
+re-enters raw mode on SIGCONT.  Stopped from outside it does none of that: the
+shell restores its own termios when the job is resumed with `fg', the program
+still believes the tty is raw, and from then on the kernel echoes every
+keystroke and every focus report onto its screen.
+
+SIGNAL is the fallback for the one case where there is nothing to write: ISIG
+is on but the character is disabled (`_POSIX_VDISABLE').  It names the signal
 rather than numbering it, because the numbers are not the same everywhere:
 SIGTSTP is 20 on Linux and 18 on the BSDs, where 20 is SIGCHLD.  Written as
 numbers here they were Linux's, so on macOS the suspend fallback sent a
-SIGCHLD the child ignores -- the whole of why \\[cooked-suspend] did nothing to
-a program that had cleared ISIG.  The core links libc and can see which
-platform it is; this side cannot, so this side spells the name."
+SIGCHLD the child ignores.  The core links libc and can see which platform it
+is; this side cannot, so this side spells the name."
   (let* ((jc (cooked--job-control session))
          (char (plist-get jc key)))
-    (if (and (plist-get jc :isig) char)
-        (cooked--send-to-child (string char))
-      (cooked--signal session signal))))
+    (cond
+     ((not (plist-get jc :isig))
+      (let ((press (alist-get key cooked--job-control-keys)))
+        (cooked--send-to-child (or (cooked--encode-event press) (string press)))))
+     (char (cooked--send-to-child (string char)))
+     (t (cooked--signal session signal)))))
 
 (defun cooked-suspend ()
   "Suspend the foreground command.

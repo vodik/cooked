@@ -362,27 +362,41 @@ that byte is the whole of it and the line discipline does the rest."
       (cooked-suspend)
       (should (cooked-tests--settle (lambda () (cooked-tests--stopped-p job)) 4)))))
 
-(ert-deftest cooked-suspend-stops-the-job-with-isig-off ()
-  "Regression: \\[cooked-suspend] did nothing at all on macOS to a program that
-had cleared ISIG.
+(ert-deftest cooked-suspend-presses-the-key-with-isig-off ()
+  "Regression: \\[cooked-suspend] stopped a program that had cleared ISIG by
+signalling it, and the program's tty was left cooked after `fg'.
 
-With ISIG off there is no byte to write -- the line discipline would hand it
-straight to the child instead of raising anything -- so `cooked--send-job-control'
-falls back on the signal itself.  That signal was spelled 20, which is SIGTSTP
-on Linux and SIGCHLD on the BSDs, and SIGCHLD is ignored by default: the job
-carried on and the keystroke looked broken.  The number is the core's to pick
-now; this side names it.
+With ISIG off the line discipline hands ^Z straight to the child, which is what
+the child asked for: a full-screen program reads it as a key, leaves raw mode,
+stops itself and re-enters raw mode on SIGCONT.  Sent SIGTSTP from outside it
+does none of that, the shell restores its own termios on `fg', and the kernel
+echoes every keystroke and focus report onto the program's screen from then on.
+So the child must *receive* the key and must not be stopped."
+  (cooked-tests--with-echoing-child "stty -isig; "
+    (should (cooked-tests--settle
+             (lambda () (not (plist-get (cooked--job-control cooked--session) :isig)))
+             4))
+    (let ((pid (cooked--foreground-pid cooked--session)))
+      (cooked-suspend)
+      (should (cooked-tests--settle
+               (lambda () (string-search "^Z" (buffer-string))) 4))
+      (should-not (cooked-tests--stopped-p pid)))))
 
-`stty raw -isig' is the smallest thing that reproduces it, and it is exactly
-what a full-screen program does when it wants ^Z as a byte of its own."
+(ert-deftest cooked-suspend-signals-when-the-character-is-disabled ()
+  "The signal is the fallback for `stty susp undef' with ISIG still on: the
+line discipline would raise SIGTSTP but there is no byte that makes it.
+
+This is also the macOS regression, where the signal was spelled 20 -- SIGTSTP
+on Linux and SIGCHLD on the BSDs, which is ignored by default.  The number is
+the core's to pick now; this side names it."
   :tags '(zsh)
   (skip-unless (executable-find "zsh"))
   (cooked-tests--with-zsh
-    (cooked--send cooked--session "sh -c 'stty raw -isig; sleep 60'\r")
+    (cooked--send cooked--session "sh -c 'stty susp undef; sleep 60'\r")
     (let ((job (cooked-tests--foreground-job)))
       (should job)
       (should (cooked-tests--settle
-               (lambda () (not (plist-get (cooked--job-control cooked--session) :isig)))
+               (lambda () (not (plist-get (cooked--job-control cooked--session) :susp)))
                4))
       (should-not (cooked-tests--stopped-p job))
       (cooked-suspend)

@@ -2208,11 +2208,11 @@ state rather than merely checking that it parses."
     "--"
     ("Signals"
      ["Interrupt" cooked-interrupt :enable (cooked--live-session)
-      :help "Write the tty's interrupt character, or SIGINT where ISIG is off"]
+      :help "Write the tty's interrupt character, or press the key where ISIG is off"]
      ["Quit" cooked-quit :enable (cooked--live-session)
-      :help "Write the tty's quit character, or SIGQUIT where ISIG is off"]
+      :help "Write the tty's quit character, or press the key where ISIG is off"]
      ["Suspend" cooked-suspend :enable (cooked--live-session)
-      :help "Write the tty's suspend character, or SIGTSTP where ISIG is off"]
+      :help "Write the tty's suspend character, or press the key where ISIG is off"]
      ["End of File" cooked-send-eof :enable (cooked--live-session)
       :help "Send the tty's EOF byte -- a byte, not a signal"]
      "--"
