@@ -752,6 +752,12 @@ fn input_kind(env: Env) -> Result<session::Input> {
 /// three owe the child exactly the same things -- the pace hint, the wait a stopped job
 /// makes them serve, and the zeroing -- and a second copy of that is a second place for a
 /// pasted password to be left behind in.
+///
+/// Only BYTES is zeroed here. Extracting a Lisp string does not otherwise copy it (see
+/// `Vec<u8>'s `FromLisp' impl), so the one Lisp string BYTES may have come from is left
+/// exactly as its caller passed it in: `cooked-secret.el' `clear-string's its own copy
+/// once the write here returns, and a paste's is the kill ring's entry, which stays the
+/// user's to keep or forget.
 fn write_input(env: Env, session: Value, bytes: &mut [u8]) -> Result<()> {
     // `should_quit` is asked while the write waits on a child that is not reading, so
     // `C-g` ends the wait. Emacs raises the quit itself once this returns; all that is
@@ -822,7 +828,10 @@ fn send_paste_text(env: Env, args: &[Value]) -> Result<Value> {
     let result = write_input(env, args[0], &mut bytes);
     // A paste out of a password manager is the ordinary way a password is typed, so the
     // copy of the text this made is zeroed alongside the bytes `write_input` zeroes. A
-    // `\0` is valid UTF-8, so the string is still a string while this runs.
+    // `\0` is valid UTF-8, so the string is still a string while this runs. TEXT was read
+    // out of a Lisp string, ordinarily the kill ring's own entry, and that string is left
+    // as it was: it is the user's copy, not this call's, and `cooked-paste' does not clear
+    // it either.
     for b in unsafe { text.as_bytes_mut() } {
         unsafe { std::ptr::write_volatile(b, 0) };
     }
