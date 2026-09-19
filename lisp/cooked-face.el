@@ -104,6 +104,13 @@ running; see `cooked--set-bold-is-bright'."
 
 (dotimes (n 16)
   (let ((ansi (aref cooked--ansi-faces n)))
+    ;; On the face's own symbol, so that `cooked--notice-face-change' can answer
+    ;; "is this one of the sixteen" with a property lookup.  That predicate runs
+    ;; after *every* `set-face-attribute' in this Emacs, cooked's or not, so what
+    ;; it costs on a miss is what the advice costs everybody: a `cl-position' over
+    ;; the vector measured 0.84 us a call against 0.24 for the lookup, which is
+    ;; the difference between tripling `set-face-attribute' and not.
+    (put ansi 'cooked--ansi-index n)
     (custom-declare-face
      (aref cooked--fg-faces n) '((t))
      (format "Foreground of ANSI colour %d, as text the child printed in it inherits.
@@ -266,14 +273,35 @@ idle call, so a theme setting all sixteen faces costs one pass, and that pass
 finds the stamp already current when `cooked--flush-face-cache' got there
 first.
 
+The test is the `cooked--ansi-index' property rather than a search of
+`cooked--ansi-faces', because this runs after every `set-face-attribute' in
+this Emacs and almost all of them are somebody else's: one `load-theme' makes
+654 of these calls, and a miss has to cost as close to nothing as it can.
+
 This cannot recurse: the faces it sets are not in `cooked--ansi-faces'."
   (when (and (not cooked--ansi-refresh-timer)
-             (cl-position face cooked--ansi-faces :test #'eq))
+             (get face 'cooked--ansi-index))
     (setq cooked--ansi-refresh-timer
           (run-at-time 0 nil (lambda ()
                                (setq cooked--ansi-refresh-timer nil)
                                (cooked--sync-ansi-faces))))))
 
+;; Global advice on a core function, which is the kind of thing a package gets
+;; refused upstream for, and it is here because Emacs offers nothing else: there
+;; is no face-change hook in 29 or in 32, and the sixteen faces cannot be
+;; `:inherit'ed for one channel (see the commentary above `cooked--fg-faces').
+;;
+;; Doing without it was measured rather than argued.  The alternative is to check
+;; the stamp from the places that already run rarely, and the one such place that
+;; is not already wired -- a `cooked--wrap-cache' miss -- never fires for this:
+;; `cooked--layout-stamp' names the font and the geometry, and a colour change
+;; moves neither, so a face edited from an init file or interactively would not be
+;; followed at the next miss but never, until a theme or a new frame happened
+;; along.  Cooked's own face docstrings tell people that styling `ansi-color-red'
+;; is how they set that colour, so "never" is not a trade this can make.  What the
+;; advice costs instead is 0.78 us a call before the lookup above, and 0.5 ms over
+;; one `load-theme'.  The behaviour it buys is pinned by
+;; `cooked-an-ansi-face-edited-outside-a-theme-recolours-the-screen'.
 (advice-add 'set-face-attribute :after #'cooked--notice-face-change)
 
 (defvar cooked--theme-redraw-timer nil
