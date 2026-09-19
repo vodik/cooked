@@ -546,6 +546,15 @@ The bindings could have been closures over their own bytes, but a keymap full of
 anonymous functions describes itself badly: \\[describe-key] on an overridden key
 should name a command you can look up.")
 
+(defvar-local cooked--assumed-key-protocol-cache nil
+  "Cached answer of `cooked--assumed-key-protocol'.
+
+Rebuilt in `cooked--update-key-overrides', the same place and on the same
+events that rebuild the override map, since both answer the same question --
+what the child is running now, and whether it owns the keyboard to be asked
+about at all.  Reading it straight off the alist instead ran `seq-find' over
+`cooked-key-protocol-overrides' on every key this buffer ever sent.")
+
 (defun cooked--override-applies-p (condition)
   "Whether CONDITION selects what the child is running now."
   (if (functionp condition)
@@ -605,7 +614,12 @@ Returns nil when nothing matches, which is the common case."
 Gated exactly as `cooked--update-mouse-grab' gates the mouse, and for the same
 reason: these are keys being taken away from Emacs, so they may only apply while
 the child owns the keyboard.  Without that, an override on `<S-return>' would
-follow the buffer to its own prompt and displace `cooked-newline'."
+follow the buffer to its own prompt and displace `cooked-newline'.
+
+Also rebuilds `cooked--assumed-key-protocol-cache': a different customisation,
+`cooked-key-protocol-overrides', but the same question -- what the child is
+running and whether it owns the keyboard -- so it is invalidated by exactly the
+events that invalidate this map."
   (let ((live (and cooked-key-overrides
                    (not (cooked--input-state-p))
                    (not (cooked--suspended-p)))))
@@ -617,7 +631,8 @@ follow the buffer to its own prompt and displace `cooked-newline'."
       (_
        (setq cooked--override-map nil
              cooked--override-actions nil
-             cooked--override-map-alist nil)))))
+             cooked--override-map-alist nil))))
+  (setq cooked--assumed-key-protocol-cache (cooked--compute-assumed-key-protocol)))
 
 (defcustom cooked-key-protocol-overrides '(("\\`claude\\'" . kitty))
   "Protocol to assume a program speaks, for one that never negotiates one.
@@ -659,8 +674,8 @@ keyboard rather than misreporting cooked's identity."
                                     (const :tag "xterm modifyOtherKeys" modify-other)))
   :group 'cooked)
 
-(defun cooked--assumed-key-protocol ()
-  "Protocol `cooked-key-protocol-overrides' assumes for what is running now.
+(defun cooked--compute-assumed-key-protocol ()
+  "Recompute what `cooked--assumed-key-protocol' answers, ignoring the cache.
 
 nil when nothing matches, or when the child owns nothing right now to assume it
 for.  Whether the guess applies at all is the core's: a real negotiation is
@@ -671,6 +686,16 @@ happened since the last drain.  See `cooked-key-protocol-overrides'."
        (not (cooked--suspended-p))
        (cdr (seq-find (lambda (entry) (cooked--override-applies-p (car entry)))
                       cooked-key-protocol-overrides))))
+
+(defun cooked--assumed-key-protocol ()
+  "Protocol `cooked-key-protocol-overrides' assumes for what is running now.
+
+Answered from `cooked--assumed-key-protocol-cache' rather than walking
+`cooked-key-protocol-overrides' afresh: every key press asks this, by way of
+`cooked--send-key-event', and `cooked--update-key-overrides' already keeps the
+cache current on every event that could move the answer.  See
+`cooked--compute-assumed-key-protocol' for what it holds."
+  cooked--assumed-key-protocol-cache)
 
 (provide 'cooked-keys)
 ;;; cooked-keys.el ends here

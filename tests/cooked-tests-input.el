@@ -3898,6 +3898,26 @@ stop composing a multi-line command."
       (should (cooked-tests--settle
                (lambda () (string-search "^[[9;2u" (cooked-tests--text))))))))
 
+(ert-deftest cooked-assumed-key-protocol-does-not-recheck-on-every-key ()
+  "`cooked--send-key-event' asks this on every key press, and it used to walk
+`cooked-key-protocol-overrides' with `seq-find' -- and so call
+`cooked--override-applies-p' -- freshly each time.  `cooked--update-key-overrides'
+now answers it once, on the same events that rebuild the override map, and
+`cooked--assumed-key-protocol' just reads the cache."
+  (let ((cooked-key-protocol-overrides '(("\\`cat\\'" . kitty))))
+    (cooked-tests--with-session
+        '("/bin/sh" "-c" "stty raw -echo; printf '\033[?1049h'; exec cat -v")
+      (should (cooked-tests--settle (lambda () (eq (cooked--policy) 'alt))))
+      (should (eq (cooked--assumed-key-protocol) 'kitty))
+      (let ((calls 0))
+        (cl-letf* ((applies (symbol-function 'cooked--override-applies-p))
+                   ((symbol-function 'cooked--override-applies-p)
+                    (lambda (&rest args)
+                      (setq calls (1+ calls))
+                      (apply applies args))))
+          (dotimes (_ 5) (should (eq (cooked--assumed-key-protocol) 'kitty)))
+          (should (= calls 0)))))))
+
 (ert-deftest cooked-key-protocol-override-yields-to-a-real-negotiation ()
   "A guess about what a program probably wants is never trusted over what it
 actually asked for -- if that ever happened, this would be indistinguishable
