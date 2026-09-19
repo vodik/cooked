@@ -41,6 +41,12 @@
 ;; See `cooked-mouse-event'.
 (declare-function cooked--report-focus "cooked-mode" ())
 
+;; Key encoding lives in cooked-keys.el, which requires this file by way of
+;; cooked-peek and cooked-render; `cooked--alt-scroll-keys' asks it what
+;; protocol to assume for a wheel notch standing in for an arrow key, same as
+;; every other key send.
+(declare-function cooked--assumed-key-protocol "cooked-keys" ())
+
 (defconst cooked--mouse-buttons
   '((mouse-1 . 0) (mouse-2 . 1) (mouse-3 . 2)
     ;; A GUI frame spells the wheel `wheel-up'; a terminal spells the same notch
@@ -901,16 +907,22 @@ followed by another still appends, as it would with the pointer at rest."
       (cooked--mouse-fallback event))))
 
 (defun cooked--alt-scroll-keys (button &optional lines)
-  "Cursor keys standing in for LINES of wheel travel of BUTTON.
+  "Send LINES of wheel travel of BUTTON to the child as cursor keys.
 
 LINES defaults to `cooked-alternate-scroll-lines', which is what one notch is
 worth.  Only the vertical notches translate; a horizontal one has no cursor-key
-spelling a pager would understand, so it sends nothing."
-  (if-let* ((final (cond ((= button (alist-get 'wheel-up cooked--mouse-buttons)) "A")
-                         ((= button (alist-get 'wheel-down cooked--mouse-buttons)) "B"))))
-      (let ((key (cooked--cursor-key final)))
-        (mapconcat #'identity (make-list (or lines cooked-alternate-scroll-lines) key)))
-    ""))
+spelling a pager would understand, so nothing is sent.
+
+Each line goes through `cooked--send-key', one call per line rather than one
+string built up front: DECCKM is the child's to flip between one line and the
+next, and `cooked--send-key' reads it fresh at the moment of every write, the
+same as it does for a key struck at the real keyboard."
+  (when-let* ((key (cond ((= button (alist-get 'wheel-up cooked--mouse-buttons)) 'up)
+                         ((= button (alist-get 'wheel-down cooked--mouse-buttons)) 'down))))
+    (let ((session (cooked--require-session))
+          (assumed (cooked--assumed-key-protocol)))
+      (dotimes (_ (or lines cooked-alternate-scroll-lines))
+        (cooked--send-key session key nil assumed)))))
 
 (defun cooked--mouse-buffer (window)
   "The live cooked buffer WINDOW is showing, if it is showing one."
@@ -1027,10 +1039,9 @@ into by the time it comes up."
            ;; event: under `pixel-scroll-precision-mode' every tick is an event
            ;; of its own, and three lines apiece flooded `less'.
            ((and here wheel button (cooked--alt-scroll-active-p))
-            (cooked--send-to-child
-             (cooked--alt-scroll-keys button
-                                      (and (cooked--wheel-pixel-delta event)
-                                           (cooked--wheel-presses event)))))
+            (cooked--alt-scroll-keys button
+                                     (and (cooked--wheel-pixel-delta event)
+                                          (cooked--wheel-presses event))))
            ;; Nowhere to scroll to: the buffer is restricted to the screen the
            ;; child is drawing, so every notch here can only move the picture off
            ;; the window.  Asked of the restriction rather than of `cooked--alt'

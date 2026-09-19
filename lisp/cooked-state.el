@@ -323,8 +323,6 @@ the `editing' binding in `cooked--apply'."
 
 (defvar-local cooked--narrowed nil
   "Whether the restriction in force is ours, from `cooked--apply-alt-pin'.")
-(defvar-local cooked--app-cursor nil
-  "DECCKM: send cursor keys as SS3, which is what `smkx' asks for.")
 (defvar-local cooked--keys 'legacy
   "How to spell modified keys for this child.
 
@@ -395,17 +393,18 @@ down the wrong connection."
 (defun cooked--csi (final &rest params)
   "The control sequence `ESC [ PARAMS FINAL', with PARAMS joined by `;'.
 
-Every escape sequence cooked sends the child that is not an OSC is framed here
-or in `cooked--ss3', and for the same reason an OSC handler calls
-`cooked--reply-osc' rather than writing the brackets out itself: the framing is
-the part that is identical every time, so it is the part that has no business
-being respelled at each call site, across the keyboard, the mouse, the focus
-reports and the completion channel.  What actually differs between those sites
-is the parameters and the final byte, and that is all they say.
+Every escape sequence cooked sends the child that is not an OSC is framed
+here, and for the same reason an OSC handler calls `cooked--reply-osc' rather
+than writing the brackets out itself: the framing is the part that is
+identical every time, so it is the part that has no business being respelled
+at each call site, across the mouse, the focus reports and the completion
+channel.  What actually differs between those sites is the parameters and the
+final byte, and that is all they say.
 
-FINAL is a string rather than a character because that is what it already is at
-the site that has one to hand: `cooked--alt-scroll-keys' names the cursor key a
-wheel notch stands in for by its final byte.
+FINAL is a string rather than a character because every call site already
+holds the final byte as one, having spelled it directly rather than computed
+it from an event -- a key press instead goes through `cooked--send-key',
+which spells the whole escape sequence in the core.
 
 PARAMS are numbers, so `(cooked--csi \"~\" 5 2)' is `ESC [ 5 ; 2 ~', the
 modified spelling of `prior'.  None of them at all is the unparameterised
@@ -414,9 +413,8 @@ are.  A string is taken as the parameter verbatim, which is
 for the kitty keyboard protocol: its fields carry colon-separated sub-fields and
 may be empty, `ESC [ 97 : 65 ; ; 65 u', and neither is a number.
 
-See `cooked--csi-private' for the one sequence that carries a private-parameter
-prefix, and `cooked--cursor-key' for the one choice between CSI and SS3 that
-depends on what the child has asked for."
+See `cooked--csi-private' for the one sequence that carries a
+private-parameter prefix."
   (apply #'cooked--csi-private nil final params))
 
 (defun cooked--csi-private (prefix final &rest params)
@@ -441,31 +439,6 @@ parameters and the final byte."
   (concat "\e[" prefix
           (mapconcat (lambda (p) (if (stringp p) p (number-to-string p))) params ";")
           final))
-
-(defun cooked--ss3 (final)
-  "The single-shift-three sequence `ESC O FINAL'.
-
-The application-keypad spelling of a cursor or function key: what the child
-receives for `up' once `smkx' has asked for it, and the unmodified spelling of
-F1 through F4 whatever mode it is in.
-
-Not `cooked--csi' with a different introducer, because SS3 shifts exactly one
-character and so can carry no parameters at all.  That is not a limitation this
-has to work around -- a key with a modifier to report leaves SS3 behind and is
-spelled as a CSI instead, which the core's key encoder does for both of the
-cases above."
-  (concat "\eO" final))
-
-(defun cooked--cursor-key (final)
-  "Cursor key FINAL spelled the way the child last asked for it.
-
-`ESC O FINAL' while DECCKM is set -- see `cooked--app-cursor' -- and
-`ESC [ FINAL' otherwise.
-
-The arrows a wheel notch stands in for on the alternate screen are the one
-caller left here; the key encoder makes the same choice in the core, against
-the mode the child holds at the moment of the write."
-  (if cooked--app-cursor (cooked--ss3 final) (cooked--csi final)))
 
 ;;;; Who owns the keyboard
 ;;

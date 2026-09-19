@@ -555,7 +555,6 @@ CURSOR is UPDATE's cursor, already decoded by `cooked--apply'."
                                         :width (plist-get update :width)
                                         :used (plist-get update :used)
                                         :head (plist-get update :head))
-        cooked--app-cursor (plist-get update :app-cursor)
         cooked--keys (plist-get update :keys)
         cooked--kitty-flags (or (plist-get update :kitty-flags) 0)
         cooked--modify-other-keys (or (plist-get update :modify-other-keys) 0)

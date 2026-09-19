@@ -2209,7 +2209,7 @@ instead -- this is the regression guard for using comint's version by mistake."
 CSI encoding while ncurses (via `smkx') expects SS3, and nothing happened.
 Which keys follow the mode, and how, is checked in the core's own tests."
   (cooked-tests--with-session '("/bin/sh" "-c" "printf '\\033[?1h'; sleep 5")
-    (should (cooked-tests--settle (lambda () cooked--app-cursor)))
+    (should (cooked-tests--settle (lambda () (equal (cooked-tests--spell 'up) "\eOA"))))
     (should (equal (cooked-tests--spell 'up) "\eOA"))
     (should (equal (cooked-tests--spell 'left) "\eOD"))
     (should (equal (cooked-tests--spell 'next) "\e[6~"))))
@@ -3246,19 +3246,35 @@ the overhang reported into the next column.  A two-cell character keeps both."
 
 
 (ert-deftest cooked-alternate-scroll-sends-cursor-keys ()
-  "A pager that never asked for the mouse still gets the wheel."
+  "A pager that never asked for the mouse still gets the wheel.
+
+Regression: the arrows used to be spelled here from a copy of DECCKM as of the
+last drain.  Sent through `cooked--send-key' instead,
+so the choice between `up'/`down' and their SS3 or CSI spelling is the core's
+to make, against the mode the child holds at the moment of the write -- see
+`cooked-application-cursor-mode-round-trips' for that half of it.  What is
+still Lisp's to get right, and what this checks, is that a notch turns into the
+right key, the right number of times, and that a horizontal one sends nothing."
   (with-temp-buffer
     (cooked-mode)
-    (setq-local cooked--app-cursor nil)
-    (let ((cooked-alternate-scroll-lines 3))
-      (should (equal (cooked--alt-scroll-keys 64) "\e[A\e[A\e[A"))
-      (should (equal (cooked--alt-scroll-keys 65) "\e[B\e[B\e[B")))
-    ;; Application cursor mode changes the spelling, as it does for the arrow keys.
-    (setq-local cooked--app-cursor t)
-    (let ((cooked-alternate-scroll-lines 1))
-      (should (equal (cooked--alt-scroll-keys 64) "\eOA")))
-    ;; Horizontal notches have no cursor-key spelling and send nothing.
-    (should (equal (cooked--alt-scroll-keys 66) ""))))
+    (let (sent)
+      (cl-letf (((symbol-function 'cooked--require-session) (lambda () 'session))
+                ((symbol-function 'cooked--send-key)
+                 (lambda (_session key &rest _) (push key sent))))
+        (let ((cooked-alternate-scroll-lines 3))
+          (cooked--alt-scroll-keys 64)
+          (should (equal (reverse sent) '(up up up)))
+          (setq sent nil)
+          (cooked--alt-scroll-keys 65)
+          (should (equal (reverse sent) '(down down down))))
+        (setq sent nil)
+        (let ((cooked-alternate-scroll-lines 1))
+          (cooked--alt-scroll-keys 64))
+        (should (equal sent '(up)))
+        ;; Horizontal notches have no cursor-key spelling and send nothing.
+        (setq sent nil)
+        (cooked--alt-scroll-keys 66)
+        (should-not sent)))))
 
 (ert-deftest cooked-alternate-scroll-sends-a-trackpads-rows-not-its-events ()
   "Under `pixel-scroll-precision-mode' every trackpad tick is an event carrying a
@@ -3267,32 +3283,35 @@ swipe in `less' scrolled pages.  Travel is a line per row crossed, carried
 between events as a mouse report's notches are."
   (with-temp-buffer
     (cooked-mode)
-    (setq-local cooked--app-cursor nil)
     (let ((cooked-alternate-scroll-lines 3)
           (cooked--scroll-pending 0.0)
           (mwheel-coalesce-scroll-events nil)
           sent)
       (cl-letf (((symbol-function 'cooked--alt-scroll-active-p) (lambda () t))
                 ((symbol-function 'cooked--mouse-buffer) (lambda (_) (current-buffer)))
-                ((symbol-function 'cooked--send-to-child)
-                 (lambda (text) (push text sent)))
+                ((symbol-function 'cooked--require-session) (lambda () 'session))
+                ((symbol-function 'cooked--send-key)
+                 (lambda (_session key &rest _) (push key sent)))
                 ((symbol-function 'default-line-height) (lambda () 20))
                 ((symbol-function 'device-class) nil))
         (fmakunbound 'device-class)
         (cooked-tests--displayed
-          (dolist (pixels '(8 14 45))
-            (let ((last-input-event
-                   (list 'wheel-down (cooked-tests--posn nil) 0 0 (cons 0 pixels))))
-              (cooked-mouse-event)))
-          ;; 8 pixels is under a row, 22 has crossed one, and 67 has crossed three.
-          (should (equal (reverse sent) '("" "\e[B" "\e[B\e[B")))
+          (let (events)
+            (dolist (pixels '(8 14 45))
+              (setq sent nil)
+              (let ((last-input-event
+                     (list 'wheel-down (cooked-tests--posn nil) 0 0 (cons 0 pixels))))
+                (cooked-mouse-event))
+              (push (nreverse sent) events))
+            ;; 8 pixels is under a row, 22 has crossed one, and 67 has crossed three.
+            (should (equal (reverse events) '(nil (down) (down down)))))
           ;; A notch is still a notch's worth, which is what the option is for.
           (setq sent nil)
           (let ((mwheel-coalesce-scroll-events t)
                 (last-input-event
                  (list 'wheel-down (cooked-tests--posn nil) 1 1 '(0 . 40))))
             (cooked-mouse-event))
-          (should (equal sent '("\e[B\e[B\e[B"))))))))
+          (should (equal (reverse sent) '(down down down))))))))
 
 
 (ert-deftest cooked-alternate-scroll-grabs-the-wheel-without-mouse-mode ()
@@ -3482,7 +3501,6 @@ src/emu/term/tests/keyboard.rs, which carry the cases this file used to."
     ;; is what the spelling used to read: nothing here would move if it still did.
     (should (eq cooked--keys 'legacy))
     (should (= cooked--kitty-flags 0))
-    (should-not cooked--app-cursor)
     (should (equal (cooked-tests--spell 'S-return) "\e[13;2u"))
     (should (equal (cooked-tests--spell 'escape) "\e[27u"))
     ;; And a pop puts back what the push replaced.
@@ -3639,16 +3657,15 @@ Emacs', since no other protocol can spell them."
       '("/bin/sh" "-c" "printf '\\033[?1049h\\033[>1u'; stty raw -echo; cat -v")
     (should (cooked-tests--settle (lambda () (cooked--kitty-negotiated-p))))
     (cooked-tests--display-buffer)
-    (let ((cooked--app-cursor nil))
-      (dolist (key '("s-A" "S-s-a" "H-a" "C-M-S-<up>" "s-<up>" "<f13>" "<pause>" "C-é"))
-        (ert-info ((format "%s under kitty" key))
-          (should (eq (key-binding (kbd key)) #'cooked-send-key))))
-      (execute-kbd-macro
-       (vconcat (kbd "s-A") (kbd "C-M-S-<up>") (kbd "H-a") (kbd "<f13>") (kbd "<pause>")))
-      (should (cooked-tests--settle
-               (lambda ()
-                 (string-search "^[[97;10u^[[1;8A^[[97;17u^[[57376u^[[57362u"
-                                (cooked-tests--text))))))
+    (dolist (key '("s-A" "S-s-a" "H-a" "C-M-S-<up>" "s-<up>" "<f13>" "<pause>" "C-é"))
+      (ert-info ((format "%s under kitty" key))
+        (should (eq (key-binding (kbd key)) #'cooked-send-key))))
+    (execute-kbd-macro
+     (vconcat (kbd "s-A") (kbd "C-M-S-<up>") (kbd "H-a") (kbd "<f13>") (kbd "<pause>")))
+    (should (cooked-tests--settle
+             (lambda ()
+               (string-search "^[[97;10u^[[1;8A^[[97;17u^[[57376u^[[57362u"
+                              (cooked-tests--text)))))
     ;; Evil insert state keeps Super for Emacs, as it keeps Meta.
     (should-not (eq (lookup-key cooked-semi-map (kbd "s-A")) #'cooked-send-key))
     ;; With no flags, Super and Pause fall through to Emacs again while the keys a

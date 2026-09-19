@@ -4626,14 +4626,13 @@ comes out in the new theme's colours from ids the core already sent."
     (let* ((update (cooked--drain cooked--session t nil t))
            (cursor (cooked--cursor-decode (plist-get update :cursor))))
       (cooked--apply-levels (append (list :height 9 :width 40 :used 4 :head 2
-                                          :app-cursor t :exit nil)
+                                          :exit nil)
                                     update)
                             cursor)
       (should (= (cooked-grid-height cooked--grid) 9))
       (should (= (cooked-grid-width cooked--grid) 40))
       (should (= (cooked-grid-used cooked--grid) 4))
       (should (= (cooked-grid-head cooked--grid) 2))
-      (should cooked--app-cursor)
       (should (eq cooked--cursor cursor)))))
 
 (ert-deftest cooked-the-event-stage-unpins-the-screen-and-announces-the-rows ()
