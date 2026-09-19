@@ -24,7 +24,7 @@ pub(crate) mod replies;
 pub(crate) mod session;
 mod wire;
 
-use emu::{CellMetrics, ColorScheme, ImageFormat, ImageId, ShownFormats};
+use emu::{Button, CellMetrics, ColorScheme, ImageFormat, ImageId, ShownFormats};
 use env::{Env, Result, Runtime, Value, plist, sym};
 use nix::sys::signal::Signal;
 use pty::Winsize;
@@ -222,7 +222,13 @@ pub unsafe extern "C" fn emacs_module_init(runtime: *mut Runtime) -> std::ffi::c
         /// to say -- a wheel notch over the fringe, a release carried off the screen.
         ///
         /// Returns t if the child was told, and nil if it has stopped asking for the
-        /// mouse. Which spelling it gets -- X10, SGR or SGR in pixels -- and the cell
+        /// mouse or for this much of it: BUTTON carries the motion bit and the wheel
+        /// bit, so a report of the pointer merely moving is dropped unless the mode the
+        /// child holds *now* covers motion -- 1003 for motion with nothing held, 1002 or
+        /// 1003 for a drag. A press, a release and a wheel notch are covered by every
+        /// mode and are never dropped for this reason.
+        ///
+        /// Which spelling it gets -- X10, SGR or SGR in pixels -- and the cell
         /// size the pixels are measured in are read here, under the terminal lock,
         /// rather than from anything Lisp remembers: both are the child's to change
         /// between one drain and the next, and a report spelled against the previous
@@ -776,7 +782,12 @@ fn send(env: Env, args: &[Value]) -> Result<Value> {
 /// Spell one mouse report against the modes the child holds now; see
 /// `cooked--send-mouse-report'.
 fn send_mouse_report(env: Env, args: &[Value]) -> Result<Value> {
-    let button = env.from_lisp::<i64>(args[1])?.clamp(0, i64::from(u32::MAX)) as u32;
+    // Refused rather than clamped: a number outside the byte xterm's encoding has room
+    // for names no button, and a clamp would spell it as whichever button sits at the
+    // edge. See [`Button`].
+    let Some(button) = Button::parse(env.from_lisp::<i64>(args[1])?) else {
+        return Ok(env.nil());
+    };
     let cell = |i: usize| -> Result<u64> { Ok(env.from_lisp::<i64>(args[i])?.max(0) as u64) };
     let (row, col) = (cell(2)?, cell(3)?);
     let pressed = !env.is_nil(args[4]);

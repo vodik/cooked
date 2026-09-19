@@ -135,7 +135,7 @@ pub(crate) use cell::{Color, MarkId, Style};
 pub(crate) use image::{CellMetrics, ImageData, ImageFormat, ShownFormats};
 pub(crate) use link::LinkId;
 pub(crate) use term::{
-    Anchor, ColorScheme, CursorShape, Event, KeyEncoding, Mark, StackOp, Terminator, Unit,
+    Anchor, Button, ColorScheme, CursorShape, Event, KeyEncoding, Mark, StackOp, Terminator, Unit,
     bracket_paste, osc_reply, strip_paste_controls,
 };
 

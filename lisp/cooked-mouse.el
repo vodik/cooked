@@ -537,10 +537,13 @@ the region alone; only hover motion asks for that.
 The report itself is spelled by the core, in `cooked--send-mouse-report':
 which of X10, SGR and SGR-in-pixels the child reads, and the cell size a pixel
 report is measured in, are both the child's to change at any moment, and
-`cooked--mouse-state' is only as fresh as the last drain.  Everything above
-here -- which cell the pointer is over, whether the gesture is one the child
-asked to hear about, what happens to the region -- is a question about Emacs
-and stays on this side.
+`cooked--mouse-state' is only as fresh as the last drain.  The tracking mode
+is read there for the same reason, so a motion report the mode in force does
+not cover -- a drag under 1000, a hover under anything but 1003 -- is dropped
+by the core and `cooked--send-mouse-report' answers nil.  Everything above
+here -- which cell the pointer is over, whether the gesture is Emacs' to
+forward at all, what happens to the region -- is a question about Emacs and
+stays on this side.
 
 Deactivating the mark is the point of routing every report through here.  A
 click that the child answers is the child's click, and leaving a region behind
