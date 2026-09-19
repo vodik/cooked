@@ -2227,7 +2227,7 @@ CSI encoding while ncurses (via `smkx') expects SS3, and nothing happened."
 What the spelling *is* belongs to the core's own tests; what is asked here is
 that the intent crosses the wire and the bytes land in the child."
   (cooked-tests--with-session
-      '("/bin/sh" "-c" "printf '\\033[?1000h\\033[?1006h'; stty raw; exec cat -v")
+      '("/bin/sh" "-c" "printf '\\033[?1000h\\033[?1006h'; stty raw -echo; exec cat -v")
     (should (cooked-tests--settle
              (lambda () (cooked-mouse-state-enabled cooked--mouse-state))))
     (should (cooked--send-mouse-report cooked--session 0 4 9 t))
@@ -2240,7 +2240,7 @@ that the intent crosses the wire and the bytes land in the child."
   "A child that asked for 1000 and nothing else reads the original report.
 X10 biases every coordinate by 32 and counts from 1, so column 0 is `!'."
   (cooked-tests--with-session
-      '("/bin/sh" "-c" "printf '\\033[?1000h'; stty raw; exec cat -v")
+      '("/bin/sh" "-c" "printf '\\033[?1000h'; stty raw -echo; exec cat -v")
     (should (cooked-tests--settle
              (lambda () (cooked-mouse-state-enabled cooked--mouse-state))))
     (should-not (cooked-mouse-state-sgr cooked--mouse-state))
@@ -2256,7 +2256,7 @@ sequence, not at Emacs' next drain.  A click Emacs had already decided was the
 child's therefore has to be dropped where the modes actually live -- which is
 the core -- rather than encoded against a copy of them that is a drain old."
   (cooked-tests--with-session
-      '("/bin/sh" "-c" "printf '\\033[?1000h'; stty raw; exec cat -v")
+      '("/bin/sh" "-c" "printf '\\033[?1000h'; stty raw -echo; exec cat -v")
     (should (cooked-tests--settle
              (lambda () (cooked-mouse-state-enabled cooked--mouse-state))))
     (cooked--feed cooked--session "\e[?1000l")
@@ -3280,44 +3280,44 @@ next focus change signals `invalid-function'."
     (funcall after-focus-change-function)))
 
 (ert-deftest cooked-focus-is-not-reported-until-the-child-asks ()
-  (cooked-tests--with-session '("/bin/cat")
+  "A child that never set DEC 1004 must be handed nothing at all on a focus change.
+
+`cat -v' rather than `cat', which is what makes this visible: `ESC [ I' is a
+control sequence, so a child echoing it back has the emulator consume it and an
+empty buffer is what both the working and the broken case look like.  Spelled
+out as text, a report wrongly sent is on the screen.  The sentinel is what makes
+waiting for its absence finite -- the report would have been queued before it."
+  (cooked-tests--with-session '("/bin/sh" "-c" "stty raw -echo; exec cat -v")
     (should-not (cooked--focus-events-p cooked--session))
-    ;; No mode set, so a focus change must put nothing on the child's input.
-    ;;
     ;; Seeded to the opposite of what the frame actually reports, so that
     ;; `cooked--report-focus' sees a change at all.  Hardcoding nil did not: batch Emacs
     ;; reports no focus either, `(eq focused cooked--focused)' held, and the function
     ;; returned at its first guard without ever reaching the mode check this is about --
     ;; so the test passed with that check deleted outright.
     (setq-local cooked--focused (not (cooked--focused-p)))
-    ;; Watched at the point the bytes would be written rather than in the buffer.  The
-    ;; buffer cannot see this: `ESC [ I' is a control sequence, so even when it is wrongly
-    ;; sent and `cat' echoes it straight back, the emulator consumes it and renders
-    ;; nothing -- an empty buffer is what both the working and the broken case look like.
-    ;; Waiting longer does not help; there is nothing to wait for.
-    (let (sent)
-      (cl-letf (((symbol-function 'cooked--reply-if-live)
-                 (lambda (&rest _) (setq sent t))))
-        (cooked--report-focus))
-      (should-not sent))))
+    (cooked--report-focus)
+    (cooked--send cooked--session "MARK")
+    (should (cooked-tests--settle
+             (lambda () (string-search "MARK" (cooked-tests--text)))))
+    (should-not (string-match-p "\\[[IO]" (cooked-tests--text)))))
 
 (ert-deftest cooked-focus-reports-once-per-change ()
+  "One notification per change of focus, and none for a change that is not one."
   (cooked-tests--with-session
-   '("/bin/sh" "-c" "printf '\\033[?1004h'; exec cat")
+   '("/bin/sh" "-c" "printf '\\033[?1004h'; stty raw -echo; exec cat -v")
    (should (cooked-tests--settle
             (lambda () (cooked--focus-events-p cooked--session))))
-   (let ((sent nil))
-     (cl-letf (((symbol-function 'cooked--reply)
-                (lambda (_s text) (push text sent))))
-       ;; Losing focus reports once; asking again while still unfocused is silent.
-       (setq-local cooked--focused t)
-       (cl-letf (((symbol-function 'cooked--focused-p) (lambda () nil)))
-         (cooked--report-focus)
-         (cooked--report-focus))
-       (should (equal sent (list "\e[O")))
-       (cl-letf (((symbol-function 'cooked--focused-p) (lambda () t)))
-         (cooked--report-focus))
-       (should (equal sent (list "\e[I" "\e[O")))))))
+   ;; Losing focus reports once; asking again while still unfocused is silent.
+   (setq-local cooked--focused t)
+   (cl-letf (((symbol-function 'cooked--focused-p) (lambda () nil)))
+     (cooked--report-focus)
+     (cooked--report-focus))
+   (cl-letf (((symbol-function 'cooked--focused-p) (lambda () t)))
+     (cooked--report-focus))
+   (should (cooked-tests--settle
+            (lambda () (string-match-p "\\[O.*\\[I" (cooked-tests--text)))))
+   ;; And exactly one of them: the second call while still unfocused said nothing.
+   (should-not (string-match-p "\\[O.*\\[O" (cooked-tests--text)))))
 
 (ert-deftest cooked-cursor-shape-follows-decscusr ()
   "vim and fish vi-mode signal their mode with `CSI Ps SP q'."

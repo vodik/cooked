@@ -1170,6 +1170,25 @@ impl Term {
         self.state.modes.focus_events
     }
 
+    /// What this child is owed for the window gaining or losing focus, if anything.
+    ///
+    /// `CSI I` and `CSI O`, DEC mode 1004's two notifications, or `None` from a child
+    /// that never subscribed. The question and the answer together, because asking
+    /// separately is asking about a mode that can have changed by the time the bytes are
+    /// queued: a focus change is reported from a global hook, arbitrarily far from
+    /// anything the child wrote, and a program that has just turned 1004 off reads a
+    /// stray `CSI I` as the escape sequence it looks like rather than as news it asked
+    /// for.
+    pub fn focus_report(&self, focused: bool) -> Option<&'static [u8]> {
+        self.state.modes.focus_events.then(|| {
+            if focused {
+                &b"\x1b[I"[..]
+            } else {
+                &b"\x1b[O"[..]
+            }
+        })
+    }
+
     /// How long this frame may still suppress a redisplay, if it may at all.
     pub fn sync_deadline(&self) -> Option<std::time::Instant> {
         self.state

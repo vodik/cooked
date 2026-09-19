@@ -182,7 +182,9 @@ DEC mode 1016: SGR reports carry the pointer's pixel instead of its cell.
 
 Never set without `sgr': the core keeps the coordinate modes mutually
 exclusive, as xterm does, so 1016 is a unit for the SGR form rather than a form
-of its own.  See `cooked--mouse-report'."))
+of its own.  Read here only to decide whether a click is worth measuring in
+pixels at all; the report that carries them is the core's, in
+`cooked--send-mouse-report'."))
 
 (defconst cooked--mouse-state-none (cooked--mouse-state-make)
   "The state of a child that has asked for nothing.
@@ -514,8 +516,8 @@ already has it.  Nil unless the child asked for pixel reports, so that a session
 reporting cells pays nothing for a measurement it would throw away.
 
 Only the offset *within* the cell is taken from Emacs; the cell it sits in is
-still `cooked--mouse-cell's, and `cooked--mouse-report' scales that by the
-cell size.  Adding `posn-x-y' to the screen's origin instead would have to
+still `cooked--mouse-cell's, and `cooked--send-mouse-report' scales that by
+the cell size.  Adding `posn-x-y' to the screen's origin instead would have to
 find that origin in pixels, and it is not a constant: row 0 is wherever
 `cooked--screen-start' happens to be drawn, which moves with scrollback,
 `window-start' and the header line.  A glyph-relative offset needs none of

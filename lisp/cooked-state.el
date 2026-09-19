@@ -405,8 +405,8 @@ a `csi' key as a string.
 
 PARAMS are numbers, so `(cooked--csi \"~\" 5 2)' is `ESC [ 5 ; 2 ~', the
 modified spelling of `prior'.  None of them at all is the unparameterised
-sequence `ESC [ FINAL', which is what an unmodified cursor key and the DEC 1004
-focus notifications are.  A string is taken as the parameter verbatim, which is
+sequence `ESC [ FINAL', which is what an unmodified cursor key and `backtab'
+are.  A string is taken as the parameter verbatim, which is
 for the kitty keyboard protocol: its fields carry colon-separated sub-fields and
 may be empty, `ESC [ 97 : 65 ; ; 65 u', and neither is a number.
 

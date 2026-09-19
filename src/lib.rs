@@ -283,6 +283,19 @@ pub unsafe extern "C" fn emacs_module_init(runtime: *mut Runtime) -> std::ffi::c
         /// that has stopped reading for long enough loses the reply instead.
         "cooked--reply" 2..=2 => reply;
 
+        /// Tell SESSION's child that its window gained or lost focus, as FOCUSED.
+        ///
+        /// Returns t if the child was told and nil if it never subscribed, DEC mode 1004
+        /// being read here rather than asked about first: a focus change is reported
+        /// from a global hook, arbitrarily far from anything the child wrote, and one
+        /// that has just turned 1004 off reads a stray `ESC [ I' as the escape sequence
+        /// it looks like rather than as the news it once asked for.
+        ///
+        /// Owed rather than sent, as `cooked--reply' owes: the user typed nothing, and a
+        /// child that has stopped reading should lose the notification rather than make
+        /// Emacs wait on it.
+        "cooked--reply-focus" 2..=2 => reply_focus;
+
         /// Parse STRING in SESSION's emulator as though its child had written it.
         ///
         /// The emulator takes the bytes at once, and nothing is woken: the caller drains
@@ -821,6 +834,18 @@ fn reply(env: Env, args: &[Value]) -> Result<Value> {
     let bytes = env.from_lisp::<Vec<u8>>(args[1])?;
     handle(env, args[0])?.reply(&bytes);
     Ok(env.nil())
+}
+
+fn reply_focus(env: Env, args: &[Value]) -> Result<Value> {
+    let focused = !env.is_nil(args[1]);
+    let session = handle(env, args[0])?;
+    // The lock goes before the queue rather than around it: what it has to cover is the
+    // mode and the bytes chosen from it, and `Session::reply` takes queues of its own.
+    let Some(bytes) = session.term().focus_report(focused) else {
+        return Ok(env.nil());
+    };
+    session.reply(bytes);
+    env.into_lisp(true)
 }
 
 fn feed(env: Env, args: &[Value]) -> Result<Value> {

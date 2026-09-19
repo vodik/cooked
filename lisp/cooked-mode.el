@@ -1297,13 +1297,17 @@ assumption on startup is that it has focus, and telling it so again is noise.")
          t)))
 
 (defun cooked--report-focus ()
-  "Tell the child about a focus change, when it asked to be told."
+  "Tell the child about a focus change, when it asked to be told.
+
+Whether it asked is the core's to answer, together with the notification it
+answers with: this runs from a global hook, arbitrarily far from anything the
+child wrote, so a mode read here and acted on a moment later could send `ESC [
+I' to a program that had stopped reading them as news."
   (let ((focused (cooked--focused-p)))
     (unless (eq focused cooked--focused)
       (setq cooked--focused focused)
       (when-let* ((session (cooked--live-session)))
-        (when (cooked--focus-events-p session)
-          (cooked--reply-if-live (cooked--csi (if focused "I" "O"))))))))
+        (cooked--reply-focus session focused)))))
 
 (defun cooked--frame-focus-changed (&rest _)
   "Report focus for every live session, from `after-focus-change-function'."

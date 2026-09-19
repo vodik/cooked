@@ -161,6 +161,20 @@ fn focus_reporting_is_off_until_asked_for() {
     assert!(!t.focus_events());
 }
 
+#[test]
+fn a_focus_notification_is_owed_only_to_a_child_that_subscribed() {
+    let mut t = term(2, 8, b"");
+    // Nothing at all before 1004, rather than the sequence with nobody to read it:
+    // a program that never asked reads `ESC [ I' as an escape sequence.
+    assert_eq!(t.focus_report(true), None);
+    assert_eq!(t.focus_report(false), None);
+    t.feed(b"\x1b[?1004h");
+    assert_eq!(t.focus_report(true), Some(&b"\x1b[I"[..]));
+    assert_eq!(t.focus_report(false), Some(&b"\x1b[O"[..]));
+    t.feed(b"\x1b[?1004l");
+    assert_eq!(t.focus_report(true), None);
+}
+
 /// DECSCNM reaches Emacs as a level on every drain, not as an event: it is how the
 /// screen is drawn, so the drain after the set says `true' and the one after the reset
 /// says `false', with no row damaged in between.
