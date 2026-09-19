@@ -285,20 +285,88 @@ impl std::fmt::Debug for Clock {
 struct Notifier {
     /// The write end of Emacs' wake pipe, `None` once teardown has closed it.
     wake: Mutex<Option<OwnedFd>>,
-    /// Set when output or a mode change has not yet been announced over the wake pipe;
-    /// cleared once a flush actually writes. Distinct from `notified`: this tracks whether
-    /// there is anything new to say, that one tracks whether we have already said it and
-    /// Emacs has not yet drained.
-    dirty: AtomicBool,
-    /// Set when a wakeup byte is in flight; cleared by the drain, so a burst of output
-    /// costs one write and one Lisp callback rather than thousands.
-    notified: AtomicBool,
     state: Mutex<NotifyState>,
     /// See [`Clock`].
     clock: Clock,
 }
 
+/// Whether there is something to tell Emacs, and whether it has already been told; see
+/// [`NotifyState::pending`].
+///
+/// Two `AtomicBool`s before this, a `dirty` and a `notified`, which no reader took
+/// together: the argument that a `dirty` cleared by a racing [`Notifier::flush`] is
+/// always followed by that flush's own [`Notifier::notify`] was made of the order of
+/// statements across two atomics and a mutex, with `SeqCst` everywhere standing in for a
+/// proof. The four states they spelled between them are these, and every path that
+/// touched either already took the mutex the state lives under, so the atomics were
+/// buying a lock-free fast path in `flush` and `poll_wait` that runs once per poll wake
+/// and not once per byte.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Pending {
+    /// Emacs knows everything there is to know.
+    Clean,
+    /// Output or a mode change has not been announced over the wake pipe yet.
+    Dirty,
+    /// A wake byte is in flight and nothing has happened since it went out.
+    Notified,
+    /// A wake byte is in flight and something has happened since; the drain it causes
+    /// takes that too, and what is left is a `Dirty` for the flush after it.
+    NotifiedDirty,
+}
+
+impl Pending {
+    /// Whether a wake byte is in flight, which only the drain clears.
+    fn notified(self) -> bool {
+        matches!(self, Self::Notified | Self::NotifiedDirty)
+    }
+
+    /// Whether something has happened that no wake byte has carried yet.
+    fn dirty(self) -> bool {
+        matches!(self, Self::Dirty | Self::NotifiedDirty)
+    }
+
+    /// Something happened Emacs would want to see, reporting whether something already
+    /// had: [`Notifier::fed`] tells a frame's first change from its later ones by it.
+    fn changed(&mut self) -> bool {
+        let already = self.dirty();
+        *self = match self {
+            Self::Clean | Self::Dirty => Self::Dirty,
+            Self::Notified | Self::NotifiedDirty => Self::NotifiedDirty,
+        };
+        already
+    }
+
+    /// The changes are on their way out in the byte the caller is about to write.
+    fn sending(&mut self) {
+        *self = match self {
+            Self::Clean | Self::Dirty => Self::Clean,
+            Self::Notified | Self::NotifiedDirty => Self::Notified,
+        };
+    }
+
+    /// A wake byte is going out, reporting whether one already was -- in which case the
+    /// caller writes nothing, since one byte is all Emacs needs to come and drain.
+    fn woken(&mut self) -> bool {
+        let already = self.notified();
+        *self = match self {
+            Self::Clean | Self::Notified => Self::Notified,
+            Self::Dirty | Self::NotifiedDirty => Self::NotifiedDirty,
+        };
+        already
+    }
+
+    /// Emacs has taken the delta, so the byte we sent has done its work.
+    fn drained(&mut self) {
+        *self = match self {
+            Self::Clean | Self::Notified => Self::Clean,
+            Self::Dirty | Self::NotifiedDirty => Self::Dirty,
+        };
+    }
+}
+
 struct NotifyState {
+    /// What Emacs has been told and what has happened since; see [`Pending`].
+    pending: Pending,
     /// Floor on how often the wake pipe is written to, however fast output arrives.
     /// Without one, a spinner rewriting its line drives one full Emacs redisplay per write
     /// and shows up as flicker. It says how close together two wakeups may be and nothing
@@ -476,9 +544,8 @@ impl Notifier {
     fn new(wake: OwnedFd, options: &Options) -> Self {
         Self {
             wake: Mutex::new(Some(wake)),
-            dirty: AtomicBool::new(false),
-            notified: AtomicBool::new(false),
             state: Mutex::new(NotifyState {
+                pending: Pending::Clean,
                 min_interval: options.min_redisplay_interval,
                 frame_ceiling: options.frame_ceiling,
                 quiescence: options.quiescence,
@@ -512,9 +579,13 @@ impl Notifier {
     /// Returns whether Emacs is still listening: a failed write means it closed its read
     /// end, and the caller's business is to shut down rather than to retry.
     fn notify(&self) -> bool {
-        if self.notified.swap(true, Ordering::SeqCst) {
+        if self.state.held().pending.woken() {
             return true;
         }
+        // With the state lock let go: nothing else takes the wake lock and then the state
+        // lock, so the order is free, and a write to a pipe has no business happening
+        // under the lock every deadline is read from. The byte cannot block anyway --
+        // `woken` above is what keeps more than one of them from being in flight.
         match &*self.wake.held() {
             Some(wake) => nix::unistd::write(wake.as_fd(), b"\x01").is_ok(),
             None => false,
@@ -529,8 +600,8 @@ impl Notifier {
     /// and `getpass` turning echo off just after printing its prompt must not wait on the
     /// rest of an update.
     fn announce(&self) -> bool {
-        self.dirty.store(true, Ordering::SeqCst);
         let mut state = self.state.held();
+        state.pending.changed();
         state.last_read = None;
         state.ceiling_at = None;
         drop(state);
@@ -583,7 +654,7 @@ impl Notifier {
             };
         }
         if drawable {
-            if self.dirty.swap(true, Ordering::SeqCst) {
+            if state.pending.changed() {
                 // A second change, or a later one: bring the deadline in to the pace a busy
                 // client is drawn at, never push it out. `None` here is a frame whose
                 // deadlines [`Self::announce`] cleared without the flush behind it getting
@@ -602,11 +673,11 @@ impl Notifier {
     /// `min_interval` has elapsed since the last send or the frame carries a keystroke's
     /// echo.
     fn flush(&self) -> bool {
-        if self.notified.load(Ordering::SeqCst) || !self.dirty.load(Ordering::SeqCst) {
+        let mut state = self.state.held();
+        if state.pending.notified() || !state.pending.dirty() {
             return true;
         }
         let now = self.clock.now();
-        let mut state = self.state.held();
         // Asked before `dirty` is cleared, deliberately: leaving it set is what hands a
         // held frame to the retry machinery, so it is drawn the moment the last gate opens
         // rather than waiting on the child's next write.
@@ -619,8 +690,8 @@ impl Notifier {
             Echo::Seen(pending) => pending.map_or(Echo::Idle, Echo::Expected),
             unsent => unsent,
         };
+        state.pending.sending();
         drop(state);
-        self.dirty.store(false, Ordering::SeqCst);
         self.notify()
     }
 
@@ -633,7 +704,7 @@ impl Notifier {
     /// backpressure window before the apply, and `min_interval` would always have elapsed
     /// by the time it was consulted.
     fn acknowledge(&self) {
-        self.notified.store(false, Ordering::SeqCst);
+        self.state.held().pending.drained();
     }
 
     /// Emacs has applied the delta, so the next change is worth another byte.
@@ -647,7 +718,9 @@ impl Notifier {
     /// to interrupt the poll so the timeout is computed again.
     fn rearm(&self) -> bool {
         self.flush();
-        self.dirty.load(Ordering::SeqCst) && !self.notified.load(Ordering::SeqCst)
+        // Something to say and no byte in flight to say it with, which is one state rather
+        // than two readings that could fall either side of a flush on another thread.
+        self.state.held().pending == Pending::Dirty
     }
 
     /// Copy the emulator's synchronized-output deadline where the notify path can see it.
@@ -669,7 +742,7 @@ impl Notifier {
         match deadline {
             None => state.sync_until = None,
             Some(deadline) => {
-                let held = self.dirty.load(Ordering::SeqCst) && state.sync_until.is_some();
+                let held = state.pending.dirty() && state.sync_until.is_some();
                 if !held {
                     state.sync_until = Some(deadline);
                 }
@@ -691,11 +764,12 @@ impl Notifier {
     /// stutter at the end of a wheel scroll in a full-screen program. Sleeping to the
     /// instant [`NotifyState::decide`] names avoids that and retires each hold on time.
     fn poll_wait(&self, base: std::time::Duration) -> std::time::Duration {
-        if self.notified.load(Ordering::SeqCst) || !self.dirty.load(Ordering::SeqCst) {
+        let state = self.state.held();
+        if state.pending.notified() || !state.pending.dirty() {
             return base;
         }
         let now = self.clock.now();
-        match self.state.held().decide(now) {
+        match state.decide(now) {
             Hold::Until(at) => at.saturating_duration_since(now),
             // Nothing holds it, so the next [`Self::flush`] sends it and there is nothing
             // to wait for here.
