@@ -842,17 +842,19 @@ impl Term {
         }
     }
 
-    /// A terminal whose rendition table looks for ids to free once LIMIT renditions are
-    /// live, rather than at the four thousand an ordinary one holds.
+    /// A terminal whose rendition and hyperlink tables look for ids to free once STYLES
+    /// renditions or LINKS destinations are held, rather than at the four thousand an
+    /// ordinary one holds of each.
     ///
     /// For a property test to reach id reuse at all: on an 8x12 grid a script would need
     /// thousands of distinct pens before a collection ran, and with a limit of 4 one runs
-    /// every few `SGR`s, so an id a collection wrongly freed is soon handed to another
-    /// rendition while something still names it.
+    /// every few `SGR`s or `OSC 8`s, so an id a collection wrongly freed is soon handed to
+    /// another rendition or destination while something still names it.
     #[doc(hidden)]
-    pub fn with_style_limit(rows: usize, cols: usize, limit: usize) -> Self {
+    pub fn with_id_limits(rows: usize, cols: usize, styles: usize, links: usize) -> Self {
         let mut term = Self::new(rows, cols);
-        term.state.styles = StyleStore::with_limit(limit);
+        term.state.styles = StyleStore::with_limit(styles);
+        term.state.links = LinkStore::with_limit(links);
         term
     }
 

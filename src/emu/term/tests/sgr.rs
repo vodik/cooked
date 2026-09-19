@@ -1,6 +1,7 @@
 //! Renditions: SGR, underline colours, background colour erase and XTPUSHSGR.
 
 use super::*;
+use crate::emu::link::MAX_TRACKED_LINKS;
 
 #[test]
 fn sgr_sets_colors_and_attributes() {
@@ -410,7 +411,7 @@ fn a_rendition_per_character_stays_bounded_and_every_run_keeps_its_colour() {
 /// announced, and the next rendition to be given one would have recoloured it.
 #[test]
 fn a_pen_taken_as_the_table_fills_keeps_its_text_rendition() {
-    let mut t = Term::with_style_limit(1, 20, 8);
+    let mut t = Term::with_id_limits(1, 20, 8, MAX_TRACKED_LINKS);
     t.feed(b"\x1b[31mx\x1b[32mx\x1b[33mx\x1b[34mx\x1b[35mx\x1b[36mx\x1b[0m");
     t.drain();
     t.feed(b"\x1b[H\x1b[2K\x1b[1;41my");

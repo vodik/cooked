@@ -898,17 +898,20 @@ impl Runs {
         Some(ch)
     }
 
-    /// Each run's rendition and decoration, to be rewritten in place.
+    /// Each run's rendition, link and decoration, to be rewritten in place.
     ///
     /// Not its text or its columns: those the builders own, and a consumer that needs
-    /// other text builds other runs. `delta_replay` renumbers a delta's style and image
-    /// ids into the ids the session it compares against handed out, which is what this is
-    /// for.
+    /// other text builds other runs. `delta_replay` renumbers a delta's style, link and
+    /// image ids into the ids the session it compares against handed out, which is what
+    /// this is for -- all three are recycled, so two terminals fed the same bytes need
+    /// not agree on any of them.
     #[doc(hidden)]
-    pub fn ids_mut(&mut self) -> impl Iterator<Item = (&mut StyleId, Option<&mut Deco>)> {
+    pub fn ids_mut(
+        &mut self,
+    ) -> impl Iterator<Item = (&mut StyleId, &mut Option<LinkId>, Option<&mut Deco>)> {
         self.runs
             .iter_mut()
-            .map(|run| (&mut run.style, run.deco.as_mut()))
+            .map(|run| (&mut run.style, &mut run.link, run.deco.as_mut()))
     }
 
     /// Where run INDEX's text ends: where the next begins, or the end of the text.

@@ -36,7 +36,7 @@
 //! class of miss a text-only oracle waves through.
 
 use cooked::emu::{
-    Chars, Cols, Deco, Delta, Direction, Edit, ImageId, Levels, Run, Runs, Scrolled, Shift,
+    Chars, Cols, Deco, Delta, Direction, Edit, ImageId, Levels, LinkId, Run, Runs, Scrolled, Shift,
     StyleId, Term,
 };
 use proptest::prelude::*;
@@ -61,6 +61,12 @@ const MAX_COLS: usize = 12;
 /// the copy of what Emacs shows, or the scrollback waiting to be drained from that list
 /// fails a property within the default case count.
 const STYLE_LIMIT: usize = 4;
+
+/// How many hyperlink destinations a replayed terminal holds before it looks for ids to
+/// free, for the reason [`STYLE_LIMIT`] is small: link ids are recycled too, and a
+/// collection that freed one a cell still named would show up as a run pointing at
+/// another destination.
+const LINK_LIMIT: usize = 4;
 
 // ---------------------------------------------------------------------------
 // The script
@@ -262,9 +268,15 @@ fn control() -> impl Strategy<Value = Vec<u8>> {
             "\r", "\n", "\r\n", "\x08", "\t", "\x1bM", "\x1bD", "\x1bE"
         ])
         .prop_map(str::to_string),
-        // A hyperlink opened and closed around nothing: the id is a run boundary the
-        // style cannot express, so an empty one still has to survive the round trip.
-        (0usize..4).prop_map(|n| format!("\x1b]8;;https://example.invalid/{n}\x07")),
+        // A hyperlink opened and closed: the id is a run boundary the style cannot
+        // express, so an empty one still has to survive the round trip, and the text a
+        // later step writes lands inside whichever link is open.
+        //
+        // More destinations than [`LINK_LIMIT`] by a wide margin, because the id is
+        // recycled: a script that names a dozen of them over a grid that holds a handful
+        // of cells frees and re-announces ids continually, which is the only way a
+        // collection that freed one a cell still named would show up here.
+        (0usize..12).prop_map(|n| format!("\x1b]8;;https://example.invalid/{n}\x07")),
         Just("\x1b]8;;\x07".to_string()),
         // Character sets: DEC special graphics designated into G0, G1 and G2, the shifts
         // that invoke them, and ASCII back. Under it `q` prints as a box glyph, so a byte
@@ -579,12 +591,23 @@ static RENDITIONS: LazyLock<Mutex<HashMap<String, u32>>> =
 static PICTURES: LazyLock<Mutex<HashMap<String, u32>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 
+/// Every hyperlink destination any replay has seen, numbered as [`RENDITIONS`] numbers
+/// renditions.
+///
+/// Link ids need this for the reason renditions do and then some: a link id is freed as
+/// soon as no cell of that terminal's own grids names it -- `LinkStore::collect' -- and
+/// handed to the next destination, so two terminals whose screens differ disagree about
+/// which id means what within a few links of each other.
+static DESTINATIONS: LazyLock<Mutex<HashMap<String, u32>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
 /// One terminal's ids, as its drains have announced them in `Delta::styles` and
 /// `Delta::images`.
 #[derive(Default)]
 struct Announced {
     styles: HashMap<StyleId, String>,
     images: HashMap<ImageId, String>,
+    links: HashMap<LinkId, String>,
 }
 
 impl Announced {
@@ -593,6 +616,9 @@ impl Announced {
     fn canonical(&mut self, mut delta: Delta) -> Delta {
         for (id, style) in &delta.styles {
             self.styles.insert(*id, format!("{style:?}"));
+        }
+        for (id, uri) in &delta.links {
+            self.links.insert(*id, uri.clone());
         }
         for image in &delta.images {
             let picture = format!("{:?} {:?} {:?}", image.format, image.px, image.bytes);
@@ -603,8 +629,9 @@ impl Announced {
         });
         let scrolled = delta.scrolled.iter_mut().map(|line| &mut line.runs);
         for runs in rows.chain(scrolled) {
-            for (style, deco) in runs.ids_mut() {
+            for (style, link, deco) in runs.ids_mut() {
                 *style = self.renumber(*style);
+                *link = link.map(|id| self.relabel(id));
                 if let Some(Deco::Images(places)) = deco {
                     for place in places {
                         place.id = self.rename(place.id);
@@ -626,6 +653,19 @@ impl Announced {
         let mut renditions = RENDITIONS.lock().unwrap();
         let next = renditions.len() as u32;
         StyleId::from_raw(*renditions.entry(key.to_owned()).or_insert(next))
+    }
+
+    /// The id every replay gives the destination this terminal calls ID, which also
+    /// checks that a drain announced it before any run named it -- the contract that
+    /// makes recycling safe, since Emacs resolves an id as it renders.
+    fn relabel(&self, id: LinkId) -> LinkId {
+        let key = self
+            .links
+            .get(&id)
+            .unwrap_or_else(|| panic!("a run names {id:?}, which no drain announced"));
+        let mut destinations = DESTINATIONS.lock().unwrap();
+        let next = destinations.len() as u32;
+        LinkId::from_index(*destinations.entry(key.clone()).or_insert(next))
     }
 
     /// The id every replay gives the picture this terminal calls ID, which also checks
@@ -695,7 +735,7 @@ impl Replay {
     /// are read by a first drain, as Emacs reads them when it starts the session.
     fn new(rows: usize, cols: usize) -> Self {
         let mut replay = Self {
-            term: Term::with_style_limit(rows, cols, STYLE_LIMIT),
+            term: Term::with_id_limits(rows, cols, STYLE_LIMIT, LINK_LIMIT),
             reference: Term::new(rows, cols),
             rows,
             cols,

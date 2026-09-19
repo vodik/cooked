@@ -1,6 +1,7 @@
 //! OSC 8 hyperlinks, and the OSC sequences handed to Lisp verbatim.
 
 use super::*;
+use crate::emu::link::MAX_TRACKED_LINKS;
 
 // OSC 8 hyperlinks.
 //
@@ -90,6 +91,52 @@ fn a_uri_crosses_the_boundary_once() {
     assert!(t.drain().links.is_empty());
     t.feed(b"\x1b]8;;https://example.org/\x1b\\three\x1b]8;;\x1b\\");
     assert_eq!(t.drain().links.len(), 1, "a new destination does");
+}
+
+/// Ids are recycled, so a session's distinct destinations do not cost ids forever.
+///
+/// The child here names one destination after another and keeps none of them: each
+/// link is written over the one before it, so by the time the store fills, nothing on
+/// either grid, in the front buffer or in the undrained scrollback names any of the
+/// earlier ids. `State::collect_links` frees them and `LinkStore` hands them back out,
+/// which is what keeps the id small enough to live in a packed cell.
+#[test]
+fn a_destination_nothing_names_any_more_gives_its_id_back() {
+    let mut t = Term::new(4, 40);
+    let mut announced: Vec<(u32, String)> = Vec::new();
+    for i in 0..MAX_TRACKED_LINKS + 64 {
+        // Written at column 0 of the same row every time, so the previous link's only
+        // cell is overwritten, and closed so the pen does not hold it open either.
+        t.feed(format!("\r\x1b]8;;https://example.invalid/{i}\x1b\\x\x1b]8;;\x1b\\").as_bytes());
+        let delta = t.drain();
+        announced.extend(
+            delta
+                .links
+                .iter()
+                .map(|(id, uri)| (id.index(), uri.clone())),
+        );
+    }
+    let highest = announced.iter().map(|(index, _)| *index).max().unwrap_or(0);
+    assert!(
+        (highest as usize) < MAX_TRACKED_LINKS,
+        "ids must be reused rather than counted off: highest was {highest}"
+    );
+    // Reuse is only sound because it is announced: the same id has to reach Lisp again
+    // with its new destination before any row naming it does. So every announcement
+    // after the first `highest + 1` of them is a redefinition, and there are many.
+    assert!(
+        announced.len() > MAX_TRACKED_LINKS,
+        "every destination is announced once, reused id or not"
+    );
+    let mut seen: std::collections::HashMap<u32, &str> = std::collections::HashMap::new();
+    let redefined = announced
+        .iter()
+        .filter(|(index, uri)| seen.insert(*index, uri).is_some_and(|was| was != uri))
+        .count();
+    assert!(
+        redefined > 0,
+        "an id that changes meaning reaches Lisp again"
+    );
 }
 
 #[test]

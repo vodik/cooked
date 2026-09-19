@@ -43,6 +43,40 @@ fn a_whole_screen_cleared_and_redrawn_sends_only_what_changed() {
     assert_eq!(sent(&mut t), vec![1]);
 }
 
+/// A row whose destination changed is sent, even when a reused id makes its cells match.
+///
+/// The hazard recycling introduces, and the reason `State::collect_links` marks the front
+/// buffer. The front holds *copies of cells*, and a cell names its link by id: if an id
+/// were freed while only the front still named it and handed to the next destination,
+/// this row's cells would compare equal to the copy Emacs was sent and the row would be
+/// left out of the drain -- leaving Emacs showing the first destination under text the
+/// child has relinked to the second. The link limit of one makes every new destination
+/// collect, which on a real store takes four thousand of them.
+#[test]
+fn a_row_relinked_under_a_recycled_id_is_still_sent() {
+    let mut t = Term::with_id_limits(1, 4, 4096, 1);
+    t.feed(b"\x1b]8;;https://first.example/\x1b\\x\x1b]8;;\x1b\\");
+    let first = t.drain();
+    assert_eq!(first.links.len(), 1, "the destination crossed once");
+    // Overwritten, so the grid no longer names the first destination and only the front
+    // buffer's copy of the row does; then written back under a second destination.
+    t.feed(b"\r ");
+    t.feed(b"\r\x1b]8;;https://second.example/\x1b\\x\x1b]8;;\x1b\\");
+    let second = t.drain();
+    assert_eq!(
+        second.rows.iter().map(|r| r.index).collect::<Vec<_>>(),
+        vec![0],
+        "the row's destination changed, so Emacs has to be told"
+    );
+    let (id, uri) = second.links.first().expect("the new destination crossed");
+    assert_eq!(uri, "https://second.example/");
+    assert_eq!(
+        second.rows[0].runs.run(0).link,
+        Some(*id),
+        "and the row names the id this drain announced"
+    );
+}
+
 #[test]
 fn a_row_emacs_edited_is_sent_even_when_its_cells_match() {
     // The width guard trimmed row 0 after rendering it, so the buffer no longer holds

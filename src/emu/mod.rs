@@ -134,7 +134,6 @@ pub(crate) mod utf8;
 
 pub(crate) use cell::{Color, MarkId, Style};
 pub(crate) use image::{CellMetrics, ImageData, ImageFormat, ShownFormats};
-pub(crate) use link::LinkId;
 pub(crate) use term::{
     Anchor, Assumed, Button, ColorScheme, CursorShape, Event, Key, KeyEncoding, Mark, Modifiers,
     NamedKey, Palette, Rgb, StackOp, Terminator, Unit, bracket_paste, osc_reply,
@@ -157,6 +156,9 @@ pub(crate) use term::{
 // nothing here is more exposed than `cooked--apply' already assumes.
 pub use cell::{Deco, Run, RunRef, Runs};
 pub use image::ImageId;
+/// Exported for the same reason [`ImageId`] is: `delta_replay` renumbers the ids a
+/// drain names, since a terminal recycles them and two fed the same bytes need not agree.
+pub use link::LinkId;
 pub use screen::{Direction, Shift};
 pub use style::StyleId;
 pub use term::{

@@ -112,6 +112,10 @@ pub(crate) struct Ledger<K> {
     oldest: Option<K>,
     /// The most-recently-used end, which is where a fresh or re-used id goes.
     newest: Option<K>,
+    /// Ids whose content is gone and which nothing can still be naming, most recently
+    /// freed last. Only [`Ledger::free`] puts one here, which is what keeps an id from
+    /// being handed out twice; see it for why eviction does not.
+    free: Vec<K>,
     next: u32,
 }
 
@@ -122,6 +126,7 @@ impl<K> Default for Ledger<K> {
             entries: HashMap::new(),
             oldest: None,
             newest: None,
+            free: Vec::new(),
             next: 0,
         }
     }
@@ -146,10 +151,20 @@ impl<K: Id> Ledger<K> {
         Some(id)
     }
 
-    /// Hand out the next id, file it under `hash`, and make it most-recently-used.
+    /// Hand out an id, file it under `hash`, and make it most-recently-used.
+    ///
+    /// A freed id before a fresh one, so that a store whose owner collects (see
+    /// [`Ledger::free`]) hands out no more distinct ids than it has ever had live at
+    /// once, rather than one per distinct payload the session sees.
     pub(crate) fn insert(&mut self, hash: u64) -> K {
-        let id = K::from_index(self.next);
-        self.next = self.next.wrapping_add(1);
+        let id = match self.free.pop() {
+            Some(id) => id,
+            None => {
+                let id = K::from_index(self.next);
+                self.next = self.next.wrapping_add(1);
+                id
+            }
+        };
         self.by_hash.entry(hash).or_default().push(id);
         self.link_newest(id, hash);
         id
@@ -185,10 +200,24 @@ impl<K: Id> Ledger<K> {
         true
     }
 
-    /// Every id, least-recently-used first, without disturbing the order.
+    /// Take a named id out of the order and its bucket, and make it available again.
     ///
-    /// Only the tests walk the order.
-    #[cfg(test)]
+    /// The difference from [`Ledger::remove`] is the whole of the recycling contract, so
+    /// the two are separate calls rather than a flag: `remove` is for an id whose content
+    /// is gone while something may still be *naming* it -- an evicted URI, a picture Emacs
+    /// dropped -- and such an id must never be handed out again, because whatever still
+    /// names it would silently acquire the next payload. This is for an id a caller has
+    /// just proved nothing names, by marking everything that could; see
+    /// `LinkStore::collect`.
+    pub(crate) fn free(&mut self, id: K) -> bool {
+        let freed = self.remove(id);
+        if freed {
+            self.free.push(id);
+        }
+        freed
+    }
+
+    /// Every id, least-recently-used first, without disturbing the order.
     pub(crate) fn lru(&self) -> impl Iterator<Item = K> + '_ {
         std::iter::successors(self.oldest, |&id| {
             self.entries.get(&id).and_then(|entry| entry.newer)

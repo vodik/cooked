@@ -13,12 +13,19 @@
 //! thousand-line run costs one. That is also what lets the `id=` parameter be ignored
 //! outright — see [`LinkStore::intern`].
 //!
-//! **Lifetime is Emacs'.** Scrollback lives in the Emacs buffer, so a row carrying a
-//! link id can leave the emulator and go on being displayed for the rest of the
-//! session. Rust cannot know when the last reference dies, and does not have to: the
-//! caps below are a bound on this store, not a release protocol. An id whose URI has
-//! been evicted renders as ordinary text with no destination, which is the same
-//! degradation an evicted image gets.
+//! **An id names a transfer, not a destination.** `cooked--render-link-spans' resolves
+//! the id as the text is inserted and puts the URI itself on it, so scrollback in the
+//! Emacs buffer holds destinations and nothing outside a drain ever asks what an id
+//! means. That is what lets an id be freed once no cell names it and handed to the next
+//! URI, the way [`StyleStore::collect`](super::style::StyleStore) frees a rendition:
+//! see [`LinkStore::collect`], which the caller drives because only it knows what is
+//! live. A reused id is announced again before any row naming it, so Emacs' table is
+//! bounded by what the grids can hold rather than by what the session has ever seen.
+//!
+//! A store nobody collects -- the grid-less [`Filter`](super::stream::Filter) -- falls
+//! back on the caps below, which drop whole entries least-recently-used first without
+//! ever reusing the id. An id whose URI has been dropped renders as ordinary text with
+//! no destination, the same degradation an evicted image gets.
 
 use std::collections::HashMap;
 
@@ -59,15 +66,83 @@ pub(crate) const MAX_RETAINED_URI_BYTES: usize = 4 << 20;
 pub(crate) const MAX_URI_LEN: usize = 4096;
 
 /// The hyperlink destinations this terminal knows about.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub(crate) struct LinkStore {
     /// Ids, hash buckets and LRU order; see [`Ledger`].
     ledger: Ledger<LinkId>,
     uris: HashMap<LinkId, String>,
     bytes: usize,
+    /// How many destinations are held before the caller is asked to collect, and past
+    /// which [`LinkStore::evict`] drops entries outright. Starts at
+    /// [`MAX_TRACKED_LINKS`] and grows when a collection frees too little, exactly as
+    /// `StyleStore::limit` does, so a screen genuinely showing more links than the cap
+    /// does not collect on every one of them.
+    limit: usize,
+}
+
+impl Default for LinkStore {
+    fn default() -> Self {
+        Self {
+            ledger: Ledger::default(),
+            uris: HashMap::new(),
+            bytes: 0,
+            limit: MAX_TRACKED_LINKS,
+        }
+    }
 }
 
 impl LinkStore {
+    /// A store that looks for ids to free once LIMIT destinations are held, rather than
+    /// at the four thousand an ordinary one holds.
+    ///
+    /// For a property test to reach id reuse at all, which is where the contract lives:
+    /// with a limit of four a collection runs every few `OSC 8`s, so an id a collection
+    /// wrongly freed is soon naming another destination while a cell still holds it.
+    pub(crate) fn with_limit(limit: usize) -> Self {
+        Self {
+            limit,
+            ..Self::default()
+        }
+    }
+
+    /// Whether giving another destination an id should wait for a collection first.
+    ///
+    /// Asked by the caller, because collecting needs the grids and this does not have
+    /// them; `State::hyperlink` is where the two meet.
+    pub(crate) fn is_full(&self) -> bool {
+        self.ledger.len() >= self.limit
+    }
+
+    /// Free every id MARK does not report, so it can be handed to another destination.
+    ///
+    /// MARK is handed a function to call with each id still referenced and must report
+    /// every place one can be held until the next collection. `State::collect_links`
+    /// is that list; an id it missed would be handed out again while a cell still named
+    /// it, and that cell would render with the new destination.
+    ///
+    /// The same shape as [`StyleStore::collect`](super::style::StyleStore::collect) and
+    /// for the same reasons, with one difference: a rendition is a *value* the marked
+    /// tables hold, while a URI is text Emacs has already been given, so nothing has to
+    /// be paid out before an id changes meaning. `cooked--install-links' takes the
+    /// redefinition and the text keeps the destination it was rendered with.
+    pub(crate) fn collect(&mut self, mark: impl FnOnce(&mut dyn FnMut(LinkId))) {
+        let mut live = std::collections::HashSet::with_capacity(self.ledger.len());
+        mark(&mut |id: LinkId| {
+            live.insert(id);
+        });
+        let dead: Vec<LinkId> = self.ledger.lru().filter(|id| !live.contains(id)).collect();
+        for id in dead {
+            self.ledger.free(id);
+            if let Some(uri) = self.uris.remove(&id) {
+                self.bytes -= uri.len();
+            }
+        }
+        // Half full after a collection is the point to grow rather than collect again on
+        // the next few links, which would make a screenful of distinct destinations
+        // quadratic. `StyleStore::collect` grows for the same reason.
+        self.limit = self.limit.max(self.ledger.len() * 2);
+    }
+
     /// Take URI as a destination, returning its id and whether Lisp has yet to see it.
     ///
     /// The same URI always comes back with the same id and `false`, which is what makes
@@ -118,7 +193,7 @@ impl LinkStore {
     /// split: an image keeps geometry after its payload goes, and a hyperlink is
     /// nothing but its payload.
     fn evict(&mut self) {
-        while self.ledger.len() > MAX_TRACKED_LINKS || self.bytes > MAX_RETAINED_URI_BYTES {
+        while self.ledger.len() > self.limit || self.bytes > MAX_RETAINED_URI_BYTES {
             let Some(id) = self.ledger.evict_oldest() else {
                 break;
             };
@@ -161,6 +236,49 @@ mod tests {
         assert!(fresh);
         assert_ne!(again, first);
         assert_eq!(store.get(again), Some("https://example.com/0"));
+    }
+
+    #[test]
+    fn a_collection_frees_only_what_nothing_marks_and_the_id_is_handed_out_again() {
+        let mut store = LinkStore::default();
+        let kept = store.intern("https://kept.example/").0;
+        let dropped = store.intern("https://dropped.example/").0;
+        store.collect(|mark| mark(kept));
+        assert_eq!(
+            store.get(kept),
+            Some("https://kept.example/"),
+            "still named"
+        );
+        assert_eq!(store.get(dropped), None, "nothing named it");
+
+        // The freed id comes back, and comes back announced: `fresh` is what puts it in
+        // the drain's `:links', so Emacs replaces what the id meant before rendering a
+        // row that names it.
+        let (reused, fresh) = store.intern("https://third.example/");
+        assert_eq!(reused, dropped, "the freed id is reused");
+        assert!(fresh);
+        assert_eq!(store.get(reused), Some("https://third.example/"));
+        assert_eq!(
+            store.intern("https://kept.example/"),
+            (kept, false),
+            "and the live entry is untouched by any of it"
+        );
+    }
+
+    /// The id space is what the packed cell rests on, so this pins the shape of the
+    /// bound: with a collector, distinct destinations cost ids only while they are live.
+    #[test]
+    fn churning_destinations_costs_no_ids_while_nothing_is_live() {
+        let mut store = LinkStore::default();
+        let mut highest = 0;
+        for i in 0..MAX_TRACKED_LINKS * 4 {
+            let id = store.intern(&format!("https://example.com/{i}")).0;
+            highest = highest.max(id.index());
+            // Nothing names the id once the next one is interned, which is what a cell
+            // being overwritten does to it.
+            store.collect(|_mark| {});
+        }
+        assert_eq!(highest, 0, "one id, handed back and out again");
     }
 
     #[test]

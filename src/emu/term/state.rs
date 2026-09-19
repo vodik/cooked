@@ -368,6 +368,59 @@ impl State {
         });
     }
 
+    /// Free the link ids nothing holds any more, so they can name other destinations.
+    ///
+    /// The mark list is [`Self::collect_styles`]' with one addition and one difference.
+    /// The addition is the pen's open link: a rendition the pen holds is re-resolved
+    /// from the `Style` it keeps, while an `OSC 8` link is *only* an id, so an open link
+    /// with nothing yet written under it has no other home. The difference is
+    /// `pending_links`, the ids announced but not yet handed over: freeing one would put
+    /// two definitions of the same id in a single drain, and while the second would win
+    /// harmlessly -- nothing names the first, or it would have been marked -- keeping
+    /// them live is one line and leaves nothing to reason about.
+    ///
+    /// Emacs' own text is not marked, and that is the point of the design rather than an
+    /// omission: `cooked--render-link-spans' resolves an id to its URI as the text is
+    /// inserted, so scrollback holds destinations and no id outlives the grids.
+    pub(super) fn collect_links(&mut self) {
+        let Self {
+            screens,
+            front,
+            pending_scrollback,
+            pending_links,
+            links,
+            pen,
+            ..
+        } = self;
+        links.collect(|mark| {
+            if let Some(id) = pen.link() {
+                mark(id);
+            }
+            for (id, _) in pending_links.iter() {
+                mark(*id);
+            }
+            for screen in screens.each() {
+                screen
+                    .all_cells()
+                    .iter()
+                    .filter_map(|c| c.link)
+                    .for_each(&mut *mark);
+            }
+            front
+                .all_cells()
+                .iter()
+                .filter_map(|c| c.link)
+                .for_each(&mut *mark);
+            for scrolled in pending_scrollback.iter() {
+                scrolled
+                    .runs
+                    .iter()
+                    .filter_map(|run| run.link)
+                    .for_each(&mut *mark);
+            }
+        });
+    }
+
     pub(super) fn resize(&mut self, rows: usize, cols: usize) {
         // Before the rewrap, so the rows it pushes off the top are archived with the flag
         // up. Every mark is reported, not only those a rewrap re-laid: a height-only change
