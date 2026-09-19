@@ -212,6 +212,25 @@ pub unsafe extern "C" fn emacs_module_init(runtime: *mut Runtime) -> std::ffi::c
         /// echoes STRING is drawn without waiting out `cooked-min-redisplay-interval'.
         "cooked--send" 2..=2 => send;
 
+        /// Report BUTTON at ROW/COL to SESSION's child, PRESSED or released.
+        ///
+        /// ROW and COL are cells counted from zero, as `cooked--mouse-cell' answers them;
+        /// every wire form counts from one and the core adds the bias. DX and DY, each
+        /// optional, are where in that cell the pointer actually is, in pixels, for a
+        /// child reporting them under DEC mode 1016; omitted or nil, the cell's top-left
+        /// pixel is reported, which is what a position standing in for the pointer's has
+        /// to say -- a wheel notch over the fringe, a release carried off the screen.
+        ///
+        /// Returns t if the child was told, and nil if it has stopped asking for the
+        /// mouse. Which spelling it gets -- X10, SGR or SGR in pixels -- and the cell
+        /// size the pixels are measured in are read here, under the terminal lock,
+        /// rather than from anything Lisp remembers: both are the child's to change
+        /// between one drain and the next, and a report spelled against the previous
+        /// answer is read by the child as a different event. Deciding *whether* a click
+        /// is the child's is still Lisp's, since that is a question about windows, the
+        /// region and where the pointer is.
+        "cooked--send-mouse-report" 5..=7 => send_mouse_report;
+
         /// Owe SESSION's child STRING, a reply, without waiting for it to be read.
         /// Queued behind earlier replies and written as far as the pty has room for now;
         /// the rest follows once the child reads. Never blocks and never signals: a child
@@ -661,27 +680,64 @@ fn input_kind(env: Env) -> Result<session::Input> {
     }
 }
 
-fn send(env: Env, args: &[Value]) -> Result<Value> {
-    let mut bytes = env.from_lisp::<Vec<u8>>(args[1])?;
+/// Write BYTES to SESSION's child as input the user produced, and zero them afterwards.
+///
+/// The body of `cooked--send', and of every entry point that composes the bytes here
+/// instead of taking them from Lisp: a mouse report, a paste. One function because the
+/// three owe the child exactly the same things -- the pace hint, the wait a stopped job
+/// makes them serve, and the zeroing -- and a second copy of that is a second place for a
+/// pasted password to be left behind in.
+fn write_input(env: Env, session: Value, bytes: &mut [u8]) -> Result<()> {
     // `should_quit` is asked while the write waits on a child that is not reading, so
     // `C-g` ends the wait. Emacs raises the quit itself once this returns; all that is
     // owed here is to return.
     let sent = input_kind(env).and_then(|input| {
-        handle(env, args[0]).map(|s| s.send(&bytes, input, &|| env.should_quit()))
+        handle(env, session).map(|s| s.send(bytes, input, &|| env.should_quit()))
     });
     // Zero unconditionally rather than only for secrets: at keystroke sizes it costs
     // nothing, and it means the password path needs no special case to be covered.
     // `write_volatile` because an ordinary write to a buffer about to be freed is
     // exactly the store a compiler is entitled to drop.
-    for b in &mut bytes {
+    for b in bytes.iter_mut() {
         unsafe { std::ptr::write_volatile(b, 0) };
     }
     std::sync::atomic::compiler_fence(std::sync::atomic::Ordering::SeqCst);
     match sent? {
-        Err(crate::error::Error::Interrupted) => {}
-        other => other.or_signal(env)?,
+        Err(crate::error::Error::Interrupted) => Ok(()),
+        other => other.or_signal(env),
     }
+}
+
+fn send(env: Env, args: &[Value]) -> Result<Value> {
+    let mut bytes = env.from_lisp::<Vec<u8>>(args[1])?;
+    write_input(env, args[0], &mut bytes)?;
     Ok(env.nil())
+}
+
+/// Spell one mouse report against the modes the child holds now; see
+/// `cooked--send-mouse-report'.
+fn send_mouse_report(env: Env, args: &[Value]) -> Result<Value> {
+    let button = env.from_lisp::<i64>(args[1])?.clamp(0, i64::from(u32::MAX)) as u32;
+    let cell = |i: usize| -> Result<u64> { Ok(env.from_lisp::<i64>(args[i])?.max(0) as u64) };
+    let (row, col) = (cell(2)?, cell(3)?);
+    let pressed = !env.is_nil(args[4]);
+    // Either half nil is the other half alone rather than no offset at all: the pair is
+    // how far into the cell the pointer is on each axis, and a caller that has one axis
+    // to report is reporting a pointer, not standing in for one.
+    let (dx, dy) = (env.opt::<i64>(args, 5)?, env.opt::<i64>(args, 6)?);
+    let offset = dx.or(dy).map(|_| (dx.unwrap_or(0), dy.unwrap_or(0)));
+    let session = handle(env, args[0])?;
+    // The lock is held for the spelling and released before the write, which can wait out
+    // a child that is not reading. What it has to cover is the two readings and the bytes
+    // built from them; the pty's own ordering is the writer's, not this lock's.
+    let Some(mut bytes) = session
+        .term()
+        .mouse_report(button, row, col, pressed, offset)
+    else {
+        return Ok(env.nil());
+    };
+    write_input(env, args[0], &mut bytes)?;
+    env.into_lisp(true)
 }
 
 fn reply(env: Env, args: &[Value]) -> Result<Value> {

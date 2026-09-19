@@ -68,22 +68,21 @@ Derived from the two tables above rather than written out again.  A notch is
 whatever `cooked--wheel-events' maps to, and the literal `(64 65 66 67)' this
 replaces was a second copy of that fact with nothing keeping it in step.")
 
-(defconst cooked--mouse-x10-offset 32
-  "What X10 adds to every field of a report, so no field can be a control byte.
-Coordinates are 1-based on top of it, which is where the 33s come from.")
-
 (defconst cooked--mouse-motion-bit 32
   "Bit set in a button number to say the report is motion rather than a press.
 
-The same value as `cooked--mouse-x10-offset' and emphatically not the same
-thing: this one is part of the button number, in SGR as much as in X10, while
-that one is how X10 spells a field.  Two 32s three lines apart, each meaning
-something the other does not, is what the names are for.")
+Part of the button number itself, in SGR as much as in X10, which is why it
+belongs here rather than with the spelling: the core is told which button, and
+\"the one being dragged, moving\" is a button number like any other.  X10's own
+bias is also 32 and is emphatically not this; it is the core's, and lives in
+src/emu/term/mouse.rs where nothing can mistake the two.")
 
 (defconst cooked--mouse-no-button 3
   "Button number for \"nothing held\".
-What a release reports in X10, which has no field to name the button being let
-go of, and what a 1003 child is told when the pointer moves with nothing down.")
+What a 1003 child is told when the pointer moves with nothing down.  X10 also
+reports it for every release, having no field to name the button being let go
+of, but that is the core's substitution rather than this one: see
+`cooked--send-mouse-report'.")
 
 (defconst cooked--mouse-events
   (append cooked--button-events cooked--wheel-events)
@@ -526,60 +525,20 @@ whole cells out into the column."
     (when-let* ((glyph (or glyph (cooked--mouse-glyph posn))))
       (cons (cddr glyph) (or (cdr (posn-object-x-y posn)) 0)))))
 
-(defun cooked--mouse-report (button row col pressed &optional offset)
-  "Encode a report for BUTTON at ROW/COL, PRESSED or not.
-
-SGR is preferred wherever the child asked for it, because X10 cannot count
-past column 223.
-
-Under DEC mode 1016 the coordinates are pixels: ROW and COL scaled by the cell
-size last reported to the child, plus OFFSET, the (DX . DY) returned by
-`cooked--mouse-offset'.  Counted from 1, as xterm counts them, so that
-pixel P lies in cell (P - 1) / WIDTH -- the size `CSI 16 t' answers with is
-what the child will divide by, so it is the size multiplied by here rather
-than a fresh measurement of the window that could disagree with it.  With no
-OFFSET, which is a report whose position stood in for the pointer's (a
-wheel notch over the fringe, a release carried off the screen), the cell's
-top-left pixel is sent.  DY is clamped into the row because a row holding a
-taller fallback glyph is drawn taller than the cell, and its excess must not
-read as the row below.  DX needs no clamp here, because `cooked--mouse-glyph'
-has already clamped it to the cells its character stands on and moved the whole
-cells into COL.
-
-On a terminal frame there is no cell size, and the report degrades to cells
-counted from 1: a unit of one pixel per cell is the only claim that is not
-invented.  DECRQM still answers that 1016 is set, because the core answers it
-and cannot know what kind of frame the buffer is shown on.  What a child does
-learn is that `CSI 16 t' reports no size, and a child cannot scale pixels
-without asking that first.  The size is the one `cooked--sync-size' measured
-in `cooked--layout-window', so a buffer shown on a graphical and a terminal
-frame at once reports in whichever unit that window's frame has."
-  (cond
-   ((cooked-mouse-state-pixels cooked--mouse-state)
-    (pcase-let* ((`(,width . ,height) cooked--last-cell)
-                 (measured (and (natnump width) (natnump height)
-                                (> width 0) (> height 0)))
-                 (`(,dx . ,dy) (or (and measured offset) '(0 . 0))))
-      (cooked--csi-private
-       "<" (if pressed "M" "m") button
-       (+ 1 (* col (if measured width 1)) (max 0 dx))
-       (+ 1 (* row (if measured height 1))
-          (if measured (min (max 0 dy) (1- height)) 0)))))
-   ((cooked-mouse-state-sgr cooked--mouse-state)
-    (cooked--csi-private "<" (if pressed "M" "m") button (1+ col) (1+ row)))
-   (t
-    (concat (cooked--csi "M")
-            (string (+ cooked--mouse-x10-offset
-                       (if pressed button cooked--mouse-no-button))
-                    (+ cooked--mouse-x10-offset 1 col)
-                    (+ cooked--mouse-x10-offset 1 row))))))
-
 (defun cooked--send-mouse (button row col pressed &optional offset keep-region)
   "Send one report for BUTTON at ROW/COL, PRESSED or not, and drop the region.
 
-OFFSET is where in the cell the pointer is, for a child reporting pixels; see
-`cooked--mouse-report'.  With KEEP-REGION, leave the region alone; only hover
-motion asks for that.
+OFFSET is where in the cell the pointer is, as the (DX . DY) returned by
+`cooked--mouse-offset', for a child reporting pixels.  With KEEP-REGION, leave
+the region alone; only hover motion asks for that.
+
+The report itself is spelled by the core, in `cooked--send-mouse-report':
+which of X10, SGR and SGR-in-pixels the child reads, and the cell size a pixel
+report is measured in, are both the child's to change at any moment, and
+`cooked--mouse-state' is only as fresh as the last drain.  Everything above
+here -- which cell the pointer is over, whether the gesture is one the child
+asked to hear about, what happens to the region -- is a question about Emacs
+and stays on this side.
 
 Deactivating the mark is the point of routing every report through here.  A
 click that the child answers is the child's click, and leaving a region behind
@@ -603,7 +562,8 @@ selection away before it could be copied."
   (unless keep-region
     (cooked--deactivate-mark))
   (setq cooked--mouse-last-cell (cons row col))
-  (cooked--send-to-child (cooked--mouse-report button row col pressed offset)))
+  (cooked--send-mouse-report (cooked--require-session) button row col pressed
+                             (car-safe offset) (cdr-safe offset)))
 
 (defvar mwheel-coalesce-scroll-events)
 (defvar last-event-device)

@@ -281,6 +281,26 @@ only `:sgr' is describing a child that asked for SGR and nothing else.  Where
 a test means \"and keep the mouse on\", it says `:enabled t' as well."
   (setq-local cooked--mouse-state (apply #'cooked--mouse-state-make keys)))
 
+(defmacro cooked-tests--recording-reports (var &rest body)
+  "Run BODY with mouse reports collected into VAR instead of sent, newest first.
+
+Each entry is the (BUTTON ROW COL PRESSED DX DY) intent `cooked--send-mouse'
+hands the core.  That intent is what these tests are about -- which button at
+which cell, and whether it is reported at all -- while the bytes those
+arguments turn into are the core's, spelled against modes only it holds and
+pinned by the encoder's own tests in src/emu/term/mouse.rs.
+
+The session is stood in for as well, since `cooked--send-mouse' asks for a live
+one before it reports: that lets a buffer with no child be asked what it would
+have told one, which is the whole point of the tests that use this."
+  (declare (indent 1) (debug (symbolp body)))
+  `(let ((,var nil))
+     (cl-letf (((symbol-function 'cooked--require-session)
+                (lambda () 'cooked-tests--stub-session))
+               ((symbol-function 'cooked--send-mouse-report)
+                (lambda (_session &rest args) (push args ,var) t)))
+       ,@body)))
+
 (defun cooked-tests--cell (&optional width height)
   "Give the current buffer a cell size of WIDTH by HEIGHT pixels, default 10x20.
 

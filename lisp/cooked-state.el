@@ -400,9 +400,8 @@ reports and the completion channel.  What actually differs between those sites
 is the parameters and the final byte, and that is all they say.
 
 FINAL is a string rather than a character because that is what it already is at
-both of the sites that have one to hand: `cooked--key-encodings' stores the
-final byte of a `csi' key as a string, and `cooked--mouse-report' chooses
-between \"M\" and \"m\" for a press and a release.
+the site that has one to hand: `cooked--key-encodings' stores the final byte of
+a `csi' key as a string.
 
 PARAMS are numbers, so `(cooked--csi \"~\" 5 2)' is `ESC [ 5 ; 2 ~', the
 modified spelling of `prior'.  None of them at all is the unparameterised
@@ -411,7 +410,7 @@ focus notifications are.  A string is taken as the parameter verbatim, which is
 for the kitty keyboard protocol: its fields carry colon-separated sub-fields and
 may be empty, `ESC [ 97 : 65 ; ; 65 u', and neither is a number.
 
-See `cooked--csi-private' for the two sequences that carry a private-parameter
+See `cooked--csi-private' for the one sequence that carries a private-parameter
 prefix, and `cooked--cursor-key' for the one choice between CSI and SS3 that
 depends on what the child has asked for."
   (apply #'cooked--csi-private nil final params))
@@ -420,14 +419,16 @@ depends on what the child has asked for."
   "The control sequence `ESC [ PREFIX PARAMS FINAL'.
 
 PREFIX is the byte ECMA-48 sets aside ahead of the parameters for private use,
-as a string, or nil for the ordinary sequence `cooked--csi' builds.  Cooked
-sends two of them.  `<' introduces an SGR mouse report, and is the whole of
-what tells the child it is reading one rather than an X10 report; see
-`cooked--mouse-report'.  `>' introduces the completion request in
-`cooked--shell-completions', which is private in the stronger sense that
-nothing but cooked's own shell integration will ever recognise it, and
-which is why it may take a free-form payload after the final byte that no other
-sequence here would.
+as a string, or nil for the ordinary sequence `cooked--csi' builds.  Lisp sends
+one: `>' introduces the completion request in `cooked--shell-completions',
+which is private in the stronger sense that nothing but cooked's own shell
+integration will ever recognise it, and which is why it may take a free-form
+payload after the final byte that no other sequence here would.
+
+The other private prefix cooked sends, the `<' of an SGR mouse report, is not
+built here.  A report is spelled by the core, which is the only end that knows
+which of the three spellings the child is reading at the moment the pointer
+moves; see `cooked--send-mouse-report'.
 
 A second function rather than an optional argument in front of FINAL, because
 the prefix is the rare case: reading a nil through every ordinary call site

@@ -1355,19 +1355,12 @@ into it; it does not replace the sample, and this is the test that says so."
       (should (cooked-tests--settle (lambda () (eq cooked--mode 'secret))))
       (should (equal (cooked--prompt-text cooked--session) "Enter passphrase:")))))
 
-(ert-deftest cooked-wheel-notches-are-reported-as-presses ()
-  "Emacs calls a notch a click; encoding that as a release loses the scroll.
-Applications discard a release of buttons 64/65, so a wheel report that goes out
-as `m' rather than `M' reaches the child and is thrown away."
-  (let ((cooked--mouse-state (cooked--mouse-state-make :sgr t)))
-    (should (equal (cooked--mouse-report 64 3 5 t) "\e[<64;6;4M")))
-  ;; X10 is worse than merely ignored: a release cannot say which way the wheel
-  ;; turned, because it reports button 3 for every button.
-  (let ((cooked--mouse-state cooked--mouse-state-none))
-    (should-not (equal (cooked--mouse-report 64 3 5 t)
-                       (cooked--mouse-report 65 3 5 t)))
-    (should (equal (cooked--mouse-report 64 3 5 nil)
-                   (cooked--mouse-report 65 3 5 nil)))))
+;; A notch being spelled as a press, and X10's release naming no button, are
+;; assertions about the encoding, which is the core's: see
+;; `sgr_counts_cells_from_one' and
+;; `x10_biases_by_thirty_two_and_names_no_button_on_release' in
+;; src/emu/term/mouse.rs.  What is still asked here is that a notch reaches the
+;; child at all, in `cooked-wheel-reaches-a-child-that-asked-for-the-mouse'.
 
 (ert-deftest cooked-wheel-reaches-a-child-that-asked-for-the-mouse ()
   "The whole path: alt screen, mouse tracking on, wheel event in, report out."
@@ -2230,24 +2223,46 @@ CSI encoding while ncurses (via `smkx') expects SS3, and nothing happened."
     (should (equal (cooked--encode-event 'up) "\eOA"))))
 
 (ert-deftest cooked-mouse-reports-reach-the-child ()
-  (cooked-tests--with-session '("/bin/sh" "-c" "printf '\\033[?1000h\\033[?1006h'; exec cat")
+  "A press and a release sent as intent come out of the pty as SGR reports.
+What the spelling *is* belongs to the core's own tests; what is asked here is
+that the intent crosses the wire and the bytes land in the child."
+  (cooked-tests--with-session
+      '("/bin/sh" "-c" "printf '\\033[?1000h\\033[?1006h'; stty raw; exec cat -v")
     (should (cooked-tests--settle
              (lambda () (cooked-mouse-state-enabled cooked--mouse-state))))
-    (should (cooked-mouse-state-sgr cooked--mouse-state))
-    (should (equal (cooked--mouse-report 0 4 9 t) "\e[<0;10;5M"))
-    (should (equal (cooked--mouse-report 0 4 9 nil) "\e[<0;10;5m"))
-    (should (equal (cooked--mouse-report 64 0 0 t) "\e[<64;1;1M"))))
+    (should (cooked--send-mouse-report cooked--session 0 4 9 t))
+    (should (cooked--send-mouse-report cooked--session 0 4 9 nil))
+    (should (cooked-tests--settle
+             (lambda ()
+               (string-match-p "\\[<0;10;5M.*\\[<0;10;5m" (cooked-tests--text)))))))
 
 (ert-deftest cooked-mouse-x10-encoding-when-sgr-is-off ()
-  (cooked-tests--with-session '("/bin/sh" "-c" "printf '\\033[?1000h'; exec cat")
+  "A child that asked for 1000 and nothing else reads the original report.
+X10 biases every coordinate by 32 and counts from 1, so column 0 is `!'."
+  (cooked-tests--with-session
+      '("/bin/sh" "-c" "printf '\\033[?1000h'; stty raw; exec cat -v")
     (should (cooked-tests--settle
              (lambda () (cooked-mouse-state-enabled cooked--mouse-state))))
     (should-not (cooked-mouse-state-sgr cooked--mouse-state))
-    ;; X10 biases coordinates by 32 and is 1-based, so column 0 is ?!.
-    (should (equal (cooked--mouse-report 0 0 0 t) "\e[M !!"))
-    (should (equal (cooked--mouse-report 0 2 4 t) "\e[M %#"))
-    ;; Release is button 3 in X10, which cannot say which button was let go.
-    (should (equal (cooked--mouse-report 0 0 0 nil) "\e[M#!!"))))
+    (should (cooked--send-mouse-report cooked--session 0 2 4 t))
+    (should (cooked-tests--settle
+             (lambda () (string-match-p "\\[M %#" (cooked-tests--text)))))))
+
+(ert-deftest cooked-a-mouse-report-is-refused-once-the-child-stops-asking ()
+  "The window the intent protocol exists to close, from the other side.
+
+A child that turns tracking off owns that decision the moment it writes the
+sequence, not at Emacs' next drain.  A click Emacs had already decided was the
+child's therefore has to be dropped where the modes actually live -- which is
+the core -- rather than encoded against a copy of them that is a drain old."
+  (cooked-tests--with-session
+      '("/bin/sh" "-c" "printf '\\033[?1000h'; stty raw; exec cat -v")
+    (should (cooked-tests--settle
+             (lambda () (cooked-mouse-state-enabled cooked--mouse-state))))
+    (cooked--feed cooked--session "\e[?1000l")
+    (should-not (cooked--send-mouse-report cooked--session 0 2 4 t))
+    ;; And Lisp still believes the child wants it, which is the whole point.
+    (should (cooked-mouse-state-enabled cooked--mouse-state))))
 
 (ert-deftest cooked-mouse-sgr-pixels-survives-the-ffi ()
   "Mode 1016 reaches Lisp as SGR in pixels, not as a third encoding to guess at."
@@ -2258,31 +2273,12 @@ CSI encoding while ncurses (via `smkx') expects SS3, and nothing happened."
     (should (cooked-mouse-state-sgr cooked--mouse-state))
     (should (cooked-mouse-state-enabled cooked--mouse-state))))
 
-(ert-deftest cooked-mouse-pixel-reports-scale-the-reported-cell ()
-  "A pixel report is the cell times the size `CSI 16 t' answers, plus the offset.
-Counted from 1 as xterm counts, so the child dividing by that same size lands
-back in the cell the pointer was in."
-  (with-temp-buffer
-    (cooked-mode)
-    (cooked-tests--mouse :enabled t :sgr t :pixels t)
-    (setq-local cooked--last-cell '(9 . 20))
-    ;; Row 3, column 5, four pixels right and seven down inside it.
-    (should (equal (cooked--mouse-report 0 3 5 t '(4 . 7)) "\e[<0;50;68M"))
-    (should (equal (cooked--mouse-report 0 3 5 nil '(4 . 7)) "\e[<0;50;68m"))
-    (let ((x 50) (y 68))
-      (should (= (/ (1- x) 9) 5))
-      (should (= (/ (1- y) 20) 3)))
-    ;; No offset is a position standing in for the pointer: the cell's corner.
-    (should (equal (cooked--mouse-report 64 3 5 t) "\e[<64;46;61M"))
-    ;; A glyph taller than the cell must not report into the row below it, and
-    ;; an image's ascent can put the pointer above its top.  A wide glyph's
-    ;; offset is real, though, and passes through.
-    (should (equal (cooked--mouse-report 0 3 5 t '(4 . 25)) "\e[<0;50;80M"))
-    (should (equal (cooked--mouse-report 0 3 5 t '(14 . -2)) "\e[<0;60;61M"))
-    ;; A terminal frame has no pixels to report; cells counted from 1 are the
-    ;; only unit that is not made up.
-    (setq-local cooked--last-cell '(nil . nil))
-    (should (equal (cooked--mouse-report 0 3 5 t '(4 . 7)) "\e[<0;6;4M"))))
+;; That a pixel report is the cell times the size `CSI 16 t' answers, plus the
+;; offset and counted from 1; that a glyph drawn taller than its cell does not
+;; report into the row below; and that a frame with no cell size degrades to
+;; cells, are all assertions about the spelling, and are made against the
+;; encoder itself in src/emu/term/mouse.rs.  The end-to-end claim -- that a
+;; click carries the pixel it landed on -- is the test below.
 
 (ert-deftest cooked-mouse-click-reports-its-pixel ()
   "A click in a 1016 child carries where in the cell it landed, end to end."
@@ -2302,8 +2298,11 @@ back in the cell the pointer was in."
       (should cell)
       (cooked-tests--displayed
         ;; Batch has no graphical window to measure, so the size a real frame
-        ;; would have reported is set by hand, immediately before the click.
+        ;; would have reported is set by hand, immediately before the click --
+        ;; through `cooked--resize', because the size the core scales by is the
+        ;; one it told the child, not anything Lisp remembers separately.
         (setq-local cooked--last-cell '(9 . 20))
+        (cooked--resize cooked--session cooked--rows cooked--cols 9 20)
         (let ((last-input-event (list 'down-mouse-1 posn)))
           (cooked-mouse-event)))
       (let ((case-fold-search nil))
@@ -2593,8 +2592,10 @@ that asked for pixels is not handed the corner of every cell it hovers over."
       (should cell)
       (cooked-tests--displayed
         ;; As in `cooked-mouse-click-reports-its-pixel': batch has no frame to
-        ;; measure, so the size a real one would have reported is set by hand.
+        ;; measure, so the size a real one would have reported is set by hand,
+        ;; and reported to the core, which is what a pixel report scales by.
         (setq-local cooked--last-cell '(9 . 20))
+        (cooked--resize cooked--session cooked--rows cooked--cols 9 20)
         (let ((last-input-event (list 'mouse-movement posn)))
           (cooked-mouse-hover)))
       (let ((case-fold-search nil))
@@ -2967,10 +2968,8 @@ drew and could only escape by leaving the buffer."
     (set-mark (point-min))
     (activate-mark)
     (should mark-active)
-    (let (sent)
-      (cl-letf (((symbol-function 'cooked--send-to-child)
-                 (lambda (text) (push text sent))))
-        (cooked--send-mouse 0 1 2 t))
+    (cooked-tests--recording-reports sent
+      (cooked--send-mouse 0 1 2 t)
       (should sent))
     (should-not mark-active)))
 
@@ -2996,7 +2995,7 @@ visual state rather than entering it."
     (evil-visual-state)
     (should (evil-visual-state-p))
     (should mark-active)
-    (cl-letf (((symbol-function 'cooked--send-to-child) #'ignore))
+    (cooked-tests--recording-reports _sent
       (let ((this-command 'cooked-mouse-event))
         (cooked--send-mouse 0 1 2 t)))
     (should-not mark-active)
@@ -3017,7 +3016,7 @@ the same reason with no command to read -- so both go through
     (insert "alpha bravo\ncharlie delta\n")
     (goto-char (point-min))
     (evil-visual-state)
-    (cl-letf (((symbol-function 'cooked--send-to-child) #'ignore))
+    (cooked-tests--recording-reports _sent
       (let ((this-command nil))
         (cooked--send-mouse 0 1 2 t)))
     (should-not mark-active)
@@ -3071,22 +3070,20 @@ unable to know whether motion reports were asked for at all."
   (with-temp-buffer
     (cooked-mode)
     (cooked-tests--mouse :sgr t)
-    (let (sent)
-      (cl-letf (((symbol-function 'cooked--send-to-child)
-                 (lambda (text) (push text sent))))
-        (cooked--report-motion 4 9)
-        (should (equal (car sent) "\e[<35;10;5M"))
-        ;; The same cell twice is nothing the child needs to hear: Emacs tracks
-        ;; the pointer by pixel, and this is what keeps that affordable.
-        (cooked--report-motion 4 9)
-        (should (equal (length sent) 1))
-        (cooked--report-button 0 4 9 t)
-        (cooked--report-motion 5 9)
-        (should (equal (car sent) "\e[<32;10;6M"))
-        ;; And the release puts the button down again, so motion goes back to 3.
-        (cooked--report-button 0 5 9 nil)
-        (cooked--report-motion 6 9)
-        (should (equal (car sent) "\e[<35;10;7M"))))))
+    (cooked-tests--recording-reports sent
+      (cooked--report-motion 4 9)
+      (should (equal (car sent) '(35 4 9 t nil nil)))
+      ;; The same cell twice is nothing the child needs to hear: Emacs tracks
+      ;; the pointer by pixel, and this is what keeps that affordable.
+      (cooked--report-motion 4 9)
+      (should (equal (length sent) 1))
+      (cooked--report-button 0 4 9 t)
+      (cooked--report-motion 5 9)
+      (should (equal (car sent) '(32 5 9 t nil nil)))
+      ;; And the release puts the button down again, so motion goes back to 3.
+      (cooked--report-button 0 5 9 nil)
+      (cooked--report-motion 6 9)
+      (should (equal (car sent) '(35 6 9 t nil nil))))))
 
 (ert-deftest cooked-a-release-off-the-screen-still-reaches-the-child ()
   "Let go past the last row and `posn-point' is nil, but the button is still down
@@ -3095,13 +3092,11 @@ as far as the child knows.  Falling through to Emacs there left it held forever.
     (cooked-mode)
     (cooked-tests--mouse :enabled t :sgr t)
     (setq cooked--mouse-held '(0) cooked--mouse-last-cell '(4 . 9))
-    (let (sent)
-      (cl-letf (((symbol-function 'cooked--send-to-child)
-                 (lambda (text) (push text sent))))
-        (let ((last-input-event (list 'drag-mouse-1 (cooked-tests--posn nil)
-                                      (cooked-tests--posn nil))))
-          (cooked-mouse-event)))
-      (should (equal sent '("\e[<0;10;5m"))))
+    (cooked-tests--recording-reports sent
+      (let ((last-input-event (list 'drag-mouse-1 (cooked-tests--posn nil)
+                                    (cooked-tests--posn nil))))
+        (cooked-mouse-event))
+      (should (equal sent '((0 4 9 nil nil nil)))))
     (should-not cooked--mouse-held)))
 
 (defmacro cooked-tests--with-mouse-rows (rows &rest body)
@@ -3166,20 +3161,25 @@ column 0 of that row for a pointer over no cell at all."
     ;; End to end in cell mode: the click is reported where it was made, and a
     ;; click in the fringe is left to Emacs rather than reported at column 0.
     (cooked-tests--mouse :enabled t :sgr t)
-    (let (sent fallback)
-      (cl-letf (((symbol-function 'cooked--send-to-child)
-                 (lambda (text) (push text sent)))
-                ((symbol-function 'cooked--mouse-buffer)
-                 (lambda (_window) (current-buffer)))
-                ((symbol-function 'cooked--mouse-fallback)
-                 (lambda (event) (push event fallback))))
-        (cooked-tests--displayed
-          (let ((last-input-event (list 'down-mouse-1 (cooked-tests--glyph-posn 3 94))))
-            (cooked-mouse-event))
-          (let ((last-input-event
-                 (list 'down-mouse-1 (cooked-tests--glyph-posn 1 0 'left-fringe))))
-            (cooked-mouse-event))))
-      (should (equal sent '("\e[<0;13;1M")))
+    (let (fallback)
+      (cooked-tests--recording-reports sent
+        (cl-letf (((symbol-function 'cooked--mouse-buffer)
+                   (lambda (_window) (current-buffer)))
+                  ((symbol-function 'cooked--mouse-fallback)
+                   (lambda (event) (push event fallback))))
+          (cooked-tests--displayed
+            (let ((last-input-event (list 'down-mouse-1 (cooked-tests--glyph-posn 3 94))))
+              (cooked-mouse-event))
+            (let ((last-input-event
+                   (list 'down-mouse-1 (cooked-tests--glyph-posn 1 0 'left-fringe))))
+              (cooked-mouse-event))))
+        (should (equal (length sent) 1))
+        ;; A press, at the cell the pointer was over and not the one the row's
+        ;; text ended at.  Anything non-nil is a press, which is what the event
+        ;; hands through.
+        (pcase-let ((`(,button ,row ,col ,pressed ,dx ,dy) (car sent)))
+          (should (equal (list button row col dx dy) '(0 0 12 nil nil)))
+          (should pressed)))
       (should (= (length fallback) 1)))))
 
 (ert-deftest cooked-mouse-offset-stays-inside-the-characters-cells ()

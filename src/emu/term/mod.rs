@@ -31,6 +31,7 @@ mod front;
 mod graphics;
 mod keys;
 mod modes;
+mod mouse;
 pub(crate) mod osc;
 mod pen;
 mod perform;
