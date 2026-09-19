@@ -89,7 +89,7 @@ impl State {
                 if let Some(last) = last {
                     let mut buf = [0u8; 4];
                     self.text
-                        .restart(last.encode_utf8(&mut buf), Width::Measured(1));
+                        .restart(last.encode_utf8(&mut buf), Width::measured(1));
                 }
                 rest = &rest[placed..];
             }

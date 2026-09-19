@@ -212,39 +212,42 @@ pub(crate) enum Step {
 }
 
 /// How many columns a cell stands on, and on whose word.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum Width {
-    /// What the characters measure.
-    Measured(usize),
-    /// What `OSC 66 ; w=N` said, which a code point joining the cell must not re-measure.
-    Declared(usize),
+///
+/// A count with a kind beside it rather than two variants carrying the same count: the
+/// two differ only in who said the number, and every reader wants the number.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(crate) struct Width {
+    /// The columns. Zero is a cell nothing has been placed on yet.
+    pub(crate) cells: usize,
+    pub(crate) source: WidthSource,
+}
+
+/// Whose word a [`Width`] is on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(crate) enum WidthSource {
+    /// The characters', as [`cluster_cells`] measures them.
+    #[default]
+    Measured,
+    /// The child's: `OSC 66 ; w=N` said so, and a code point joining the cell must not
+    /// re-measure it.
+    Declared,
 }
 
 impl Width {
-    /// The columns, whoever's word they are on.
-    fn cells(self) -> usize {
-        match self {
-            Self::Measured(cells) | Self::Declared(cells) => cells,
+    /// WIDTH columns as the characters measure.
+    pub(crate) fn measured(cells: usize) -> Self {
+        Self {
+            cells,
+            source: WidthSource::Measured,
         }
     }
 
-    /// The same claim about a different number of columns; see [`Segmenter::settle`].
-    ///
-    /// A declaration that the grid had to clip is still a declaration: `OSC 66 ; w=3`
-    /// two columns from the end of the row leaves a two-column cell the child named the
-    /// width of, and a combining mark arriving next must not re-measure it back to one.
-    fn resized(self, cells: usize) -> Self {
-        match self {
-            Self::Measured(_) => Self::Measured(cells),
-            Self::Declared(_) => Self::Declared(cells),
+    /// WIDTH columns because `OSC 66 ; w=N` said so.
+    pub(crate) fn declared(cells: usize) -> Self {
+        Self {
+            cells,
+            source: WidthSource::Declared,
         }
-    }
-}
-
-/// A cell nothing has been placed on yet, standing on no columns.
-impl Default for Width {
-    fn default() -> Self {
-        Self::Measured(0)
     }
 }
 
@@ -294,8 +297,13 @@ impl Segmenter {
     }
 
     /// Correct the recorded width to what the grid actually managed.
+    ///
+    /// Whose word it is on survives the correction. A declaration the grid had to clip is
+    /// still a declaration: `OSC 66 ; w=3` two columns from the end of the row leaves a
+    /// two-column cell the child named the width of, and a combining mark arriving next
+    /// must not re-measure it back to one.
     pub(crate) fn settle(&mut self, cells: usize) {
-        self.width = self.width.resized(cells);
+        self.width.cells = cells;
     }
 
     /// Take the next code point and say where it goes.
@@ -310,7 +318,7 @@ impl Segmenter {
         if c.is_ascii_graphic() || c == ' ' {
             self.cluster.clear();
             self.cluster.push(c);
-            self.width = Width::Measured(1);
+            self.width = Width::measured(1);
             return Step::Cell(1);
         }
         // The same again for the bulk of East Asian text, which is where the other large
@@ -325,7 +333,7 @@ impl Segmenter {
         if opens_wide_cell(c) {
             self.cluster.clear();
             self.cluster.push(c);
-            self.width = Width::Measured(2);
+            self.width = Width::measured(2);
             return Step::Cell(2);
         }
         // No previous cell. A code point with a width starts one; a zero-width one has
@@ -335,7 +343,7 @@ impl Segmenter {
             let cells = char_cells(c);
             self.cluster.clear();
             self.cluster.push(c);
-            self.width = Width::Measured(cells);
+            self.width = Width::measured(cells);
             return if cells == 0 {
                 Step::Join {
                     before: 0,
@@ -361,20 +369,20 @@ impl Segmenter {
         let cells = char_cells(c);
         if boundary && cells > 0 {
             self.cluster.drain(..at);
-            self.width = Width::Measured(cells);
+            self.width = Width::measured(cells);
             return Step::Cell(cells);
         }
-        let before = self.width.cells();
+        let before = self.width.cells;
         // A boundary that a zero-width code point falls on still attaches it to the cell
         // before — the spec is explicit, and it is what keeps a stray combining mark from
         // consuming a column. The width cannot have changed in that case, since a code
         // point that starts its own cluster is not a variation selector on the old one.
-        let after = if boundary || matches!(self.width, Width::Declared(_)) {
+        let after = if boundary || self.width.source == WidthSource::Declared {
             before
         } else {
             cluster_cells(&self.cluster)
         };
-        self.width = self.width.resized(after);
+        self.width.cells = after;
         Step::Join { before, after }
     }
 }

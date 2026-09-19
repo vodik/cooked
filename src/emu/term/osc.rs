@@ -448,7 +448,7 @@ impl State {
             // The cursor is left on the last block drawn, so a combining mark arriving
             // next joins it rather than opening a cell of its own.
             match last {
-                Some((cluster, cells)) => self.text.restart(&cluster, Width::Measured(cells)),
+                Some((cluster, cells)) => self.text.restart(&cluster, Width::measured(cells)),
                 None => self.text.reset(),
             }
             return;
@@ -461,7 +461,7 @@ impl State {
         // Seeded with the *declared* width, not the measured one: that is where the cell
         // begins as far as the grid is concerned, so it is what [`Screen::join`] needs to
         // find it again.
-        self.text.restart(&text, Width::Declared(width));
+        self.text.restart(&text, Width::declared(width));
     }
 
     /// The `w=` value, or `None` if the metadata is not something to act on.

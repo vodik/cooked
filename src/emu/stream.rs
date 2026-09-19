@@ -630,7 +630,7 @@ impl Stream {
         let last = [run[plain - 1]];
         // SAFETY: the decoder hands over nothing here but bytes in `0x20..=0x7e`.
         let last = unsafe { std::str::from_utf8_unchecked(&last) };
-        self.seg.restart(last, Width::Measured(1));
+        self.seg.restart(last, Width::measured(1));
     }
 }
 
