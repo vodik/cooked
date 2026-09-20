@@ -43,6 +43,22 @@ fn a_whole_screen_cleared_and_redrawn_sends_only_what_changed() {
     assert_eq!(sent(&mut t), vec![1]);
 }
 
+/// A linked row rewritten exactly as it was is not sent, link and all.
+///
+/// The other half of `a_row_relinked_under_a_recycled_id_is_still_sent`, and what keeps
+/// `ls --hyperlink` reprinting a prompt line from costing Emacs a redraw: the link is part
+/// of the cell, so an unchanged destination is an unchanged cell.
+#[test]
+fn a_linked_line_written_back_as_it_was_is_not_sent() {
+    let mut t = settled(
+        2,
+        20,
+        b"\x1b]8;;https://example.com/\x1b\\file\x1b]8;;\x1b\\ ok",
+    );
+    t.feed(b"\x1b[1;1H\x1b[2K\x1b]8;;https://example.com/\x1b\\file\x1b]8;;\x1b\\ ok");
+    assert_eq!(sent(&mut t), Vec::<usize>::new());
+}
+
 /// A row whose destination changed is sent, even when a reused id makes its cells match.
 ///
 /// The hazard recycling introduces, and the reason `State::collect_links` marks the front
