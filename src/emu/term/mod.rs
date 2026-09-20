@@ -26,6 +26,7 @@ pub(crate) use mouse::Button;
 pub(crate) use paste::PasteOutcome;
 pub(crate) use paste::strip_controls as strip_paste_controls;
 use pen::PenState;
+use promote::Promotion;
 use reply::{Framing, color_scheme_report, size_report};
 pub(crate) use reply::{Terminator, osc_reply};
 use screens::{PerScreen, ScreenId};
@@ -42,6 +43,7 @@ pub(crate) mod osc;
 mod paste;
 mod pen;
 mod perform;
+mod promote;
 pub(crate) mod reply;
 mod screens;
 mod state;
@@ -1923,6 +1925,11 @@ struct State {
     /// What Emacs is showing of the live screen, so a drain can leave out a damaged row
     /// that ended up the same as the copy it already has. See [`front`].
     front: front::Front,
+    /// How many of the rows handed to scrollback since the last drain Emacs already holds
+    /// at the top of its screen region, and so keeps rather than being sent again. Beside
+    /// the front rather than in it, because it counts rows that have left it; see
+    /// [`promote`].
+    promotion: promote::Promotion,
     /// Marks that have left the grid since the last drain, with the absolute rows they
     /// left on.
     ///

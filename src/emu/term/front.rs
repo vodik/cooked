@@ -15,10 +15,8 @@
 //! so itself when it edits a live row -- the width guard deleting characters off a row
 //! that wrapped is the case that exists. A row that is not known is always sent.
 //!
-//! The copy also says which rows leaving the top of the screen Emacs already holds. A line
-//! feed at the bottom of a `tail -f` hands row 0 to scrollback, and when that row is the
-//! one the copy has at index 0, Emacs can keep the text it has and call it history rather
-//! than be sent it again; see [`Front::promote`].
+//! The copy also answers which of the rows leaving the top of the screen Emacs already
+//! holds, for the count [`promote`](super::promote) keeps beside it; see [`Front::holds`].
 
 use super::super::cell::{BLANK, Cell, Extra, Row, RowRef, Wrap, chars_before, draws_nothing};
 use super::super::glyph;
@@ -67,20 +65,16 @@ impl Known {
 }
 
 /// Emacs' copy of the live screen; see the module comment.
+///
+/// The previous frame of the double buffer and nothing else. How many of the rows that
+/// have left the top of the screen since it was drawn Emacs already holds is
+/// [`Promotion`](super::promote::Promotion)'s count, kept beside it in `State`; the front
+/// only answers [`Front::holds`] for it.
 #[derive(Debug, Default)]
 pub(super) struct Front {
     /// The cells Emacs last rendered and what each row was drawn as, in the same shape the
     /// emulator's own grid has; see [`Grid`], which is the other half of the double buffer.
     grid: Grid<Known>,
-    /// How many of the rows handed to scrollback since the last drain are the copy's rows
-    /// 0, 1, 2 and so on, exactly as Emacs holds them; see [`Front::promote`].
-    promoted: usize,
-    /// Whether the next row to leave the top can still be the copy's row `promoted`.
-    ///
-    /// Promotion is a prefix: once one departing row is not what Emacs holds, every row
-    /// after it goes as text, since Emacs can only keep text that is at the top of its
-    /// screen.
-    promoting: bool,
 }
 
 impl Front {
@@ -227,75 +221,20 @@ impl Front {
         for index in first..self.grid.height() {
             self.known_mut(index).known = false;
         }
-        self.unpromote(first);
     }
 
-    /// Stop claiming that the rows from FIRST down, already handed to scrollback, are what
-    /// Emacs holds.
+    /// Whether Emacs' text for row INDEX is what ROW, leaving the screen, puts in
+    /// scrollback, give or take trailing spaces; see [`Promotion::offer`].
     ///
-    /// Rows the copy stops knowing may have left the grid already. Emacs' text for them
-    /// has changed under the copy, or is about to be replaced wholesale, so they go as
-    /// text after all, and so does every row that departed after them.
-    pub(super) fn unpromote(&mut self, first: usize) {
-        if first < self.promoted {
-            self.promoted = first;
-            self.promoting = false;
-        }
-    }
-
-    /// Promote no row that leaves before the next drain, and none of those that left since
-    /// the last.
-    ///
-    /// For a switch of screens: the rows that left the primary before it are not at the
-    /// top of what the next drain draws, and a row that leaves after it would be matched
-    /// against rows the other grid may have drawn.
-    pub(super) fn stop_promoting(&mut self) {
-        self.promoted = 0;
-        self.promoting = false;
-    }
-
-    /// Note that ROW has just left the top of the screen for scrollback, and whether Emacs
-    /// can keep the text it holds for it rather than be sent the row again.
-    ///
-    /// It can when the rows that departed before it since the last drain all could, the
-    /// row is the copy's next row, and Emacs' text for that row is what scrollback would
-    /// get. LIMIT is how many rows the screen's moves since the last drain have taken off
-    /// the top, or `None` when anything but one scroll of a region from the top row has
-    /// moved a row: a row past LIMIT left some other way, such as a screen clear, and a
-    /// scroll lower down or an inserted line leaves the copy's rows out of step with the
-    /// grid's.
-    ///
-    /// What scrollback would get is what ROW's cells draw. Emacs holds that when the copy
+    /// What scrollback would get is what ROW's cells draw. Emacs holds that when the front
     /// has the same cells, and drew them without a cut in a glyph run for the cursor,
     /// which scrollback does not have. A row that left without a copy of its cells is not
     /// compared and goes as text. A wrapped row goes to scrollback with its trailing
     /// blanks, which the live row trimmed, so those have to be blanks Lisp can add back as
     /// plain spaces: a linked blank left at the end of a wrapped row is sent.
-    pub(super) fn promote(&mut self, row: &Departed, limit: Option<usize>) {
-        let index = self.promoted;
-        if self.promoting && limit.is_some_and(|limit| index < limit) && self.holds(index, row) {
-            self.promoted += 1;
-        } else {
-            self.promoting = false;
-        }
-    }
-
-    /// How many rows handed to scrollback since the last drain Emacs holds already, as
-    /// [`Front::promote`] counted them, starting the count again for the next drain.
-    pub(super) fn take_promoted(&mut self) -> usize {
-        self.promoting = true;
-        std::mem::take(&mut self.promoted)
-    }
-
-    /// Whether the next row to leave the top can still be promoted, which is what decides
-    /// whether a departing row is worth copying to compare; see [`Departed::row`].
-    pub(super) fn promoting(&self) -> bool {
-        self.promoting
-    }
-
-    /// Whether Emacs' text for row INDEX is what ROW, leaving the screen, puts in
-    /// scrollback, give or take trailing spaces; see [`Front::promote`].
-    fn holds(&self, index: usize, row: &Departed) -> bool {
+    ///
+    /// [`Promotion::offer`]: super::promote::Promotion::offer
+    pub(super) fn holds(&self, index: usize, row: &Departed) -> bool {
         let Some(departed) = &row.row else {
             return false;
         };
@@ -323,7 +262,6 @@ impl Front {
             known.known = false;
             known.trimmed = true;
         }
-        self.unpromote(first);
     }
 
     /// Whether row INDEX was trimmed off the buffer and has not been sent since.
@@ -336,7 +274,6 @@ impl Front {
         if let Some(known) = self.grid.meta_mut(index) {
             known.known = false;
         }
-        self.unpromote(index);
     }
 
     /// Move rows the way Emacs moves its text for SHIFT; see `cooked--apply-shift'.
