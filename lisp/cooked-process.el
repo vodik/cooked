@@ -338,27 +338,37 @@ file's Commentary for why it cannot be the child's own process."
         (setq cooked-process--wake
               (cooked--make-wake-pipe (format " cooked-process-wake<%s>" name) host
                                       (lambda (_p _s) (cooked-process--pump host))))
-        (setq cooked-process--session
-              (cooked--spawn argv (cooked-process--environment) rows cols
-                             cooked-process--wake
-                             (and directory
-                                  (expand-file-name (or (cooked--local-name directory) "~")))
-                             (round (* 1000 cooked-min-redisplay-interval))
-                             cooked-backlog-limit))
-        ;; Where `cooked-process--answer' and `cooked--sync-palette' look for the
-        ;; session to speak for, as they would in a session buffer.
-        (setq cooked--session cooked-process--session)
         ;; The colours a build tool asks about before it draws, so the core can answer
         ;; every colour query itself and a probe costs no drain.  The cursor and the
         ;; selection are in there too, from the frame: a compilation buffer has neither,
-        ;; and a child that asks is owed an answer rather than a timeout.  Once, here:
-        ;; this host is not a `cooked-mode' buffer, so `cooked-theme-change-hook' does
-        ;; not run in it and a theme changed mid-build leaves the rest of that build
+        ;; and a child that asks is owed an answer rather than a timeout.  Computed here
+        ;; and folded into the plist `cooked--spawn' takes, rather than pushed by a
+        ;; separate `cooked--sync-palette' call after it returns, for the same reason
+        ;; `cooked--start' does it this way: a probe in the child's very first instant
+        ;; would otherwise race the reader thread `cooked--spawn' starts internally.
+        ;; Once, here: this host is not a `cooked-mode' buffer, so `cooked-theme-change-hook'
+        ;; does not run in it and a theme changed mid-build leaves the rest of that build
         ;; answering in the theme it started under -- which is what the text already
         ;; above it in the buffer says, and the same bargain `cooked-process--text'
         ;; strikes with its face cache.
-        (cooked--protect-seam 'cooked--sync-palette
-          (cooked--sync-palette))))
+        (let ((palette-defaults (cooked--protect-seam 'cooked--sync-palette
+                                  (cooked--palette-defaults)))
+              (palette-colors (cooked--protect-seam 'cooked--sync-palette
+                                (cooked--palette-colors))))
+          (setq cooked--pushed-palette (cons palette-defaults palette-colors))
+          (setq cooked-process--session
+                (cooked--spawn argv (cooked-process--environment) rows cols
+                               cooked-process--wake
+                               (and directory
+                                    (expand-file-name (or (cooked--local-name directory) "~")))
+                               (list :palette-defaults palette-defaults
+                                     :palette-colors palette-colors
+                                     :min-redisplay-interval
+                                     (round (* 1000 cooked-min-redisplay-interval))
+                                     :backlog-limit cooked-backlog-limit))))
+        ;; Where `cooked-process--answer' and `cooked--sync-palette' look for the
+        ;; session to speak for, as they would in a session buffer.
+        (setq cooked--session cooked-process--session)))
     proc))
 
 (defun cooked-process-start-shell-command (name buffer command)

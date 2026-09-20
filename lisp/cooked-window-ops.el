@@ -143,6 +143,25 @@ multiples is truncated toward zero, to one `window-resize' can make exactly."
     (unless (zerop delta)
       (window-resize window delta horizontal nil t))))
 
+(defun cooked--frame-size-values (&optional frame)
+  "The frame size `cooked--sync-frame-size' and `cooked--start' both send.
+
+Returns (ROWS COLS HEIGHT WIDTH).  FRAME defaults to the one showing
+`cooked--layout-window', or the selected frame when the buffer is shown
+nowhere -- the same frame `cooked--sync-frame-size' would resolve on its own,
+so a caller building the spawn plist before any window shows the buffer can
+pass the frame the command ran from instead, the way
+`cooked--graphics-answer' takes one.  HEIGHT and WIDTH are nil on a terminal
+frame, by the rule `14t' already follows: a terminal has no pixels, and
+reporting zero would be a claim rather than an absence."
+  (let ((frame (or frame
+                    (if-let* ((window (cooked--layout-window)))
+                        (window-frame window)
+                      (selected-frame)))))
+    (list (frame-text-lines frame) (frame-text-cols frame)
+          (and (display-graphic-p frame) (frame-text-height frame))
+          (and (display-graphic-p frame) (frame-text-width frame)))))
+
 (defun cooked--sync-frame-size ()
   "Tell this buffer's session how big the frame around it is.
 
@@ -150,21 +169,13 @@ The core answers `CSI 19t' (cells, `9;ROWS;COLS t') and `15t' (pixels,
 `5;HEIGHT;WIDTH t') from what this last told it, the way it answers `18t' and
 `14t' from the grid: the query is answered where it arrives instead of
 waking Lisp for a value that has not moved.  Called from
-`cooked--frame-size-changed' on every frame resize, and once more at spawn,
-since a child can probe before any resize has happened.
-
-The frame is the one showing `cooked--layout-window', or the selected frame
-when the buffer is shown nowhere.  Pixels are left nil on a terminal frame,
-by the rule `14t' already follows: a terminal has no pixels, and pushing
-zero would be a claim rather than an absence."
-  (when-let* ((session (cooked--live-session))
-              (frame (if-let* ((window (cooked--layout-window)))
-                         (window-frame window)
-                       (selected-frame))))
-    (cooked--set-frame-size
-     session (frame-text-lines frame) (frame-text-cols frame)
-     (and (display-graphic-p frame) (frame-text-height frame))
-     (and (display-graphic-p frame) (frame-text-width frame)))))
+`cooked--frame-size-changed' on every frame resize.  A session's first frame
+size is not sent from here but folded into the plist `cooked--spawn' takes,
+through this function's own `cooked--frame-size-values', so the core has it
+before the child can probe; see `cooked--start'."
+  (when-let* ((session (cooked--live-session)))
+    (pcase-let ((`(,rows ,cols ,height ,width) (cooked--frame-size-values)))
+      (cooked--set-frame-size session rows cols height width))))
 
 (provide 'cooked-window-ops)
 ;;; cooked-window-ops.el ends here

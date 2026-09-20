@@ -23,6 +23,7 @@
 (require 'cooked-graphics)
 (require 'cooked-render)
 (require 'cooked-color)
+(require 'cooked-window-ops)
 
 (cooked--declare-core)
 
@@ -242,34 +243,48 @@ wherever Emacs is, and is not a request to be second-guessed."
   ;; appear on: a child can probe before this function returns, and the core answers
   ;; a probe from what it was spawned with.  See `cooked--graphics-answer'.
   (setq cooked--graphics-shown (cooked--graphics-answer (selected-frame)))
-  (setq cooked--session
-        (cooked--spawn argv (cooked--child-environment extra-env) cooked--rows cooked--cols cooked--wake
-                      (when directory
-                        (expand-file-name (or (cooked--local-name directory) "~")))
-                      (round (* 1000 cooked-min-redisplay-interval))
-                      cooked-backlog-limit
-                      cooked--graphics-shown))
-  ;; Once, at the start: the core answers `CSI ? 996 n' from what Emacs last reported and
-  ;; a colour query from the palette, and a session that outlives no theme change would
-  ;; otherwise answer with silence for its whole life.  Here rather than in
-  ;; `cooked--start-session' so that the callers who spawn directly -- the test fixture
-  ;; and the benchmark -- exercise the same path.
+  ;; The colour scheme, palette and frame size go the same way graphics already did:
+  ;; folded into the plist `cooked--spawn' applies to the emulator before the child can
+  ;; be read from, rather than pushed by three separate calls after `cooked--spawn'
+  ;; already returned.  Those calls used to race the reader thread `cooked--spawn'
+  ;; starts internally -- a child that probes `OSC 11 ; ?', `CSI ? 996 n' or `CSI 19t' in
+  ;; its very first instant could read the reply before any of the three arrived, and get
+  ;; silence for the rest of its life, there being no query event left once the core has
+  ;; already answered nothing.  Each value here comes from exactly the function its later
+  ;; push uses -- `cooked--color-scheme', `cooked--palette-defaults'/`cooked--palette-colors'
+  ;; and `cooked--frame-size-values' -- so there is one source for each regardless of
+  ;; whether it reaches the core at spawn or on the hook that pushes it again.
   ;;
-  ;; Protected because the session is already started by this point and is correct
-  ;; without it: the only thing lost is a courtesy answer to a query most children never
-  ;; send, and failing the spawn over it would trade a terminal for a colour.  The seam
-  ;; is real rather than theoretical -- `cooked--default-color' guards against
-  ;; `color-values' returning nil, which is not the same as it signalling, and it does
-  ;; signal on a frame that claims to be graphical without a window system behind it.
-  (cooked--protect-seam 'cooked--sync-color-scheme
-    (cooked--sync-color-scheme))
-  (cooked--protect-seam 'cooked--sync-palette
-    (cooked--sync-palette))
-  ;; Likewise: a child that probes `CSI 19t'/`15t' in its first instant is
-  ;; answered from what Emacs has now, rather than with silence until the
-  ;; buffer's first window resize.
-  (cooked--protect-seam 'cooked--sync-frame-size
-    (cooked--sync-frame-size))
+  ;; Each is wrapped in `cooked--protect-seam' for the reason the three calls this
+  ;; replaces were: the session is about to exist whether or not any of these succeed,
+  ;; and the only thing a failure here costs is a courtesy answer to a query most
+  ;; children never send, not the terminal itself.  The seam is real rather than
+  ;; theoretical -- `cooked--default-color' guards against `color-values' returning nil,
+  ;; which is not the same as it signalling, and it does signal on a frame that claims to
+  ;; be graphical without a window system behind it.  A seam that fires answers nil,
+  ;; which a plist key reads exactly as if it had been left out.
+  (let ((palette-defaults (cooked--protect-seam 'cooked--sync-palette
+                            (cooked--palette-defaults)))
+        (palette-colors (cooked--protect-seam 'cooked--sync-palette
+                          (cooked--palette-colors))))
+    ;; Set now rather than left for the first theme or window change to discover: this
+    ;; is what `cooked--sync-palette' just pushed, in every way that matters to its own
+    ;; comparison against `cooked--pushed-palette'.
+    (setq cooked--pushed-palette (cons palette-defaults palette-colors))
+    (setq cooked--session
+          (cooked--spawn
+           argv (cooked--child-environment extra-env) cooked--rows cooked--cols cooked--wake
+           (when directory
+             (expand-file-name (or (cooked--local-name directory) "~")))
+           (list :graphics cooked--graphics-shown
+                 :color-scheme (cooked--protect-seam 'cooked--sync-color-scheme
+                                (cooked--color-scheme))
+                 :palette-defaults palette-defaults
+                 :palette-colors palette-colors
+                 :frame-size (cooked--protect-seam 'cooked--sync-frame-size
+                              (cooked--frame-size-values (selected-frame)))
+                 :min-redisplay-interval (round (* 1000 cooked-min-redisplay-interval))
+                 :backlog-limit cooked-backlog-limit))))
   cooked--session)
 
 (defun cooked--child-environment (&optional extra)

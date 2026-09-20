@@ -403,11 +403,21 @@ symbols! {
     // `pbm', not `ppm': it is the name of the Emacs image type that reads binary P6, and
     // that is what this string is for.
     Pbm => "pbm",
-    // How Lisp spells a colour scheme on the way *in*, for `cooked--set-color-scheme'.
-    // Compared against with `Env::eq' rather than decoded, so there is no `FromLisp' and
-    // no third spelling to fall through to.
+    // How Lisp spells a colour scheme on the way *in*, for the `FromLisp' impl on
+    // `ColorScheme' that `cooked--set-color-scheme' and the INITIAL-STATE plist's
+    // `:color-scheme' both go through. Compared against with `Env::eq' rather than
+    // decoded to a number, so there is no third spelling to fall through to.
     Dark => "dark",
     Light => "light",
+    // The keys of the plist `cooked--spawn' takes as its INITIAL-STATE argument; see
+    // `SpawnState''s `FromLisp' impl in lib.rs.
+    MinRedisplayInterval => ":min-redisplay-interval",
+    BacklogLimit => ":backlog-limit",
+    Graphics => ":graphics",
+    ColorScheme => ":color-scheme",
+    PaletteDefaults => ":palette-defaults",
+    PaletteColors => ":palette-colors",
+    FrameSize => ":frame-size",
 }
 
 /// `a == b` for `&str`, in a const context.
@@ -589,6 +599,25 @@ impl<'e> Env<'e> {
 
     pub fn cdr(&self, cell: Value<'e>) -> Result<Value<'e>> {
         self.call_sym(Sym::Cdr, &[cell])
+    }
+
+    /// The value KEY holds in PLIST, or nil when KEY is absent — what Lisp's
+    /// `plist-get` returns, walked by hand rather than through a call to it.
+    ///
+    /// A plist decoder belongs here rather than in `lib.rs`: every `FromLisp` impl that
+    /// reads one — `cooked--spawn`'s INITIAL-STATE argument today — wants the same walk,
+    /// and it costs no more than [`Env::car`] and [`Env::cdr`] already do, both of which
+    /// this is built from.
+    pub fn plist_get(&self, mut plist: Value<'e>, key: Value<'e>) -> Result<Value<'e>> {
+        while !self.is_nil(plist) {
+            let k = self.car(plist)?;
+            let rest = self.cdr(plist)?;
+            if self.eq(k, key) {
+                return self.car(rest);
+            }
+            plist = self.cdr(rest)?;
+        }
+        Ok(self.nil())
     }
 
     /// Wrap `data` in an opaque Lisp user-pointer; Emacs' GC runs the destructor.

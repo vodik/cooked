@@ -610,22 +610,24 @@ silence, and only the cells half is a controlled table.  `11t' is xterm's
 \"not iconified\", always answered, so it is the terminator
 `cooked-tests--settle' waits for.
 
-The child sleeps a beat before it asks anything.  The core answers `19t'
-and `15t' from a size Lisp pushes down at spawn -- see
-`cooked--sync-frame-size' -- and that push and the fork racing it to the
-child's first byte are two different processes with no ordering between
-them: `stty raw -echo; printf ...' with no delay reaches the parser before
-the push often enough to flake, since a query that beats the push finds
-nothing to answer from and, unlike the query Lisp itself used to answer
-one at a time, gets no second chance later.  A real program never asks in
-its very first instant; the sleep says the same thing a test can act on."
+The child asks with no delay of its own.  The core answers `19t' and `15t'
+from a size folded into the plist `cooked--spawn' applies to the emulator
+before the child can be read from -- see `cooked--frame-size-values' and
+`cooked--start' -- so there is no window left in which the fork racing this
+call to the child's first byte can win it: the size is already on the `Term'
+before the reader thread that would read that first byte exists.  Before
+r3-spawnstate this raced `cooked--sync-frame-size', pushed only after
+`cooked--spawn' had already returned and started that thread, and a query
+that beat it found nothing to answer from and, there being no query event
+left once the core has already answered nothing, got no second chance
+later; the child was slept 0.2s to hide that."
   (let ((out (make-temp-file "cooked-19t")))
     (unwind-protect
         (cl-letf (((symbol-function 'frame-text-lines) (lambda (&optional _f) rows))
                   ((symbol-function 'frame-text-cols) (lambda (&optional _f) cols)))
           (cooked-tests--with-session
               (list "/bin/sh" "-c"
-                    (format "stty raw -echo; sleep 0.2; printf '\\033[19t\\033[15t\\033[11t'; cat > %s"
+                    (format "stty raw -echo; printf '\\033[19t\\033[15t\\033[11t'; cat > %s"
                             out))
             (should (cooked-tests--settle
                      (lambda () (string-suffix-p "\e[1t" (cooked-tests--contents out)))))
@@ -648,6 +650,40 @@ down -- the table says what the wire must carry either way."
                      "")))
       (should (equal (cooked-tests--frame-size-report rows cols)
                       (concat (format "\e[9;%d;%dt" rows cols) pixels "\e[1t"))))))
+
+(ert-deftest cooked-spawn-initial-state-beats-the-childs-first-probe ()
+  "OSC 11, `CSI ? 996 n' and `CSI 19 t' are all answered from what
+`cooked--start' folds into `cooked--spawn''s INITIAL-STATE plist, in a child
+that asks all three with no delay of its own -- `stty raw -echo; printf ...'
+straight after the shell execs.  Run two hundred times, with none of them
+allowed to come back wrong.
+
+Before r3-spawnstate, the colour scheme, palette and frame size were pushed by
+three separate calls made only after `cooked--spawn' had already returned and
+started its reader thread, and a probe that reached the parser before all
+three arrived got silence for good: a colour query the core cannot yet answer
+raises no event for Lisp to answer later, the same silence `19t' has always
+answered with before a session's first resize.  r3-winops measured a
+frame-size probe alone losing that race about one run in three.  This is not
+a sampled rate: it is what \"win the race a hundred times running\" being a
+`should' rather than a message means."
+  (dotimes (_ 200)
+    (let ((out (make-temp-file "cooked-first-probe")))
+      (unwind-protect
+          (cooked-tests--with-session
+              (list "/bin/sh" "-c"
+                    (format
+                     "stty raw -echo; printf '\\033]11;?\\007\\033[?996n\\033[19t\\033[11t'; cat > %s"
+                     out))
+            (should (cooked-tests--settle
+                     (lambda () (string-suffix-p "\e[1t" (cooked-tests--contents out)))))
+            (let ((reply (cooked-tests--contents out)))
+              (should (string-match-p
+                       "\\`\033\\]11;rgb:[0-9a-f]\\{4\\}/[0-9a-f]\\{4\\}/[0-9a-f]\\{4\\}\007"
+                       reply))
+              (should (string-match-p "\033\\[\\?997;[12]n" reply))
+              (should (string-match-p "\033\\[9;[0-9]+;[0-9]+t" reply))))
+        (delete-file out)))))
 
 (ert-deftest cooked-osc-handler-errors-do-not-break-redisplay ()
   (cooked-tests--with-session '("/bin/sh" "-c" "printf '\\033]2;boom\\007'; printf 'after\\n'; sleep 5")

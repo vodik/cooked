@@ -138,16 +138,31 @@ pub unsafe extern "C" fn emacs_module_init(runtime: *mut Runtime) -> std::ffi::c
 
     let registered = defuns!(env, {
         /// Spawn ARGV on a new pty and return a session handle.
-        /// Arguments are ARGV, ENV, ROWS, COLS, WAKE, optional DIRECTORY, optional
-        /// MIN-REDISPLAY-INTERVAL and optional BACKLOG-LIMIT. ENV is an alist of strings. WAKE is a
-        /// pipe process whose filter runs when output is pending. MIN-REDISPLAY-INTERVAL, in
-        /// milliseconds, floors how often a rapidly-rewriting child (a spinner, a progress meter)
-        /// triggers a redisplay; it defaults to 8 when omitted or nil. BACKLOG-LIMIT caps the items
-        /// awaiting collection before the child is left to block on its own writes; it defaults to
-        /// 8000 when omitted or nil. GRAPHICS is what `cooked--set-graphics-shown' takes, set
-        /// before the child runs so a probe in its first instant is answered from it; omitted
-        /// or nil, no picture is claimed until Lisp says otherwise.
-        "cooked--spawn" 5..=9 => spawn;
+        /// Arguments are ARGV, ENV, ROWS, COLS, WAKE, optional DIRECTORY and optional
+        /// INITIAL-STATE. ENV is an alist of strings. WAKE is a pipe process whose filter
+        /// runs when output is pending.
+        ///
+        /// INITIAL-STATE is a plist, applied to the emulator before the child can be read
+        /// from, so a program that probes in its very first instant -- `OSC 11 ; ?',
+        /// `CSI ? 996 n', `CSI 19 t' -- is answered from it rather than from silence or a
+        /// claim-everything default. Every key may be omitted, each with the same meaning
+        /// omitting it always had:
+        ///
+        /// - `:min-redisplay-interval', in milliseconds, floors how often a
+        ///   rapidly-rewriting child (a spinner, a progress meter) triggers a redisplay;
+        ///   it defaults to 8.
+        /// - `:backlog-limit' caps the items awaiting collection before the child is left
+        ///   to block on its own writes; it defaults to 8000.
+        /// - `:graphics' is what `cooked--set-graphics-shown' takes; omitted, no picture
+        ///   is claimed until Lisp says otherwise.
+        /// - `:color-scheme' is what `cooked--set-color-scheme' takes; omitted, `CSI ? 996
+        ///   n' gets no reply until Lisp says one.
+        /// - `:palette-defaults' and `:palette-colors' are what `cooked--set-palette'
+        ///   takes; omitted, every colour query is silence.
+        /// - `:frame-size' is (ROWS COLS PIXEL-HEIGHT PIXEL-WIDTH), what `cooked--set-frame-size'
+        ///   takes as four separate arguments; omitted, `CSI 19 t'/`15 t' get no reply
+        ///   until Lisp says one.
+        "cooked--spawn" 5..=7 => spawn;
 
         /// Collect everything that changed in SESSION since the last call.
         /// Returns a plist with :scrolled, :promoted, :shifts, :rows, :edits, :height, :width,
@@ -873,22 +888,17 @@ fn spawn<'e>(env: Env<'e>, args: &[Value<'e>]) -> Result<Value<'e>> {
     );
     let wake = env.open_channel(args[4])?;
     let cwd = env.opt::<String>(args, 5)?;
+    let plist = env.opt::<SpawnState>(args, 6)?.unwrap_or_default();
+
     // The interval through the constructor, because the frame ceiling derives from it;
     // see `Options::with_min_redisplay_interval`.
-    let defaults = match env.opt::<i64>(args, 6)? {
-        Some(ms) => session::Options::with_min_redisplay_interval(
-            std::time::Duration::from_millis(ms.max(0) as u64),
-        ),
+    let defaults = match plist.min_redisplay_interval {
+        Some(interval) => session::Options::with_min_redisplay_interval(interval),
         None => session::Options::default(),
     };
     let options = session::Options {
-        backlog_limit: env
-            .opt::<i64>(args, 7)?
-            .map_or(defaults.backlog_limit, |n| n.max(1) as usize),
-        graphics: match args.get(8) {
-            Some(&shown) => shown_formats(env, shown)?,
-            None => defaults.graphics,
-        },
+        backlog_limit: plist.backlog_limit.unwrap_or(defaults.backlog_limit),
+        initial: plist.initial,
         ..defaults
     };
 
@@ -902,6 +912,46 @@ fn spawn<'e>(env: Env<'e>, args: &[Value<'e>]) -> Result<Value<'e>> {
     )
     .or_signal(env)?;
     env.into_lisp(session)
+}
+
+/// What `cooked--spawn' can be told beyond ARGV, ENV, ROWS, COLS, WAKE and DIRECTORY,
+/// decoded once from its INITIAL-STATE plist rather than through a run of `args.get(n)`
+/// checks that each grow the arity by one. See the docstring on `cooked--spawn' above
+/// for what each key means and what omitting it does.
+#[derive(Debug, Clone, Default)]
+struct SpawnState {
+    min_redisplay_interval: Option<std::time::Duration>,
+    backlog_limit: Option<usize>,
+    initial: session::InitialState,
+}
+
+impl<'e> FromLisp<'e> for SpawnState {
+    fn from_lisp(env: &Env<'e>, v: Value<'e>) -> Result<Self> {
+        let min_redisplay_interval = env.plist_get(v, sym!(env, ":min-redisplay-interval")?)?;
+        let backlog_limit = env.plist_get(v, sym!(env, ":backlog-limit")?)?;
+        let graphics = env.plist_get(v, sym!(env, ":graphics")?)?;
+        let color_scheme = env.plist_get(v, sym!(env, ":color-scheme")?)?;
+        let palette_defaults = env.plist_get(v, sym!(env, ":palette-defaults")?)?;
+        let palette_colors = env.plist_get(v, sym!(env, ":palette-colors")?)?;
+        let frame_size = env.plist_get(v, sym!(env, ":frame-size")?)?;
+        Ok(Self {
+            min_redisplay_interval: env
+                .from_lisp::<Option<i64>>(min_redisplay_interval)?
+                .map(|ms| std::time::Duration::from_millis(ms.max(0) as u64)),
+            backlog_limit: env
+                .from_lisp::<Option<i64>>(backlog_limit)?
+                .map(|n| n.max(1) as usize),
+            initial: session::InitialState {
+                graphics: shown_formats(*env, graphics)?,
+                color_scheme: env.from_lisp::<Option<ColorScheme>>(color_scheme)?,
+                palette: emu::Palette::new(
+                    colors(*env, palette_defaults)?,
+                    colors(*env, palette_colors)?,
+                ),
+                frame_size: env.from_lisp::<Option<FrameSize>>(frame_size)?,
+            },
+        })
+    }
 }
 
 fn drain<'e>(env: Env<'e>, args: &[Value<'e>]) -> Result<Value<'e>> {
@@ -1285,16 +1335,25 @@ fn image_forget<'e>(env: Env<'e>, args: &[Value<'e>]) -> Result<Value<'e>> {
     Ok(env.nil())
 }
 
+impl<'e> FromLisp<'e> for ColorScheme {
+    /// `dark' or `light', the only two symbols `CSI ? 996 n' or mode 2031 can answer.
+    ///
+    /// Compared by identity rather than by name: the protocol has exactly these two
+    /// answers, and anything else is the caller passing the wrong thing rather than a
+    /// case worth reading defensively.
+    fn from_lisp(env: &Env<'e>, v: Value<'e>) -> Result<Self> {
+        if env.eq(v, sym!(env, "dark")?) {
+            Ok(ColorScheme::Dark)
+        } else if env.eq(v, sym!(env, "light")?) {
+            Ok(ColorScheme::Light)
+        } else {
+            Err(env.signal_wrong_type("cooked-color-scheme-p", v))
+        }
+    }
+}
+
 fn set_color_scheme<'e>(env: Env<'e>, args: &[Value<'e>]) -> Result<Value<'e>> {
-    // Two symbols compared by identity: the protocol has exactly these two answers, and
-    // anything else is the caller passing the wrong thing.
-    let scheme = if env.eq(args[1], sym!(env, "dark")?) {
-        ColorScheme::Dark
-    } else if env.eq(args[1], sym!(env, "light")?) {
-        ColorScheme::Light
-    } else {
-        return Err(env.signal_wrong_type("cooked-color-scheme-p", args[1]));
-    };
+    let scheme = env.from_lisp::<ColorScheme>(args[1])?;
     let owed = env
         .from_lisp::<&Session>(args[0])?
         .term()
@@ -1302,24 +1361,62 @@ fn set_color_scheme<'e>(env: Env<'e>, args: &[Value<'e>]) -> Result<Value<'e>> {
     env.into_lisp(owed.as_deref())
 }
 
-/// See `cooked--set-frame-size'.
-fn set_frame_size<'e>(env: Env<'e>, args: &[Value<'e>]) -> Result<Value<'e>> {
-    let px = |i: usize| -> Result<u32> {
-        args.get(i)
-            .copied()
-            .map(|v| env.from_lisp::<Option<i64>>(v))
-            .transpose()?
-            .flatten()
-            .map_or(Ok(0), |n| Ok(n.clamp(0, i64::from(u32::MAX)) as u32))
-    };
-    let size = FrameSize::new(
-        env.from_lisp::<u16>(args[1])?,
-        env.from_lisp::<u16>(args[2])?,
-    );
-    let size = match (px(3)?, px(4)?) {
+/// A pixel dimension from an optional Lisp integer, clamped into `u32`. Nil -- absent,
+/// or the argument omitted entirely -- reads as 0, which `frame_size_with_pixels` takes
+/// to mean "no pixel size", the same reading `14t` already gives an unmeasured font.
+fn pixel_dimension<'e>(env: Env<'e>, v: Value<'e>) -> Result<u32> {
+    Ok(env
+        .from_lisp::<Option<i64>>(v)?
+        .map_or(0, |n| n.clamp(0, i64::from(u32::MAX)) as u32))
+}
+
+/// ROWS by COLS, with HEIGHT and WIDTH applied as the frame's pixel size only when both
+/// are nonzero. Either alone would describe a rectangle with one side unmeasured, which
+/// is not a size at all, so a lone nonzero dimension is treated the same as neither
+/// being reported -- `cooked--set-frame-size' and `FrameSize''s `FromLisp' impl both
+/// decode their pixel arguments through [`pixel_dimension`] and combine them here, so
+/// the rule lives in one place regardless of which one is asked.
+fn frame_size_with_pixels(rows: u16, cols: u16, height: u32, width: u32) -> FrameSize {
+    let size = FrameSize::new(rows, cols);
+    match (height, width) {
         (0, _) | (_, 0) => size,
         (height, width) => size.with_pixels(PixelSize::new(width, height)),
+    }
+}
+
+impl<'e> FromLisp<'e> for FrameSize {
+    /// (ROWS COLS HEIGHT WIDTH), the shape the INITIAL-STATE plist's `:frame-size' takes
+    /// as one list where `cooked--set-frame-size' takes four separate arguments -- see
+    /// [`frame_size_with_pixels`] for what HEIGHT and WIDTH mean when one is missing.
+    fn from_lisp(env: &Env<'e>, v: Value<'e>) -> Result<Self> {
+        let rows = env.car(v)?;
+        let rest = env.cdr(v)?;
+        let cols = env.car(rest)?;
+        let rest = env.cdr(rest)?;
+        let height = env.car(rest)?;
+        let rest = env.cdr(rest)?;
+        let width = env.car(rest)?;
+        Ok(frame_size_with_pixels(
+            env.from_lisp::<u16>(rows)?,
+            env.from_lisp::<u16>(cols)?,
+            pixel_dimension(*env, height)?,
+            pixel_dimension(*env, width)?,
+        ))
+    }
+}
+
+/// See `cooked--set-frame-size'.
+fn set_frame_size<'e>(env: Env<'e>, args: &[Value<'e>]) -> Result<Value<'e>> {
+    let px = |i: usize| match args.get(i) {
+        Some(&v) => pixel_dimension(env, v),
+        None => Ok(0),
     };
+    let size = frame_size_with_pixels(
+        env.from_lisp::<u16>(args[1])?,
+        env.from_lisp::<u16>(args[2])?,
+        px(3)?,
+        px(4)?,
+    );
     env.from_lisp::<&Session>(args[0])?
         .term()
         .set_frame_size(size);

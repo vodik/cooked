@@ -4,7 +4,7 @@
 //! the reader never touches Lisp. It parses into the shared [`Term`] and pokes a pipe
 //! descriptor obtained from `open_channel`; Emacs' filter then drains on the main thread.
 
-use crate::emu::{Delta, Event, Feed, ReplyKind, Term};
+use crate::emu::{ColorScheme, Delta, Event, Feed, FrameSize, Palette, ReplyKind, Term};
 use crate::error::Result;
 use crate::lock::LockExt;
 use crate::pty::{
@@ -993,6 +993,41 @@ impl Interrupt {
     }
 }
 
+/// What a `Term` is told before its child can send it a byte, decoded once from the
+/// plist `cooked--spawn` takes as its INITIAL-STATE argument and applied inside
+/// [`Session::spawn`], before the reader thread starts.
+///
+/// Every field here used to arrive a different way. `graphics` travelled through
+/// [`Options`] from the start, because a picture claimed sight-unseen is a blank
+/// rectangle nothing can undo; the other three arrived through three separate calls --
+/// `cooked--set-color-scheme`, `cooked--set-palette`, `cooked--set-frame-size` -- made
+/// only *after* `cooked--spawn` had already returned and its reader thread was already
+/// running. A child that probes in its first instant -- `OSC 11 ; ?`, `CSI ? 996 n`,
+/// `CSI 19 t` -- could win that race, since nothing serialises "Lisp's three pushes"
+/// against "the reader thread's first read": r3-winops measured the child winning about
+/// one run in three and slept the child 0.2s to hide it rather than fix it. Folding all
+/// four into one value applied before the reader thread exists removes the race instead:
+/// there is no window left in which the reader can run ahead of this.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct InitialState {
+    /// The pictures Emacs can show. Nothing by default: hidden-until-told is the answer
+    /// that is never a blank rectangle, unlike the emulator's own default, which claims
+    /// every format.
+    pub graphics: crate::emu::ShownFormats,
+    /// Whether Emacs renders light or dark, for `CSI ? 996 n`. `None` until Emacs has
+    /// said, there being no protocol number for "unknown"; see [`ColorScheme`].
+    pub color_scheme: Option<ColorScheme>,
+    /// The colours Emacs draws with, for every OSC 10--19 and OSC 4 query; see
+    /// [`Palette`]. [`Palette::default`] is silence for every slot, the same answer a
+    /// bare `Term` already gives, so a caller with nothing to say here needs no special
+    /// case.
+    pub palette: Palette,
+    /// The frame's text area, for `CSI 19 t`/`15 t`. `None` until Emacs has reported
+    /// one, which is the same silence `19t` has always answered with before a session's
+    /// first resize; see [`FrameSize`].
+    pub frame_size: Option<FrameSize>,
+}
+
 /// The tuning knobs [`Session::spawn`] takes, named rather than positional, with their
 /// defaults in the [`Default`] impl beside the fields they belong to.
 #[derive(Debug, Clone)]
@@ -1005,14 +1040,8 @@ pub(crate) struct Options {
     pub frame_ceiling: std::time::Duration,
     /// See [`Shared::backlog_limit`].
     pub backlog_limit: usize,
-    /// The pictures Emacs can show, set on the emulator before the child runs.
-    ///
-    /// Nothing by default. A child can probe in its first instant, before Lisp has had a
-    /// chance to say anything after the spawn returns, and that probe used to be answered
-    /// from the emulator's own default, which claims everything. Hidden-until-told is the
-    /// answer that is never a blank rectangle: a producer wrongly refused draws in half
-    /// blocks.
-    pub graphics: crate::emu::ShownFormats,
+    /// What the `Term` starts already knowing; see [`InitialState`].
+    pub initial: InitialState,
     /// Where the pacing reads the time; see [`Clock`].
     ///
     /// Carried here rather than taken by [`Session::spawn`] so that the Lisp side is
@@ -1037,7 +1066,7 @@ impl Options {
             quiescence: QUIESCENCE,
             frame_ceiling: min_redisplay_interval,
             backlog_limit: crate::emu::BACKLOG_HIGH_WATER,
-            graphics: crate::emu::ShownFormats::NONE,
+            initial: InitialState::default(),
             clock: Clock::default(),
         }
     }
@@ -1111,7 +1140,21 @@ impl Session {
         }
         // The reader sends what it can answer itself, so a reply never waits on a drain.
         term.answer_directly();
-        term.set_graphics_shown(options.graphics);
+        // Applied here, before the reader thread below ever runs, so nothing can read a
+        // byte from the child until the `Term` already knows everything Lisp pushed
+        // down at spawn; see `InitialState`. `set_color_scheme`'s return is the bytes a
+        // mode 2031 subscriber is owed, and there cannot be one yet -- the child has not
+        // run a single instruction -- so it is dropped rather than sent.
+        term.set_graphics_shown(options.initial.graphics);
+        if let Some(scheme) = options.initial.color_scheme {
+            let _ = term.set_color_scheme(scheme);
+        }
+        // Cloned rather than moved: `options` as a whole is still needed below, to build
+        // `Notifier` from its pacing fields.
+        term.set_palette(options.initial.palette.clone());
+        if let Some(frame_size) = options.initial.frame_size {
+            term.set_frame_size(frame_size);
+        }
         let shared = Arc::new(Shared {
             pty,
             term: Mutex::new(term),

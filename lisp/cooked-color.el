@@ -139,7 +139,12 @@ core holds the answer so it can answer `CSI ? 996 n\\=' itself, and hands back t
 bytes a mode 2031 subscriber is owed, which are nil far more often than not.
 
 Sent rather than left to ride the drain because a theme change produces no child
-output, so nothing would ever wake one; see `cooked--set-color-scheme\\='."
+output, so nothing would ever wake one; see `cooked--set-color-scheme\\='.
+
+A session\\='s first colour scheme is not sent from here but folded into the
+plist `cooked--spawn\\=' takes, through this function\\='s own
+`cooked--color-scheme\\=', so the core has it before the child can probe; see
+`cooked--start\\='."
   (when-let* ((session (cooked--live-session))
               (bytes (cooked--set-color-scheme session (cooked--color-scheme))))
     (cooked--reply-if-live bytes)))
@@ -213,12 +218,16 @@ query rather than trusting a level that may have moved since this ran."
 (defun cooked--sync-palette ()
   "Tell this buffer\\='s child the colours Emacs draws it with.
 
-Everything that can move one of these answers ends up here: a theme, through
-`cooked-theme-change-hook\\='; an OSC 10, 11 or 12 set or reset, which reaches
-that same hook through `cooked--flush-face-cache\\='; the frame\\='s cursor
-colour, from the same walk of the sessions the window hooks already make, after
-`cooked--sync-cursor-color\\=' has settled it; and the spawn, so a child that
-probes in its first instant is answered.
+Everything that can move one of these answers after the session has started
+ends up here: a theme, through `cooked-theme-change-hook\\='; an OSC 10, 11 or
+12 set or reset, which reaches that same hook through
+`cooked--flush-face-cache\\='; and the frame\\='s cursor colour, from the same
+walk of the sessions the window hooks already make, after
+`cooked--sync-cursor-color\\=' has settled it.  A session\\='s first palette is
+not pushed from here but folded into the plist `cooked--spawn\\=' takes,
+through this function\\='s own `cooked--palette-defaults\\=' and
+`cooked--palette-colors\\=', so the core has it before the child can probe;
+see `cooked--start\\='.
 
 Compared before it is pushed, because most of those moments have nothing to
 report: a window change asks this of every session and is otherwise a handful
