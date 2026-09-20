@@ -573,6 +573,10 @@ impl State {
         let events = self.settle_events(&marks);
         let levels = Levels::of(self);
         let cursor_chars = cursor_chars(self.screen(), levels.cursor);
+        // Asked once for the whole drain: the layout shapes Emacs' screen region to it and
+        // [`Delta::used`] reports the same number, and nothing between the two writes to
+        // the grid. The answer is a scan back over the blank rows for the last one holding
+        // text, which on a screen using a few of its rows is most of what a drain costs.
         let used = self.screen().used();
         let layout = if self.shown.is_alternate() {
             front::Layout::alternate(self.screen().height())
@@ -619,7 +623,7 @@ impl State {
             rows,
             height: screen.height(),
             width: screen.width(),
-            used: screen.used(),
+            used,
             // The seam is a property of the primary: the alt screen contributes no
             // scrollback, and its row 0 begins a buffer line of its own.
             head: if levels.alt {
