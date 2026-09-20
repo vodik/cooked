@@ -427,6 +427,12 @@ impl Stream {
     /// the first thing on a fresh line being a combining mark -- is dropped, which is
     /// the one thing that can be done with it: there is nothing for it to combine with,
     /// and hanging it on a blank would invent a character the child never sent.
+    ///
+    /// The resize is `Screen::join`'s, rule for rule: a `before` of zero names a cell
+    /// that was never there and is not resized, and the columns a narrowing sheds become
+    /// blanks. What differs is only how the cell is located -- the grid counts back from
+    /// the cursor, this remembers where the print landed -- which is why the column the
+    /// next print uses is moved only where it still sits at the cell's old right edge.
     fn join(&mut self, c: char, before: Cols, after: Cols) {
         let (before, after) = (before.get(), after.get());
         let Some(base) = self.base else { return };
@@ -440,18 +446,32 @@ impl Stream {
             .into_string();
         marks.push(c);
         self.line[base].marks = Some(marks.into_boxed_str());
-        if after > before {
-            // The character grew. Claim the columns to its right, destroying whatever
-            // stood there -- which is what a terminal does, and here can only be blanks
-            // or text this same line already wrote past.
-            self.pad(base + after);
-            let (from, to) = (base + before.max(1), base + after);
-            self.clear_torn(from, to);
-            let continuation = Column::new(self.line[base].cell.with_char(CONTINUATION));
-            for column in &mut self.line[from..to] {
-                *column = continuation.clone();
+        // Nothing to resize, which is almost every mark that joins a cell.
+        if after != before && before != 0 {
+            // The resized columns take the cell's own rendition, as the grid's do, so a
+            // widened emoji does not leave a differently-coloured half behind it.
+            let cell = self.line[base].cell;
+            if after > before {
+                // The character grew. Claim the columns to its right, destroying whatever
+                // stood there -- which is what a terminal does, and here can only be
+                // blanks or text this same line already wrote past.
+                self.pad(base + after);
+                self.clear_torn(base + before, base + after);
+                let continuation = Column::new(cell.with_char(CONTINUATION));
+                self.line[base + before..base + after].fill(continuation);
+            } else {
+                // The character shrank. The columns it no longer reaches are blanks and
+                // not continuations of it: a continuation nothing leads is a column the
+                // next write would destroy a whole character for.
+                let blank = Column::new(Cell::blank(cell.style()));
+                let end = (base + before).min(self.line.len());
+                self.line[base + after..end].fill(blank);
             }
-            self.col = self.col.max(base + after);
+            if self.col == base + before {
+                self.col = base + after;
+            } else if after > before {
+                self.col = self.col.max(base + after);
+            }
         }
         self.seg.settle(Cols::new(after));
     }
@@ -1204,6 +1224,60 @@ mod tests {
         // EL 0 cutting the line inside it: the line ends before the character, since
         // there is no right margin here to blank the surviving half out to.
         assert_eq!(Buffer::new().feed("ab漢cd\x1b[4G\x1b[K\n"), "ab\n");
+    }
+
+    /// A screenful of the same bytes, for a case whose whole point is that the filter
+    /// and the grid must not disagree about it.
+    fn on_a_grid(bytes: &str) -> String {
+        let mut term = super::super::term::Term::new(3, 20);
+        term.feed(bytes.as_bytes());
+        term.screen_text()
+            .first()
+            .map(|runs| runs.iter().map(|run| run.text).collect())
+            .unwrap_or_default()
+    }
+
+    /// A variation selector that *narrows* a cell frees the column it no longer reaches,
+    /// as `Screen::join` does, rather than leaving a continuation behind it.
+    ///
+    /// The orphan is invisible on its own -- a continuation column contributes no
+    /// characters -- and becomes visible at the next write into it: `Stream::clear_torn'
+    /// reads it as the second half of a two-column character and blanks the character it
+    /// finds to its left, which is the one the selector just narrowed.
+    #[test]
+    fn a_narrowing_variation_selector_frees_the_column_it_gives_up() {
+        // U+231A WATCH is two columns; U+FE0E asks for the one-column text form.
+        let narrowed = "\u{231A}\u{FE0E}\x1b[2Gx";
+        assert_eq!(on_a_grid(narrowed), "\u{231A}\u{FE0E}x");
+        assert_eq!(Buffer::new().feed(narrowed), "\u{231A}\u{FE0E}x");
+    }
+
+    /// A cell that was never there is not resized, which is `Screen::join`'s
+    /// `before == 0` guard.
+    ///
+    /// Reachable through a cluster the segmenter gave up on: past `MAX_CLUSTER` code
+    /// points it starts over, so a zero-width code point after one of those measures
+    /// zero and the next code point can grow it. Without the guard the filter claimed a
+    /// column to the right of a cell that never asked for one.
+    #[test]
+    fn a_cell_that_was_never_there_is_not_resized() {
+        // 600 combining marks overrun the segmenter's cluster; U+070F then measures zero
+        // and U+231A grows it to two.
+        let tail = "\u{70F}\u{231A}\x1b[4Gx";
+        let overrun = format!("ab{}{tail}", "\u{301}".repeat(600));
+        assert_eq!(
+            Buffer::new()
+                .feed(&overrun)
+                .chars()
+                .rev()
+                .take(2)
+                .collect::<String>(),
+            on_a_grid(&overrun)
+                .chars()
+                .rev()
+                .take(2)
+                .collect::<String>(),
+        );
     }
 
     #[test]
