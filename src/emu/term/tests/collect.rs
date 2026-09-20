@@ -186,3 +186,73 @@ fn a_link_only_ever_seen_in_scrollback_survives_a_collection_pressed_by_a_new_on
         "the row that scrolled off is exactly the one that was drained linked"
     );
 }
+
+/// The rendition twin of the link test above: the sequence that makes
+/// `State::collect_styles`' `pending_scrollback` mark load-bearing.
+///
+/// A rendition needs no separate "opened but not yet printed" step the way a link does --
+/// `State::pen` calls `StyleStore::style_id` right before the character is placed, so an
+/// id is only ever minted alongside a cell that names it -- which makes the reachable
+/// shape simpler than the link one: print a distinctly-coloured character, scroll its row
+/// off *before draining even once*, so neither `screens` nor `front` (Emacs' last-drained
+/// copy, still all default) has ever seen it, then press a collection with a second
+/// distinct colour before that second one is interned. If `pending_scrollback` were not
+/// marked, the first colour's id would be freed -- nothing else names it -- and handed
+/// straight to the second colour on a limit-of-one table, so the archived row and the new
+/// character would end up sharing one id that names only the second colour.
+#[test]
+fn a_rendition_only_ever_seen_in_scrollback_survives_a_collection_pressed_by_a_new_one() {
+    let style_a = Style {
+        fg: Color::Rgb(10, 20, 30),
+        ..Style::default()
+    };
+    let style_b = Style {
+        fg: Color::Rgb(200, 150, 100),
+        ..Style::default()
+    };
+
+    let mut t = Term::with_id_limits(2, 20, 1, 4096);
+
+    // Printed and, before anything is ever drained, scrolled off a two-row grid: two
+    // linefeeds put it out of `screens`, and `front` never had a chance to learn of it.
+    t.feed(b"\x1b[38;2;10;20;30mx\r\n\r\n");
+
+    // The second colour presses a collection before it is interned -- the table's limit
+    // is one, and the default plus the first colour already fill it.
+    t.feed(b"\x1b[38;2;200;150;100my");
+
+    let delta = t.drain();
+
+    let a_id = delta
+        .scrolled
+        .first()
+        .and_then(|row| row.runs.iter().find(|r| r.text == "x"))
+        .map(|run| run.style)
+        .expect("the archived row still carries the rendition it was printed in");
+    let b_id = delta
+        .rows
+        .iter()
+        .flat_map(|row| row.runs.iter())
+        .find(|r| r.text == "y")
+        .map(|run| run.style)
+        .expect("the new character is on the grid, damaged in this first drain");
+
+    assert_ne!(
+        a_id, b_id,
+        "the row in pending_scrollback still names a_id, so the collection the second \
+         colour pressed must not have freed it"
+    );
+
+    assert!(
+        delta.styles.contains(&(a_id, style_a)),
+        "{:?} does not announce a_id's own colour: {:?}",
+        delta.styles,
+        style_a
+    );
+    assert!(
+        delta.styles.contains(&(b_id, style_b)),
+        "{:?} does not announce b_id's own colour: {:?}",
+        delta.styles,
+        style_b
+    );
+}
