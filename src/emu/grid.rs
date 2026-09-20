@@ -55,15 +55,18 @@ impl<M: Default> Grid<M> {
         grid
     }
 
-    /// Take the shape of a ROWS by COLS grid, keeping what is here if it already has it.
+    /// Take the shape of a ROWS by COLS grid, keeping the rows if it already has that
+    /// shape, and say whether it did.
     ///
     /// The shape is the question and the reset is the answer, so both are here rather than
     /// at a caller that asks and then acts: the copy of what Emacs shows reshapes itself
     /// this way on every drain, and a drain that did not reshape must keep the rows.
-    pub(crate) fn ensure(&mut self, rows: usize, cols: usize) {
-        if self.height() != rows || self.width() != cols {
-            self.reset(rows, cols);
+    pub(crate) fn ensure(&mut self, rows: usize, cols: usize) -> bool {
+        if self.height() == rows && self.width() == cols {
+            return true;
         }
+        self.reset(rows, cols);
+        false
     }
 
     /// Lay the grid out again as ROWS by COLS, keeping nothing.

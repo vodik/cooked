@@ -532,6 +532,27 @@ fn a_wrapped_blank_row_the_screen_grows_back_over_is_sent() {
     assert_eq!(wrapped, [(2, true)]);
 }
 
+/// The alternate screen's region is the whole grid, so a row the primary had trimmed off
+/// the bottom is Emacs' to keep again as soon as the alternate has drawn it once.
+///
+/// The primary trims its region to the rows in use and the buffer then holds no line at
+/// all for the rest; entering the alternate grows it back to the full height, which is
+/// what `cooked--fit-screen' does. Without that, a full-screen program on a terminal whose
+/// primary was short would resend every row below where the prompt had been, on every
+/// frame, for as long as it ran.
+#[test]
+fn the_alternate_screen_holds_again_the_rows_the_primary_had_trimmed() {
+    // One row in use, so Emacs holds row 0 and nothing below it.
+    let mut t = settled(4, 10, b"one");
+    t.feed(b"\x1b[?1049h");
+    assert_eq!(sent(&mut t), vec![0, 1, 2, 3]);
+    t.feed(b"\x1b[H\x1b[2Jtop\r\nmid");
+    t.drain();
+    // The same frame written back: every row is damaged and every row is Emacs' already.
+    t.feed(b"\x1b[H\x1b[2Jtop\r\nmid");
+    assert_eq!(sent(&mut t), Vec::<usize>::new());
+}
+
 #[test]
 fn a_washed_row_a_scroll_brings_up_from_below_the_region_is_sent() {
     // Emacs holds only row 0; the washed rows below it were trimmed. Scrolling up by two
