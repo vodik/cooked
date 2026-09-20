@@ -49,15 +49,51 @@ struct Reach {
     touches: u64,
 }
 
+impl Reach {
+    /// A grid of ROWS rows nothing has read the flags of: text may reach its last row.
+    fn unread(rows: usize) -> Self {
+        Self {
+            row: rows.saturating_sub(1),
+            touches: 0,
+        }
+    }
+
+    /// ROW, as read off the flags at the TOUCHESth damage.
+    fn read(row: usize, touches: u64) -> Self {
+        Self { row, touches }
+    }
+
+    /// Whether the flags have been read since the TOUCHESth damage, and so whether the
+    /// row still bounds every row that has gained text.
+    fn is_current(self, touches: u64) -> bool {
+        self.touches == touches
+    }
+
+    /// The reach after the rows it bounds have moved down N, no lower than BOTTOM, where
+    /// the rotation stops.
+    ///
+    /// The damage count is deliberately carried over rather than refreshed: a row damaged
+    /// since the count was taken has moved too, and its flag with it, so the read that has
+    /// yet to happen still finds it at its new index. That is why this is a method and not
+    /// a `..reach` spread at the call site -- the subtlety is the field that does *not*
+    /// change.
+    fn moved_down(self, n: usize, bottom: usize) -> Self {
+        if self.row > bottom {
+            return self;
+        }
+        Self {
+            row: (self.row + n).min(bottom),
+            ..self
+        }
+    }
+}
+
 impl Damage {
     fn new(rows: usize) -> Self {
         Self {
             dirty: vec![true; rows],
             touches: 0,
-            reach: Memo::new(Reach {
-                row: rows.saturating_sub(1),
-                touches: 0,
-            }),
+            reach: Memo::new(Reach::unread(rows)),
         }
     }
 
@@ -123,27 +159,17 @@ impl Damage {
             Direction::Up => self.dirty[top..=bottom].rotate_left(n),
             Direction::Down => {
                 self.dirty[top..=bottom].rotate_right(n);
-                // The remembered row moves with the rows it bounds, and the damage count
-                // it was read at does not: a row damaged since then has moved too, and its
-                // flag has moved with it, so the fold that has yet to happen still finds
-                // it. Nothing here depends on the caller damaging a range afterwards.
-                let reach = self.reach.get();
-                if reach.row <= bottom {
-                    self.reach.set(Reach {
-                        row: (reach.row + n).min(bottom),
-                        ..reach
-                    });
-                }
+                // The remembered row moves with the rows it bounds; see
+                // `Reach::moved_down` for the count it keeps, and why nothing here depends
+                // on the caller damaging a range afterwards.
+                self.reach.set(self.reach.get().moved_down(n, bottom));
             }
         }
     }
 
-    /// Remember ROW as the reach as of the damage done so far.
+    /// Remember ROW as the reach, read off the flags as they stand.
     fn set_reach(&self, row: usize) {
-        self.reach.set(Reach {
-            row,
-            touches: self.touches,
-        });
+        self.reach.set(Reach::read(row, self.touches));
     }
 
     /// How far down the grid text can reach: the remembered bound widened over every row
@@ -152,19 +178,26 @@ impl Damage {
     /// A row can only come to hold text by being written, and a write damages it, so the
     /// damaged rows are a superset of the rows that have gained text, and the highest of
     /// them bounds the reach. A scan of the flags rather than bookkeeping per write (see
-    /// [`Damage::damaged`]), skipped entirely when nothing has been damaged since the last
-    /// read -- which is the second of a drain's two asks, and the whole of a drain that
-    /// changed nothing.
+    /// [`Damage::damaged`]), and only of the flags *below* the remembered row, since no
+    /// other can widen it. It is skipped entirely when nothing has been damaged since the
+    /// last read -- the second of a drain's two asks, and the whole of a drain that changed
+    /// nothing -- and on a screen whose text reaches its last row, which is every full
+    /// screen.
     fn reach(&self) -> usize {
         let last = self.dirty.len().saturating_sub(1);
         let reach = self.reach.get();
-        if reach.touches == self.touches {
-            return reach.row.min(last);
+        let row = reach.row.min(last);
+        // Nothing damaged since the last read, or nothing below the row to find: a full
+        // screen is the second case, and there the flags are never read at all.
+        if reach.is_current(self.touches) || row == last {
+            return row;
         }
-        let damaged = self.dirty.iter().rposition(|&dirty| dirty).unwrap_or(0);
-        let row = reach.row.max(damaged).min(last);
-        self.set_reach(row);
-        row
+        let widened = self.dirty[row + 1..]
+            .iter()
+            .rposition(|&dirty| dirty)
+            .map_or(row, |index| row + 1 + index);
+        self.set_reach(widened);
+        widened
     }
 
     /// Indices of the damaged rows, clearing them.
