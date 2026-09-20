@@ -10,41 +10,72 @@
 /// truncated -- half a URI is a different URI, and half a kitty image is not a smaller
 /// image but a parse error with a plausible-looking prefix -- and the way that is held to
 /// is that [`Payload::finish`] is the only way to the bytes, and gives none once anything
-/// has been turned away.
+/// has been turned away. Once a payload has overflowed it stops holding bytes at all: the
+/// state is [`Buffer::Overflowed`], not a flag next to a buffer someone forgets to check.
 ///
 /// The allocation outlives the string, which is why this is a field of the parser and not
-/// of the state that is collecting into it.
+/// of the state that is collecting into it: [`Payload::begin`] hands the same `Vec` back
+/// to whichever variant starts the next string, overflowed or not.
 #[derive(Default)]
 pub(super) struct Payload {
-    bytes: Vec<u8>,
+    buffer: Buffer,
     limit: usize,
-    overflowed: bool,
+}
+
+/// Either still collecting, or poisoned and empty.
+enum Buffer {
+    Collecting(Vec<u8>),
+    /// Turned away for growing past the limit. Holds the emptied `Vec` so its allocation
+    /// can be reused by the next [`Payload::begin`] rather than freed and reallocated.
+    Overflowed(Vec<u8>),
+}
+
+impl Default for Buffer {
+    fn default() -> Self {
+        Buffer::Collecting(Vec::new())
+    }
 }
 
 impl Payload {
     /// Start a string of at most LIMIT bytes, forgetting whatever the last one left.
     pub(super) fn begin(&mut self, limit: usize) {
-        self.bytes.clear();
+        let (Buffer::Collecting(mut bytes) | Buffer::Overflowed(mut bytes)) =
+            std::mem::take(&mut self.buffer);
+        bytes.clear();
         self.limit = limit;
-        self.overflowed = false;
+        self.buffer = Buffer::Collecting(bytes);
     }
 
-    /// Bytes collected so far.
+    /// Bytes collected so far, or the limit once overflowed: see [`Payload::finish`].
     pub(super) fn len(&self) -> usize {
-        self.bytes.len()
+        match &self.buffer {
+            Buffer::Collecting(bytes) => bytes.len(),
+            Buffer::Overflowed(_) => self.limit,
+        }
     }
 
     /// Collect BYTES, or as many of them as there is room for.
     #[inline]
     pub(super) fn extend(&mut self, bytes: &[u8]) {
-        let room = self.limit.saturating_sub(self.bytes.len());
-        self.overflowed |= bytes.len() > room;
-        self.bytes
-            .extend_from_slice(&bytes[..bytes.len().min(room)]);
+        let Buffer::Collecting(buf) = &mut self.buffer else {
+            return;
+        };
+        let room = self.limit.saturating_sub(buf.len());
+        if bytes.len() > room {
+            buf.extend_from_slice(&bytes[..room]);
+            let mut emptied = std::mem::take(buf);
+            emptied.clear();
+            self.buffer = Buffer::Overflowed(emptied);
+        } else {
+            buf.extend_from_slice(bytes);
+        }
     }
 
     /// The whole payload, or `None` if it was ever more than there was room for.
     pub(super) fn finish(&self) -> Option<&[u8]> {
-        (!self.overflowed).then_some(&self.bytes)
+        match &self.buffer {
+            Buffer::Collecting(bytes) => Some(bytes),
+            Buffer::Overflowed(_) => None,
+        }
     }
 }
