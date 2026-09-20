@@ -156,10 +156,9 @@ impl AtomicMode {
 /// finish and two programs.
 ///
 /// A struct rather than a pair so that the two are sampled and compared as one fact: a
-/// change in either is a change in what is running, and [`Shared::sample_foreground`]
-/// needs no rule about which half to look at first.
-///
-/// [`Shared::sample_foreground`]: crate::session::Shared::sample_foreground
+/// change in either is a change in what is running, and `Shared::sample_foreground` --
+/// which is what samples it, on the reader's idle tick -- needs no rule about which half
+/// to look at first.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Foreground {
     pub pgrp: Pid,
