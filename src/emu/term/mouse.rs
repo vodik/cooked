@@ -74,15 +74,6 @@ impl Button {
     /// gesture.
     const MODIFIERS: u8 = 4 | 8 | 16;
 
-    /// RAW as a button byte, or `None` for a number that cannot be one.
-    ///
-    /// Parsed once, at the FFI boundary, so that everything below holds a number the
-    /// encoding can express and nothing re-asks; see [`Button`] for the bound and why it
-    /// is the encoding's rather than Lisp's.
-    pub(crate) fn parse(raw: i64) -> Option<Self> {
-        u8::try_from(raw).ok().map(Self)
-    }
-
     /// The number an SGR report prints, which is the byte itself: 1006 puts the button
     /// byte on the wire as decimal digits, modifiers, motion bit and all.
     fn get(self) -> u32 {
@@ -121,6 +112,19 @@ impl Button {
         } else {
             Gesture::Drag
         }
+    }
+}
+
+impl TryFrom<i64> for Button {
+    type Error = i64;
+
+    /// RAW as a button byte, or its own value back for a number that cannot be one.
+    ///
+    /// Parsed once, at the FFI boundary, so that everything below holds a number the
+    /// encoding can express and nothing re-asks; see [`Button`] for the bound and why it
+    /// is the encoding's rather than Lisp's.
+    fn try_from(raw: i64) -> Result<Self, i64> {
+        u8::try_from(raw).map(Self).map_err(|_| raw)
     }
 }
 
@@ -272,7 +276,7 @@ mod tests {
 
     /// RAW as the button byte it is, for a test that means to write one down.
     fn b(raw: i64) -> Button {
-        Button::parse(raw).expect("a button byte")
+        Button::try_from(raw).expect("a button byte")
     }
 
     fn mouse(format: MouseFormat) -> Mouse {
@@ -466,9 +470,9 @@ mod tests {
 
     #[test]
     fn a_number_that_cannot_be_a_button_byte_is_refused() {
-        assert_eq!(Button::parse(0), Some(b(0)));
-        assert_eq!(Button::parse(255), Some(b(255)));
-        assert_eq!(Button::parse(256), None);
-        assert_eq!(Button::parse(-1), None);
+        assert_eq!(Button::try_from(0), Ok(b(0)));
+        assert_eq!(Button::try_from(255), Ok(b(255)));
+        assert_eq!(Button::try_from(256), Err(256));
+        assert_eq!(Button::try_from(-1), Err(-1));
     }
 }

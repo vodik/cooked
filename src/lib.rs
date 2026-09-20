@@ -944,7 +944,7 @@ fn send_mouse_report<'e>(env: Env<'e>, args: &[Value<'e>]) -> Result<Value<'e>> 
     // Refused rather than clamped: a number outside the byte xterm's encoding has room
     // for names no button, and a clamp would spell it as whichever button sits at the
     // edge. See [`Button`].
-    let Some(button) = Button::parse(env.from_lisp::<i64>(args[1])?) else {
+    let Ok(button) = Button::try_from(env.from_lisp::<i64>(args[1])?) else {
         return Ok(env.nil());
     };
     let cell = |i: usize| -> Result<u64> { Ok(env.from_lisp::<i64>(args[i])?.max(0) as u64) };
