@@ -516,32 +516,45 @@ pub unsafe extern "C" fn emacs_module_init(runtime: *mut Runtime) -> std::ffi::c
 
         /// Tell SESSION the colours Emacs draws with, so the core can answer for them.
         ///
-        /// FOREGROUND and BACKGROUND are the buffer's own default colours, each as
-        /// `color-values' gives them -- a list of three channels from 0 to 65535 -- or nil
-        /// for a colour Emacs cannot resolve.  INDEXED is a list of the 256 palette
-        /// entries in the same form, index 0 first; a shorter list leaves the rest unheld
-        /// and nil holds none at all.
+        /// DEFAULTS is the ten colours `OSC 10' to `OSC 19' ask about, in that order --
+        /// foreground, background, cursor, the two pointer colours, the three Tektronix
+        /// ones, and the two the selection is drawn in, which is `cooked--osc-color-sources'
+        /// read in order.  INDEXED is the 256 palette entries, index 0 first.  Each colour
+        /// is a list of three channels from 0 to 65535, as `color-values' gives them, or
+        /// nil for one Emacs cannot resolve, which is answered with silence.  A list
+        /// shorter than its table leaves the rest unheld; nil holds none of it.
         ///
-        /// With these the core answers `OSC 4 ; N ; ?' and `OSC 10 ; ?' and `OSC 11 ; ?'
-        /// where the query arrives, the way it answers `CSI ? 996 n' from
-        /// `cooked--set-color-scheme': a theme-aware program probes for the background
-        /// before it draws anything, and answering from Lisp cost that probe a wake, a
-        /// drain and a reply batch -- behind `cooked-min-redisplay-interval' when the
-        /// screen was busy.
+        /// With these the core answers every colour query where it arrives, the way it
+        /// answers `CSI ? 996 n' from `cooked--set-color-scheme': a theme-aware program
+        /// probes for the background before it draws anything, and answering from Lisp
+        /// cost that probe a wake, a drain and a reply batch -- behind
+        /// `cooked-min-redisplay-interval' when the screen was busy.
         ///
         /// Pass the colours the buffer *draws*, DECSCNM not applied: a remap an OSC 11 set
         /// made is one of them, since that is what Lisp draws with, while reverse video is
-        /// the child's own mode and the core swaps the pair for a query itself.
+        /// the child's own mode and the core exchanges the pair for a query itself.
         ///
-        /// A slot nothing is reported for is one whose queries go on reaching Lisp as
-        /// `osc' events, which is where all of them went before this existed -- so the
-        /// cursor colour (`OSC 12'), the pointer, the Tektronix colours and the selection
-        /// are `cooked--osc-color''s and are not passed here.  So is every *set*: that is
-        /// policy, `cooked-allow-color-set', and the core raises the event for it and
-        /// leaves the held colours alone.  Say this again after honouring one, as
-        /// `cooked--sync-palette' does from `cooked-theme-change-hook', or the next query
-        /// answers the colour that was replaced.
-        "cooked--set-palette" 4..=4 => set_palette;
+        /// Emacs owns the values, so say this again whenever one moves: a theme, an
+        /// honoured set, or the frame's cursor colour changing.  `cooked--sync-palette' is
+        /// the one caller and names the moments.
+        "cooked--set-palette" 3..=3 => set_palette;
+
+        /// The reply SESSION owes for the query fields of one colour sequence.
+        ///
+        /// CODE is the OSC code, FIELDS the payload as `cooked--handle-osc' hands it over,
+        /// and BELL says the sequence ended with BEL rather than ST, since xterm echoes the
+        /// terminator it was asked with.  Returns the framed bytes for every field that
+        /// asks a question the palette can answer, concatenated in order, or nil when
+        /// nothing is owed.
+        ///
+        /// For the one case the core leaves alone: a sequence that also holds a *set*.
+        /// Whether that set is honoured is policy (`cooked-allow-color-set') and the answer
+        /// to a `?' after it turns on the outcome, so Lisp applies or refuses the set,
+        /// pushes the palette with `cooked--set-palette', and asks here rather than
+        /// composing a reply of its own.  One walker over the fields and one formatter,
+        /// and the reply keeps its place in the order because it is still Lisp's turn that
+        /// releases it.
+        "cooked--answer-color-query" 4..=4 => answer_color_query;
 
         /// Tell SESSION which pictures its child transmits Emacs can show.
         ///
@@ -1244,26 +1257,38 @@ fn set_color_scheme<'e>(env: Env<'e>, args: &[Value<'e>]) -> Result<Value<'e>> {
     env.into_lisp(owed.as_deref())
 }
 
+/// A list of colours, each `color-values' or nil, as both of `cooked--set-palette''s
+/// tables arrive.
+///
+/// Walked once as a list rather than read by index, for the reason [`each`] gives: `nth`
+/// restarts at the head, so reading 256 entries by index is quadratic.
+fn colors<'e>(env: Env<'e>, list: Value<'e>) -> Result<Vec<Option<emu::Rgb>>> {
+    each(env, list, |entry| env.from_lisp::<Option<emu::Rgb>>(entry))
+}
+
 /// See `cooked--set-palette'.
 fn set_palette<'e>(env: Env<'e>, args: &[Value<'e>]) -> Result<Value<'e>> {
-    let mut palette = emu::Palette {
-        foreground: env.from_lisp(args[1])?,
-        background: env.from_lisp(args[2])?,
-        ..emu::Palette::default()
-    };
-    // Walked once as a list rather than read by index, for the reason [`each`] gives:
-    // `nth` restarts at the head, so 256 entries by index is quadratic. The `zip` is what
-    // leaves a short list's tail unheld and drops anything past the last index.
-    let entries = each(env, args[3], |entry| {
-        env.from_lisp::<Option<emu::Rgb>>(entry)
-    })?;
-    for (slot, entry) in palette.indexed.iter_mut().zip(entries) {
-        *slot = entry;
-    }
+    let palette = emu::Palette::new(colors(env, args[1])?, colors(env, args[2])?);
     env.from_lisp::<&Session>(args[0])?
         .term()
         .set_palette(palette);
     Ok(env.nil())
+}
+
+/// See `cooked--answer-color-query'.
+fn answer_color_query<'e>(env: Env<'e>, args: &[Value<'e>]) -> Result<Value<'e>> {
+    let code = env.from_lisp::<u16>(args[1])?;
+    let fields = strings(env, args[2])?;
+    let terminator = emu::Terminator::from_bell(!env.is_nil(args[3]));
+    let answer = env.from_lisp::<&Session>(args[0])?.term().color_answer(
+        code,
+        fields.iter().map(String::as_bytes),
+        terminator,
+    );
+    match answer.as_deref() {
+        Some([]) | None => Ok(env.nil()),
+        Some(bytes) => env.into_lisp(bytes),
+    }
 }
 
 fn set_graphics_shown<'e>(env: Env<'e>, args: &[Value<'e>]) -> Result<Value<'e>> {

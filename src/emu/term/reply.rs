@@ -238,18 +238,15 @@ mod tests {
     /// A palette as Lisp pushes one, so the second pass of the test below runs with every
     /// slot the core can answer from filled.
     fn full_palette() -> super::super::Palette {
-        let white = super::super::Rgb {
+        let white = Some(super::super::Rgb {
             r: 0xffff,
             g: 0xffff,
             b: 0xffff,
-        };
-        let mut palette = super::super::Palette {
-            foreground: Some(white),
-            background: Some(white),
-            ..super::super::Palette::default()
-        };
-        palette.indexed.fill(Some(white));
-        palette
+        });
+        super::super::Palette::new(
+            std::iter::repeat_n(white, 10),
+            std::iter::repeat_n(white, 256),
+        )
     }
 
     #[test]

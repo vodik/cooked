@@ -246,14 +246,18 @@ fn osc_52_at_the_lisp_bound_reaches_lisp_with_every_target() {
 
 /// The terminator has to survive the trip to Lisp: a client that queried with BEL
 /// will not recognise an ST-terminated answer, and vice versa.
+///
+/// Asked of the clipboard, which is one of the two queries Lisp still answers. A colour
+/// query does not travel at all any more -- the core answers it where it arrives, and
+/// the terminator never leaves the core; `osc_reply` in reply.rs pins that half.
 #[test]
 fn osc_terminator_travels_with_the_event() {
-    let mut t = term(4, 20, b"\x1b]11;?\x07\x1b]11;?\x1b\\");
+    let mut t = term(4, 20, b"\x1b]52;c;?\x07\x1b]52;c;?\x1b\\");
     assert_eq!(
         t.drain().events,
         vec![
-            Event::Osc(11, vec!["?".into()], Terminator::Bel),
-            Event::Osc(11, vec!["?".into()], Terminator::St),
+            Event::Osc(52, vec!["c".into(), "?".into()], Terminator::Bel),
+            Event::Osc(52, vec!["c".into(), "?".into()], Terminator::St),
         ]
     );
 }

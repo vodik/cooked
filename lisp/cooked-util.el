@@ -26,7 +26,8 @@
 
 (eval-and-compile
   (defconst cooked--core-functions
-    '(cooked--alt-scroll-p cooked--bracketed-paste cooked--bracketed-paste-p
+    '(cooked--alt-scroll-p cooked--answer-color-query
+      cooked--bracketed-paste cooked--bracketed-paste-p
       cooked--clear-to-prompt
       cooked--core-version cooked--drain cooked--feed cooked--filter-feed
       cooked--focus-events-p cooked--foreground-pid cooked--forget-history

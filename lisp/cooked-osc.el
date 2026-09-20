@@ -55,7 +55,6 @@
     (17 . cooked--osc-color)
     (18 . cooked--osc-color)
     (19 . cooked--osc-color)
-    (4 . cooked--osc-palette)
     (110 . cooked--osc-color-reset)
     (111 . cooked--osc-color-reset)
     (112 . cooked--osc-color-reset)

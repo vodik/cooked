@@ -253,17 +253,20 @@ impl Event {
         }
     }
 
-    /// Whether this is a colour sequence whose handling may move what the palette holds,
-    /// so the core must not answer a colour query from it until Lisp has been through.
+    /// Whether this is a sequence whose handling may move one of the ten default
+    /// colours, so the core must not answer for them until Lisp has been through.
     ///
     /// A *set* is the case, and it is not [`Event::awaits_answer`]: `OSC 11 ; #ff0000`
     /// asks for nothing and holds no reply back, and yet a query after it is owed the
     /// colour Lisp is about to remap to rather than the one being replaced. The resets,
-    /// `OSC 110` to `OSC 112`, move it the other way for the same reason. A query is
-    /// included because a handler may reply and set in one pass; see [`osc::Palette`].
-    fn asks_about_color(&self) -> bool {
+    /// `OSC 110` to `OSC 112`, move it the other way for the same reason.
+    ///
+    /// The indexed palette is not here, and never doubtful: `OSC 4` sets are declined
+    /// whatever the policy, so nothing a child sends moves an entry. Only a theme does,
+    /// and a theme pushes the whole table before anything can ask.
+    fn moves_a_default_color(&self) -> bool {
         matches!(self, Self::Osc(code, ..)
-            if *code == 4 || (10..=19).contains(code) || (110..=112).contains(code))
+            if (10..=19).contains(code) || (110..=112).contains(code))
     }
 
     /// Whether Lisp needs the screen's text in the buffer to act on this, which is what
@@ -1015,7 +1018,7 @@ impl Term {
     pub fn events_handled(&mut self) {
         let state = &mut self.state;
         state.replies.handling = false;
-        state.palette_pending = state.events.iter().any(Event::asks_about_color);
+        state.palette_pending = state.events.iter().any(Event::moves_a_default_color);
         if !state.replies.direct || !state.replies.undrained {
             return;
         }
@@ -1116,6 +1119,22 @@ impl Term {
     pub fn set_color_scheme(&mut self, scheme: ColorScheme) -> Option<Vec<u8>> {
         let changed = self.state.color_scheme.replace(scheme) != Some(scheme);
         (changed && self.state.modes.color_scheme_updates).then(|| color_scheme_report(scheme))
+    }
+
+    /// The bytes a colour sequence's query fields are owed, for Lisp to send.
+    ///
+    /// The other way into [`State::color_query`], and the reason there is only one
+    /// formatter: a sequence holding a *set* is Lisp's, since whether the set is honoured
+    /// is policy, and once Lisp has applied or refused it and pushed the palette again it
+    /// asks here for the answer rather than composing one. `None` for an OSC that asks
+    /// about no colour.
+    pub(crate) fn color_answer<'a>(
+        &self,
+        code: u16,
+        fields: impl Iterator<Item = &'a [u8]>,
+        terminator: Terminator,
+    ) -> Option<Vec<u8>> {
+        Some(self.state.color_query(code, fields, terminator)?.answer)
     }
 
     /// Tell the emulator the colours Emacs draws with, so it can answer for them.
@@ -1581,8 +1600,8 @@ struct State {
     /// The colours Emacs draws with, for answering a colour query where it arrives; see
     /// [`osc::Palette`].
     palette: osc::Palette,
-    /// Whether a colour sequence is with Lisp, unhandled, so `palette` may be about to
-    /// move under a query; see [`Event::asks_about_color`].
+    /// Whether a sequence that may move one of the ten default colours is with Lisp,
+    /// unhandled; see [`Event::moves_a_default_color`].
     ///
     /// Raised where the event is pushed and lowered by [`Term::events_handled`], which
     /// recomputes it from the events queued since the drain rather than simply clearing

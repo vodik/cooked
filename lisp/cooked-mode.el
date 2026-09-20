@@ -1253,8 +1253,8 @@ command line.  See `cooked--screen-kept-still-p'."
   ;; The same two halves decide which buffer's OSC 12 colour a frame's cursor
   ;; wears, and the global values are the ones that still run when the window
   ;; being left shows a buffer that is no longer cooked, or no longer live.
-  (add-hook 'window-selection-change-functions #'cooked--sync-cursor-color)
-  (add-hook 'window-buffer-change-functions #'cooked--sync-cursor-color)
+  (add-hook 'window-selection-change-functions #'cooked--cursor-color-changed)
+  (add-hook 'window-buffer-change-functions #'cooked--cursor-color-changed)
   ;; Whether a picture can be shown is a question about every frame the buffer
   ;; is on, so it is asked by walking sessions too; see `cooked--sync-graphics'.
   ;; On a window change `cooked--window-buffers-changed' asks it.

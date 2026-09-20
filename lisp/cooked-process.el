@@ -349,12 +349,14 @@ file's Commentary for why it cannot be the child's own process."
         ;; session to speak for, as they would in a session buffer.
         (setq cooked--session cooked-process--session)
         ;; The colours a build tool asks about before it draws, so the core can answer
-        ;; `OSC 11 ; ?' itself and the probe costs no drain.  Once, here: this host is
-        ;; not a `cooked-mode' buffer and `cooked-theme-change-hook' does not run in
-        ;; it, so a theme changed mid-build leaves the rest of that build answering in
-        ;; the theme it started under -- which is what the text already above it in the
-        ;; buffer says, and is the same bargain `cooked-process--text' strikes with its
-        ;; face cache.
+        ;; every colour query itself and a probe costs no drain.  The cursor and the
+        ;; selection are in there too, from the frame: a compilation buffer has neither,
+        ;; and a child that asks is owed an answer rather than a timeout.  Once, here:
+        ;; this host is not a `cooked-mode' buffer, so `cooked-theme-change-hook' does
+        ;; not run in it and a theme changed mid-build leaves the rest of that build
+        ;; answering in the theme it started under -- which is what the text already
+        ;; above it in the buffer says, and the same bargain `cooked-process--text'
+        ;; strikes with its face cache.
         (cooked--protect-seam 'cooked--sync-palette
           (cooked--sync-palette))))
     proc))
@@ -533,14 +535,14 @@ dropped.
 Nothing here answers a query any more, and that is what `cooked--set-palette'
 bought: the colours are the questions a build tool actually asks -- `OSC 11 ; ?'
 for the background before it decides whether to print dark or light -- and the
-core answers those itself, from the palette `cooked-process-start' pushed, with
-no drain in the loop at all.  What is left over goes unanswered, as the
-clipboard and the pointer shape always have: the cursor colour and the selection
-colours of a compilation buffer are not questions with an answer.
+core answers every one of them itself, from the palette `cooked-process-start'
+pushed, with no drain in the loop at all.  The clipboard and the pointer shape
+are still not offered to a build, and their queries still go unanswered, as they
+did before any of this.
 
 The caller says `cooked--ready' afterwards, and must: until then the core
 keeps every later reply behind any query that did reach a drain, so DA1 after
-`OSC 12 ; ?' would wait for as long as the child lived."
+`OSC 52 ; c ; ?' would wait for as long as the child lived."
   (cooked--batching-replies cooked--session
     (dolist (event events)
       (pcase event
