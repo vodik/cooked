@@ -15,6 +15,7 @@
 //! | [`slave_name`] | reentrant where possible, careful where not |
 //! | [`cloexec_pipe`] | atomic where possible, two-step where not |
 //! | [`ExitWatch`] | `pidfd` on Linux, `kqueue` on Darwin |
+//! | [`process_name`] | `/proc/PID/comm` on Linux, `proc_name` on Darwin |
 //! | [`open_slave`] | `TIOCGPTPEER` where there is one, the path where not |
 //! | [`signal_foreground`] | `TIOCSIG` where there is one, `None` where not |
 //! | [`spawn`] | `posix_spawn` where its attributes suffice, `None` where the fork path stays |

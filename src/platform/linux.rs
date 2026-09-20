@@ -99,6 +99,25 @@ pub(crate) fn poll(fds: &mut [PollFd], wait: Duration) -> nix::Result<libc::c_in
     nix::poll::ppoll(fds, Some(TimeSpec::from_duration(wait)), None)
 }
 
+/// The program PID is running at this instant, as the kernel spells it: `zsh` for a
+/// shell, `cat` for the `cat` it has just `exec`ed into.
+///
+/// `/proc/PID/comm`, which is the same field `process-attributes' answers `comm' from,
+/// and is read rather than cached because the point of asking is that it changes under a
+/// pid that does not: `exec` replaces a process' program and leaves the pid alone.
+///
+/// `None` for a pid that has gone between the caller deciding to ask and the read, which
+/// is ordinary rather than a fault: a job that exits as the terminal is sampled leaves no
+/// `/proc` entry behind. Three syscalls, taken once per reader tick and never per byte or
+/// per drain; see `Shared::sample_foreground`.
+pub(crate) fn process_name(pid: Pid) -> Option<String> {
+    let comm = std::fs::read_to_string(format!("/proc/{}/comm", pid.as_raw())).ok()?;
+    // The kernel ends `comm` with a newline and truncates the name itself to 15
+    // characters, which `process-attributes' reports the same way.
+    let name = comm.trim_end_matches('\n');
+    (!name.is_empty()).then(|| name.to_owned())
+}
+
 /// Something that says when the process PID has exited.
 ///
 /// A `pidfd` (Linux 5.3), polled: the kernel says the moment `waitpid` will succeed,

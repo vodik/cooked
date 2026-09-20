@@ -145,6 +145,29 @@ impl AtomicMode {
     }
 }
 
+/// What the child's tty has in the foreground: the process group holding it, and the
+/// program that group's leader is running.
+///
+/// Both together, because neither half answers the question on its own. The group is what
+/// a keystroke reaches and what `tcgetpgrp` reports, and it changes when a job-control
+/// shell hands the terminal over. The name is what `cooked-key-protocol-overrides' and
+/// the mode line match on, and it changes without the group doing so every time a shell
+/// `exec`s into the command it just read -- `sh -c 'exec cat'` is one pid from start to
+/// finish and two programs.
+///
+/// A struct rather than a pair so that the two are sampled and compared as one fact: a
+/// change in either is a change in what is running, and [`Shared::sample_foreground`]
+/// needs no rule about which half to look at first.
+///
+/// [`Shared::sample_foreground`]: crate::session::Shared::sample_foreground
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Foreground {
+    pub pgrp: Pid,
+    /// `None` where the platform declines to say or the group has already gone; see
+    /// [`crate::platform::process_name`].
+    pub name: Option<String>,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Winsize {
     pub rows: u16,
@@ -533,6 +556,20 @@ impl Pty {
             pgrp if pgrp.as_raw() > 1 => Ok(pgrp),
             _ => Err(Error::NoForeground),
         }
+    }
+
+    /// What the tty has in the foreground, group and program together; see
+    /// [`Foreground`].
+    ///
+    /// `None` while nothing holds the terminal, which [`Self::foreground`] already treats
+    /// as ordinary: a shell has put one job down and the next has not taken over, or the
+    /// session is gone.
+    pub(crate) fn foreground_program(&self) -> Option<Foreground> {
+        let pgrp = self.foreground().ok()?;
+        Some(Foreground {
+            pgrp,
+            name: platform::process_name(pgrp),
+        })
     }
 
     /// Match the emulator's idea of the terminal size to `size`.

@@ -165,6 +165,33 @@ pub(crate) unsafe fn open_slave(_master: libc::c_int, slave: *const libc::c_char
     unsafe { libc::open(slave, libc::O_RDWR | libc::O_NOCTTY) }
 }
 
+/// The program PID is running at this instant: `zsh` for a shell, `cat` for the `cat` it
+/// has just `exec`ed into.
+///
+/// `proc_name`, from libproc, which Darwin has in place of a `/proc` to read. It answers
+/// the last component of the executable's path, truncated to `2 * MAXCOMLEN` characters,
+/// which is the same thing Linux's `comm` is for the case this is asked for -- whether
+/// the foreground program is still the shell.
+///
+/// `None` for a pid that has gone between the caller deciding to ask and the call, which
+/// `proc_name` reports as a zero-length name rather than as an error.
+pub(crate) fn process_name(pid: Pid) -> Option<String> {
+    // One past the widest name `proc_name` writes, so the result is always NUL-terminated
+    // within the buffer whatever it fills.
+    let mut buf = [0u8; 2 * libc::MAXCOMLEN + 1];
+    // SAFETY: `proc_name` writes at most `buffersize` bytes into `buffer` and returns how
+    // many; the buffer is ours and its length is what is passed.
+    let written = unsafe {
+        libc::proc_name(
+            pid.as_raw(),
+            buf.as_mut_ptr().cast(),
+            buf.len() as u32 - 1,
+        )
+    };
+    let name = std::str::from_utf8(buf.get(..usize::try_from(written).ok()?)?).ok()?;
+    (!name.is_empty()).then(|| name.to_owned())
+}
+
 /// Signal the pty's foreground process group: not something Darwin's master can be
 /// asked to do, so `None` and the caller reads the group and signals it itself.
 pub(crate) fn signal_foreground(

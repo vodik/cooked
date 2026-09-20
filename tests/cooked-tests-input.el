@@ -4163,6 +4163,44 @@ since nothing in this reduced script changes any state
     (cooked--request-refresh)
     (should (equal (cooked--foreground-program) "cat"))))
 
+(ert-deftest cooked-foreground-program-follows-a-silent-exec-with-no-further-output ()
+  "The window the sibling test above leaves open: between a shell's
+command-start mark and the child actually being the foreground program, a
+refresh gets the shell's name, and if the child then prints nothing there is no
+later event to correct it.  A quiet program started from a shell -- `claude'
+connecting, an editor that draws its first frame a second later -- would keep
+the shell's name, and with it the shell's key protocol and the shell's word in
+the mode line, until something unrelated happened.
+
+Closed in the core rather than here: the reader thread samples what the tty has
+in the foreground on the tick it already takes for termios, and a change wakes
+Emacs and crosses as the drain's `:foreground' level.  So this test sends one
+line and then waits, with nothing else arriving: no mark, no mode change, no
+output, and no timer on the Lisp side.  See `cooked--set-foreground'.
+
+Every part of the script is there to leave that window open and nothing else in
+it.  `stty raw -echo' before anything, so the three bytes sent below are not
+echoed and the exec really is silent; the mark, so the state a real command
+start leaves behind is the state under test; `head' rather than the shell's own
+`read', because bash's `read' puts the tty back into canonical mode and the
+mode change alone would refresh the cache and hide the bug.  The first wait is
+on all three having settled for the same reason: asked any earlier, a later
+`stty' would do the correcting."
+  (cooked-tests--with-session
+      '("/bin/sh" "-c"
+        "stty raw -echo; printf '\033]133;C\007'; head -c 3 >/dev/null; exec cat")
+    ;; Asked while it is still the shell, so a mechanism that only ever answers
+    ;; once has something wrong to remember.
+    (should (cooked-tests--settle
+             (lambda () (and (eq cooked--mode 'raw)
+                             (eq cooked--semantic 'output)
+                             (equal (cooked--foreground-program) "sh")))))
+    (cooked--send-to-child "go\n")
+    (should (cooked-tests--settle
+             (lambda () (equal (cooked--foreground-program) "cat"))))
+    ;; Nothing was printed on the way: the name moved on the core's own sampling.
+    (should (equal (cooked-tests--text) ""))))
+
 (ert-deftest cooked-key-protocol-override-yields-to-a-real-negotiation ()
   "A guess about what a program probably wants is never trusted over what it
 actually asked for -- if that ever happened, this would be indistinguishable
@@ -4175,7 +4213,14 @@ from a bug that silently ignored `CSI ? u'."
       ;; The guess is still offered -- the program is `cat' either way -- and the
       ;; core is the end that declines it, because it is the end that knows a
       ;; negotiation has happened.
-      (should (eq (cooked--assumed-key-protocol) 'kitty))
+      ;;
+      ;; Settled for rather than asserted outright: the script writes both escapes
+      ;; before it reaches its own `exec', so the negotiation can land while the
+      ;; foreground program is still `sh'.  The override is then offered one
+      ;; reader tick later, when the core notices what `exec' made of the child;
+      ;; see `cooked-foreground-program-follows-a-silent-exec-with-no-further-output'.
+      (should (cooked-tests--settle
+               (lambda () (eq (cooked--assumed-key-protocol) 'kitty))))
       (let ((last-command-event 'S-return))
         (cooked-send-key))
       (should (cooked-tests--settle

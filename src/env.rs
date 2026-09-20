@@ -349,6 +349,7 @@ symbols! {
     KittyFlags => ":kitty-flags",
     ModifyOtherKeysLevel => ":modify-other-keys",
     Mode => ":mode",
+    Foreground => ":foreground",
     Images => ":images",
     Links => ":links",
     Styles => ":styles",

@@ -287,6 +287,20 @@ pub(crate) fn update_to_lisp<'e>(env: Env<'e>, update: &Update, rejoin: bool) ->
         })
         .collect::<Result<Vec<_>>>()?;
 
+    // `(PGRP . NAME)`: the process group holding the child's tty and the program its
+    // leader is running, or nil while nothing holds it. NAME is nil on a platform that
+    // declines to say; see `platform::process_name`.
+    let foreground = update
+        .foreground
+        .as_ref()
+        .map(|fg| {
+            env.cons(
+                env.into_lisp(fg.pgrp.as_raw())?,
+                env.into_lisp(fg.name.as_deref())?,
+            )
+        })
+        .transpose()?;
+
     plist!(env, {
         ":scrolled"    => scrolled,
         ":promoted"    => promoted,
@@ -307,6 +321,7 @@ pub(crate) fn update_to_lisp<'e>(env: Env<'e>, update: &Update, rejoin: bool) ->
         ":kitty-flags" => u32::from(levels.keys.kitty_flags().bits()),
         ":modify-other-keys" => u32::from(levels.keys.modify_other_keys_level()),
         ":mode"        => update.mode,
+        ":foreground"  => foreground,
         ":images"      => images_to_lisp(env, &update.delta.images)?,
         ":links"       => links_to_lisp(env, &update.delta.links)?,
         ":styles"      => styles_to_lisp(env, &update.delta.styles)?,

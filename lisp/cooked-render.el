@@ -562,7 +562,8 @@ CURSOR is UPDATE's cursor, already decoded by `cooked--apply'."
   (cooked--set-alt (plist-get update :alt))
   (cooked--set-reverse-screen (plist-get update :reverse)
                               (plist-get update :reverse-toggles))
-  (cooked--set-mode (plist-get update :mode)))
+  (cooked--set-mode (plist-get update :mode))
+  (cooked--set-foreground (plist-get update :foreground)))
 
 (defun cooked--set-mode (mode)
   "Adopt MODE, switching keymaps and handling secret prompts on a change."
@@ -572,6 +573,25 @@ CURSOR is UPDATE's cursor, already decoded by `cooked--apply'."
     (if (eq mode 'secret)
         (cooked--schedule-secret 'termios)
       (cooked--cancel-secret))))
+
+(defun cooked--set-foreground (foreground)
+  "Adopt FOREGROUND, refreshing when what the child has in the foreground changed.
+
+FOREGROUND is the drain's `:foreground' level, (PGRP . NAME) or nil; see
+`cooked--foreground'.  `equal' rather than `eq' because the name is a fresh
+string on every drain, and both halves count: a job-control shell handing the
+terminal to the next job moves the group, and a shell `exec'ing into the command
+it just read moves only the name.
+
+The refresh is what the whole level is for.  `cooked--request-refresh' drops the
+name cache and re-derives the keymap, the key overrides and the mode-line label,
+so a `claude' that starts at a prompt and then sits silent for a second while it
+connects is named -- and given its key protocol -- within one reader tick,
+rather than keeping the shell's name until some unrelated event happens to
+arrive."
+  (unless (equal foreground cooked--foreground)
+    (setq cooked--foreground foreground)
+    (cooked--request-refresh)))
 
 (defun cooked--place-point (viewport)
   "Put point where VIEWPORT says it belongs, now that the render is done.

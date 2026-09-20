@@ -167,11 +167,19 @@ pub unsafe extern "C" fn emacs_module_init(runtime: *mut Runtime) -> std::ffi::c
         /// Collect everything that changed in SESSION since the last call.
         /// Returns a plist with :scrolled, :promoted, :shifts, :rows, :edits, :height, :width,
         /// :used, :head, :cursor, :reverse, :reverse-toggles, :marks, :alt, :app-cursor, :keys,
-        /// :kitty-flags, :modify-other-keys, :mode, :images, :links, :styles, :events, :exit
-        /// and :withheld.
+        /// :kitty-flags, :modify-other-keys, :mode, :foreground, :images, :links, :styles,
+        /// :events, :exit and :withheld.
         ///
         /// :exit is the child's status once it has one, or -1 for a session whose reader
         /// gave up on the pty with the child still unreapable.
+        ///
+        /// :foreground is `(PGRP . NAME)' for the process group holding the child's tty
+        /// and the program its leader is running, or nil while nothing holds it.  The
+        /// reader samples both on its own tick, so a shell that `exec's into a program
+        /// that then prints nothing is still reported within one tick -- which is the
+        /// only way that transition is ever seen, since it changes no pid, writes no
+        /// byte and touches no termios flag.  NAME is nil where the platform declines to
+        /// say.
         ///
         /// With PROMOTE non-nil and HIDDEN nil, the rows scrolled off the top that the buffer already holds
         /// as its top screen rows come as :promoted rather than in :scrolled: (BOTTOM . ROWS),

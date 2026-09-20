@@ -858,6 +858,21 @@ file below the one that installs the keymap.  Those files run this hook through
 `cooked--request-refresh' rather than naming that function, and
 cooked-mode.el puts `cooked--refresh-keymap' on it.")
 
+(defvar-local cooked--foreground nil
+  "The (PGRP . NAME) the core last sampled for the child's foreground group.
+
+A level, adopted from every drain by `cooked--set-foreground': the process group
+holding the child's tty and the program its leader is running, as the reader
+thread saw them on its last tick.  NAME is nil on a platform that declines to
+say, and the whole cons is nil while nothing holds the terminal.
+
+Read for the change alone, not for the name.  What a change means is that the
+foreground program is not the one whatever is cached was derived from -- which
+is the one transition nothing in Lisp can see for itself, since a shell that
+`exec's into the command it just read keeps its pid, writes nothing and moves no
+termios flag.  `cooked--foreground-program' still asks the OS for the name, one
+`process-attributes' per real change.")
+
 (defvar-local cooked--foreground-name nil
   "Cached (PID . NAME) for the child's foreground process group.
 
@@ -876,8 +891,12 @@ foreground process might have changed what it answers to `process-attributes'
 without changing its pid -- a shell's `exec' into the program it just read a
 command line for is the ordinary case, and it leaves the pid exactly as it was
 before and after.  A cache that only watches the pid would go on believing the
-shell's name through that, and never learn otherwise: nothing else invalidates
-it, and nothing else calls `cooked--request-refresh' either.  See
+shell's name through that, and never learn otherwise.
+
+That leaves the `exec' nothing else reports, into a program that then prints
+nothing: no mark, no mode change, no output, so none of the callers below ever
+runs.  `cooked--set-foreground' is the one that covers it, from the
+`:foreground' level the core samples on its own tick.  See
 `cooked--refresh-hook'."
   (setq cooked--foreground-name nil)
   (run-hooks 'cooked--refresh-hook))

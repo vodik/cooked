@@ -8,7 +8,8 @@ use crate::emu::{ColorScheme, Delta, Feed, FrameSize, Palette, Reply, ReplyKind,
 use crate::error::Result;
 use crate::lock::LockExt;
 use crate::pty::{
-    AtomicMode, HANGUP_GRACE, JobControl, KILL_GRACE, Mode, Pty, WRITE_TIMEOUT, Wait, Winsize,
+    AtomicMode, Foreground, HANGUP_GRACE, JobControl, KILL_GRACE, Mode, Pty, WRITE_TIMEOUT, Wait,
+    Winsize,
 };
 use crate::replies::ReplyQueue;
 use nix::errno::Errno;
@@ -252,6 +253,10 @@ impl Input {
 pub(crate) struct Update {
     pub delta: Delta,
     pub mode: Mode,
+    /// What the tty had in the foreground when the reader last looked; see
+    /// [`Shared::sample_foreground`]. A level like `mode`, not an event: it is the state
+    /// as of this drain, and Lisp compares it against the one it holds.
+    pub foreground: Option<Foreground>,
     pub exit: Option<Exit>,
 }
 
@@ -845,6 +850,13 @@ struct Shared {
     /// waiting for it must not let the first one's exemption lapse.
     sending: AtomicUsize,
     mode: AtomicMode,
+    /// What the tty has in the foreground, as the reader last sampled it; see
+    /// [`Shared::sample_foreground`]. `None` while nothing holds the terminal.
+    ///
+    /// A mutex rather than an atomic because it carries a name, and behind a mutex
+    /// rather than beside `mode` in `Term` because it is a fact about the tty, which is
+    /// the reader's to sample and Emacs' only to read at a drain.
+    foreground: Mutex<Option<Foreground>>,
     /// A size the child is not yet known to have, for the reader thread to keep applying
     /// until it sticks. `None` once the tty agrees. See `Session::resize`.
     pending_resize: Mutex<Option<Winsize>>,
@@ -1155,6 +1167,9 @@ impl Session {
 
         let pty = Pty::spawn(argv, env, size, cwd)?;
         let mode = pty.mode().unwrap_or_default();
+        // Sampled here for the same reason `mode` is: the first tick would otherwise find
+        // the shell where `None` was and announce a change nothing changed.
+        let foreground = pty.foreground_program();
         let mut term = Term::new(size.rows.into(), size.cols.into());
         // XTGETTCAP answers for the entry the child was told about, and this is where
         // what it was told is known: Lisp chose TERM, and it arrives here with the rest.
@@ -1186,6 +1201,7 @@ impl Session {
             writer: Mutex::new(()),
             sending: AtomicUsize::new(0),
             mode: AtomicMode::new(mode),
+            foreground: Mutex::new(foreground),
             pending_resize: Mutex::new(None),
             clock: options.clock.clone(),
             notifier: Notifier::new(wake, &options),
@@ -1355,6 +1371,7 @@ impl Session {
         Update {
             delta,
             mode: self.shared.mode.load(),
+            foreground: self.shared.foreground.held().clone(),
             exit: *self.shared.exited.held(),
         }
     }
@@ -1377,6 +1394,7 @@ impl Session {
         Update {
             delta,
             mode: self.shared.mode.load(),
+            foreground: self.shared.foreground.held().clone(),
             exit,
         }
     }
@@ -1973,9 +1991,15 @@ impl Shared {
                 }
             }
 
-            // Sampled rather than pushed: Linux does not report ICANON/ECHO changes. The poll
-            // timeout bounds the latency, and an unchanged mode costs nothing.
-            if self.sample_mode() {
+            // Sampled rather than pushed: Linux does not report ICANON/ECHO changes, and
+            // nothing reports a change of foreground program either. The poll timeout
+            // bounds the latency of both, and an unchanged sample costs nothing.
+            //
+            // Both are taken before either is acted on, so one tick's wakeup carries
+            // whichever of them moved rather than the mode's short-circuiting the other.
+            let mode_changed = self.sample_mode();
+            let foreground_changed = self.sample_foreground();
+            if mode_changed || foreground_changed {
                 self.announce();
             }
             self.retire_resample();
@@ -2299,6 +2323,29 @@ impl Shared {
         })
     }
 
+    /// Re-read what the tty has in the foreground, reporting whether it changed.
+    ///
+    /// The twin of [`Shared::sample_mode`], and taken at the same moment for the same
+    /// reason: nothing pushes this. A shell's `exec` into the command it just read
+    /// changes what the foreground program is called without changing the pid, and the
+    /// ordinary case of it -- `claude` started at a prompt, which then prints nothing for
+    /// a second while it connects -- produces no output, no mark and no termios change
+    /// for Emacs to notice it by. Sampled on the tick, Emacs learns within one of them,
+    /// which is what `cooked-key-protocol-overrides' and the mode line need to name the
+    /// right program.
+    ///
+    /// On the tick only, and never on the read path: `Pty::foreground_program` is a
+    /// `tcgetpgrp` plus a small `/proc` read, which is nothing at ten times a second and
+    /// is not something a flood should pay per chunk. A change that follows output is
+    /// caught by the resample [`RESAMPLE_DELAY`] arms, like a termios change is.
+    fn sample_foreground(&self) -> bool {
+        let sampled = self.pty.foreground_program();
+        let mut held = self.foreground.held();
+        let changed = *held != sampled;
+        *held = sampled;
+        changed
+    }
+
     /// Drive the pty to the size `Session::resize` last asked for.
     ///
     /// Cleared only once the tty *reads back* with that size, not merely once the ioctl
@@ -2515,6 +2562,7 @@ mod tests {
             merged.delta.scrolled.extend(next.delta.scrolled);
             merged.delta.events.extend(next.delta.events);
             merged.mode = next.mode;
+            merged.foreground = next.foreground;
             merged.exit = next.exit;
         }
         panic!("timed out waiting on session");
@@ -3527,6 +3575,46 @@ mod tests {
             "showing the session did not wake Emacs for the output it held"
         );
         assert!(rendered(&session.drain()).contains("text"));
+    }
+
+    /// The program a drain names as the foreground one, for the tests below.
+    fn foreground_name(update: &Update) -> Option<&str> {
+        update.foreground.as_ref()?.name.as_deref()
+    }
+
+    /// An `exec` that keeps the pid and writes nothing is still noticed, on the tick.
+    ///
+    /// The one transition nothing else in this file can see. The pid does not change, so
+    /// the process group does not either; the child writes no byte, so no read and no
+    /// resample follow it; and the tty's mode was already set before the `exec`, so
+    /// `sample_mode` has nothing to report. Only [`Shared::sample_foreground`] can tell
+    /// Emacs that `sh` has become `cat`, and the wakeup asserted here is how it does.
+    ///
+    /// Raw with no echo *before* the read, so that writing `go` to the child produces no
+    /// output at all -- the line discipline would otherwise echo it, and an output-driven
+    /// refresh, not the tick, would be what this test measured.
+    #[test]
+    fn a_silent_exec_that_keeps_the_pid_is_noticed_on_the_next_tick() {
+        let (session, read) = session(&["/bin/sh", "-c", "stty raw -echo; read -r _; exec cat"]);
+        wait_for(&session, |u| foreground_name(u) == Some("sh"));
+        // The wakeups the setup earned -- the mode going raw among them -- so the one
+        // below is this change's and not a leftover.
+        while woke(&read) {}
+
+        session
+            .send(b"go\n", Input::Other, &|| false)
+            .expect("send");
+        assert!(
+            woke_within(&read, patience(2.0)),
+            "the exec woke nobody: a quiet program started at a prompt keeps the shell's \
+             name until some unrelated event"
+        );
+        let update = wait_for(&session, |u| foreground_name(u) == Some("cat"));
+        assert_eq!(
+            update.foreground.as_ref().map(|fg| fg.pgrp.as_raw()),
+            Some(session.pid().as_raw()),
+            "the group that holds the tty is the one the shell was already in"
+        );
     }
 
     /// A write the child is not taking ends when STOP says so, not at the deadline.
