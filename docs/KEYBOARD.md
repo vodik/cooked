@@ -168,6 +168,14 @@ delivers `escape` if no byte follows. A Meta chord pays nothing, since its secon
 already queued. Neither does ESC sent to a child that owns the keyboard: vim's Escape still
 reaches vim the instant it is pressed. Set the option to nil to turn the translation off.
 
+The state maps are yours to bind in. `(keymap-set cooked-raw-map "C-t" #'other-window)`
+takes `C-t` back from the child in the `raw` state alone, and it stays taken across a
+later `setopt` of `cooked-raw-exceptions`: each of `cooked-raw-map`, `cooked-input-map`
+and evil's forwarding map holds only what you put in it, over a generated map that the
+option rebuilds beneath. The exceptions list is still the better tool where it fits —
+it leaves the key unbound so it falls all the way through to whatever Emacs would
+otherwise do, and it is what the Meta overlay reads on a graphical frame.
+
 `cooked-send-literal-key` is the escape hatch in the other direction: it sends the very
 next key to the child exactly as typed, regardless of what's reserved — including `C-c`
 itself (`C-c C-q C-c` sends a literal `C-c` byte).

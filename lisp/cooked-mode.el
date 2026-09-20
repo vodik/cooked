@@ -1997,9 +1997,15 @@ to the child verbatim."
 ;; outright. Reparenting them onto `cooked-mode-map' — itself a child of
 ;; `comint-mode-map' — keeps comint's bindings, and anything layered on them by
 ;; `evil-collection', reachable.
-(set-keymap-parent cooked-input-map cooked-mode-map)
+;;
+;; The two that an option rebuilds are joined on through their generated half
+;; instead, which is the map that rebuild replaces: a parent on the public map
+;; would name a map the next `setopt' had just retired.  See
+;; `cooked--public-keymap'.  `cooked--semi-forwarding-map' is deliberately not
+;; here at all, and `cooked-semi-map' composes it; see its docstring.
+(set-keymap-parent (cooked--generated-keymap cooked-input-map) cooked-mode-map)
+(set-keymap-parent (cooked--generated-keymap cooked-raw-map) cooked-mode-map)
 (set-keymap-parent cooked-semi-map cooked-mode-map)
-(set-keymap-parent cooked-raw-map cooked-mode-map)
 (set-keymap-parent cooked-command-map cooked-mode-map)
 (set-keymap-parent cooked-alt-map cooked-mode-map)
 (set-keymap-parent cooked-peek-map cooked-mode-map)

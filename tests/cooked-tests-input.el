@@ -65,17 +65,57 @@ above), which has none."
     (should-not (eq (lookup-key cooked-raw-map (kbd key)) #'cooked-send-key))))
 
 (ert-deftest cooked-raw-exceptions-can-be-customized ()
-  "Rebuilds `cooked-raw-map' in place -- in place because the map already has
-`cooked-mode-map' as its keymap parent, set once when the major mode is
-defined, and a fresh keymap object handed to `setq' would lose it."
-  (let ((original cooked-raw-exceptions))
+  "Rebuilds what `cooked-raw-map' forwards, keeping the map object itself: it
+is what `use-local-map' was handed and what `cooked-mode-map' is reached
+through, and a fresh keymap handed to `setq' would lose both."
+  (let ((original cooked-raw-exceptions)
+        (map cooked-raw-map))
     (unwind-protect
         (progn
           (customize-set-variable 'cooked-raw-exceptions '("C-w"))
+          (should (eq cooked-raw-map map))
           (should-not (eq (lookup-key cooked-raw-map (kbd "C-w")) #'cooked-send-key))
           (should (eq (lookup-key cooked-raw-map (kbd "C-g")) #'cooked-send-key))
-          (should (eq (keymap-parent cooked-raw-map) cooked-mode-map)))
+          (should (eq (lookup-key cooked-raw-map (kbd "C-c C-v")) #'cooked-toggle-peek)))
       (customize-set-variable 'cooked-raw-exceptions original))))
+
+(ert-deftest cooked-a-user-binding-survives-customizing-the-exceptions ()
+  "Setting an exceptions list used to replace the public map's bindings
+wholesale, so anything a user had put there with `keymap-set' went with them --
+silently, and on a `setopt' in an init file as much as on a Customize buffer.
+The generated half is what a `:set' replaces now, and the public map holds only
+what the user put in it."
+  (let ((raw cooked-raw-exceptions)
+        (semi cooked-semi-exceptions)
+        (delegate cooked-delegate-keys))
+    (unwind-protect
+        (progn
+          (keymap-set cooked-raw-map "C-t" #'ignore)
+          (keymap-set cooked--semi-forwarding-map "C-t" #'ignore)
+          (keymap-set cooked-input-map "C-t" #'ignore)
+          (customize-set-variable 'cooked-raw-exceptions '("C-w"))
+          (customize-set-variable 'cooked-semi-exceptions '("C-w"))
+          (customize-set-variable 'cooked-delegate-keys '("TAB"))
+          ;; The user's binding, and the exception that was just asked for.
+          (dolist (map (list cooked-raw-map cooked--semi-forwarding-map
+                             cooked-input-map))
+            (should (eq (lookup-key map (kbd "C-t")) #'ignore)))
+          (dolist (map (list cooked-raw-map cooked-semi-map))
+            (should-not (eq (lookup-key map (kbd "C-w")) #'cooked-send-key))
+            (should (eq (lookup-key map (kbd "C-a")) #'cooked-send-key)))
+          (should (eq (lookup-key cooked-input-map (kbd "TAB"))
+                      #'cooked-delegate-this-key)))
+      (keymap-unset cooked-raw-map "C-t" t)
+      (keymap-unset cooked--semi-forwarding-map "C-t" t)
+      (keymap-unset cooked-input-map "C-t" t)
+      (customize-set-variable 'cooked-raw-exceptions raw)
+      (customize-set-variable 'cooked-semi-exceptions semi)
+      (customize-set-variable 'cooked-delegate-keys delegate))
+    ;; And the restore put the generated bindings back under them.
+    (should (eq (lookup-key cooked-raw-map (kbd "C-w")) #'cooked-send-key))
+    (should (eq (lookup-key cooked-input-map (kbd "TAB")) #'completion-at-point))
+    ;; And `C-t' forwards again now that nothing shadows it.
+    (should (eq (lookup-key cooked-raw-map (kbd "C-t")) #'cooked-send-key))))
 
 (ert-deftest cooked-yank-key-still-forwards-despite-the-exceptions-list ()
   "Plain `C-y' is both vim's scroll-up-a-line and readline's own yank -- real

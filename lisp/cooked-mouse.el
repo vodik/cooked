@@ -92,9 +92,9 @@ at -- `cooked--mouse-glyph' declines to give one -- so claiming it here would
 only route it to `cooked--mouse-fallback'.  The notch has an answer without a
 cell, which is the cursor's; see the `wheel' arm of `cooked-mouse-event'.
 
-A fresh prefix map per call rather than one shared constant, because
-`cooked--replace-keymap' rebuilds a map's bindings in place and a map shared
-between two of them would carry a rebuild across."
+A fresh prefix map per call rather than one shared constant, because MAP is
+rebuilt whenever the option that shapes it is set and a map shared between two
+of them would carry a rebuild across."
   (let ((wheel (make-sparse-keymap)))
     (dolist (event cooked--wheel-events)
       (define-key wheel (vector event) #'cooked-mouse-event))

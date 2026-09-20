@@ -296,9 +296,9 @@ spell them, and a chord Emacs binds is left to Emacs."
   "Alist of (MAP . OVERLAY), the cache behind `cooked--forwarding-map'.
 
 Keyed by the map object rather than by name, and safe to keep across a
-customization because `cooked--replace-keymap' rebuilds a map's bindings
-without replacing the map itself -- so a cached overlay's parent stays the
-map the user just changed.")
+customization because a rebuild replaces the generated map *under* a public
+one and never the public map itself -- so a cached overlay's parent stays the
+map the user just changed.  See `cooked--public-keymap'.")
 
 (defun cooked--build-meta-overlay (map &optional exceptions)
   "A child of MAP that forwards the Meta space as well, but for EXCEPTIONS.
@@ -331,8 +331,20 @@ falls through to Emacs.  The rest of the Meta space forwards whatever MAP keeps.
 An exception of `C-g' names an unmodified control character, and reserving
 `C-M-g' along with it would take a key from the child on the strength of a
 binding Emacs does not have."
-  (let ((overlay (make-sparse-keymap))
-        (esc (make-keymap)))
+  (let ((overlay (make-sparse-keymap)))
+    (define-key overlay (vector meta-prefix-char)
+                (cooked--build-meta-prefix-map exceptions))
+    (define-key overlay [escape] #'cooked-send-key)
+    (set-keymap-parent overlay map)
+    overlay))
+
+(defun cooked--build-meta-prefix-map (&optional exceptions)
+  "The ESC prefix map of a Meta overlay, leaving the Meta chords in EXCEPTIONS out.
+
+The only half of `cooked--build-meta-overlay' that depends on the exceptions
+list, and so the only half `cooked--passthrough-setter' rebuilds: the overlay
+itself keeps its identity, because a buffer may be wearing it."
+  (let ((esc (make-keymap)))
     (dolist (event (cooked--super-chord-events nil))
       (define-key esc (vector event)
                   (cooked--kitty-chord #'cooked-send-meta-key
@@ -349,10 +361,7 @@ binding Emacs does not have."
                                                      (list (event-basic-type event))))))
                                      exceptions)))
       (define-key esc (vector event) nil))
-    (define-key overlay (vector meta-prefix-char) esc)
-    (define-key overlay [escape] #'cooked-send-key)
-    (set-keymap-parent overlay map)
-    overlay))
+    esc))
 
 (defun cooked--frame-keymap-type (&optional frame)
   "Which spelling of Meta a keymap worn on FRAME has to answer.
@@ -412,24 +421,46 @@ buffer has just been selected in and asks for a refresh only when they differ."
             (push (cons map overlay) cooked--meta-overlays)
             overlay)))))
 
-(defun cooked--replace-keymap (map fresh)
-  "Give MAP the bindings of FRESH, keeping MAP's own identity.
+(defun cooked--public-keymap (generated)
+  "An empty keymap over GENERATED, for the user to bind in and keep.
 
-Every map in this file is reachable from a variable that other maps have as
-their parent and that `cooked--state-keymap' hands to `use-local-map', so a
-`:set' that rebuilt one by assigning a new keymap would leave every one of
-those pointing at the old object.  Replacing the bindings in place is what lets
-`cooked-raw-exceptions' and friends be customised in a running session.
+Three of the maps here are rebuilt whenever the option that shapes them is set
+-- `cooked-raw-map', `cooked--semi-forwarding-map' and `cooked-input-map' --
+and each is also a variable the user is invited to bind in.  Those two cannot
+be the same object: a rebuild replaces everything the builder made, which used
+to take a `keymap-set' the user had made with it, silently, on the next
+`setopt' of the list.
 
-`set-keymap-parent' stores the parent as the list's own terminating cdr
-rather than in a separate slot, so a plain `(setcdr map (cdr fresh))' would
-silently drop it; save and restore it around the replacement."
-  (let ((parent (keymap-parent map)))
-    (setcdr map (cdr fresh))
-    (set-keymap-parent map parent)))
+So the public map holds nothing of its own.  Everything the builder made lives
+in GENERATED, its parent, which is what `cooked--regenerate-keymap' swaps; a
+user's binding lands in the public map, in front of the generated one it
+shadows, which is also the order a user expects.  The map object stays the one
+`use-local-map' was handed and the one `cooked--meta-overlays' is keyed by."
+  (let ((map (make-sparse-keymap)))
+    (set-keymap-parent map generated)
+    map))
+
+(defun cooked--generated-keymap (map)
+  "The generated half of MAP, the map its option's `:set' replaces.
+
+MAP itself keeps only the user's bindings, so this is where a parent has to be
+stored as well: `cooked-mode-map' is set as the parent of this map and not of
+MAP, or the next rebuild would name the map it just retired.  See
+`cooked--public-keymap'."
+  (keymap-parent map))
+
+(defun cooked--regenerate-keymap (map fresh)
+  "Put FRESH under MAP as its generated half, in place of the one there now.
+
+MAP, its bindings and whatever sat beneath the old generated map all survive,
+so this is the whole of a rebuild: no map is edited, and nothing holding MAP as
+its parent -- `cooked-semi-map', a Meta overlay, evil's minor-mode keymap --
+has to hear about it."
+  (set-keymap-parent fresh (keymap-parent (cooked--generated-keymap map)))
+  (set-keymap-parent map fresh))
 
 (defun cooked--passthrough-setter (map &optional reserve-chords)
-  "A `defcustom' `:set' rebuilding MAP as a passthrough map for its value.
+  "A `defcustom' `:set' rebuilding MAP's generated half for its value.
 
 The value is a list of key strings naming the keys to keep for Emacs;
 RESERVE-CHORDS means what it does in `cooked--build-passthrough-map'.  MAP is
@@ -437,18 +468,20 @@ named rather than passed, and checked for at call time, because the maps are
 defined below the options that configure them -- the option has to exist first
 for the `defvar' to read it.
 
-A Meta overlay already built for MAP is rebuilt in place too, since a Meta chord
-among the exceptions is left out there rather than in MAP."
+A Meta overlay already built for MAP has its ESC prefix rebuilt too, since a
+Meta chord among the exceptions is left out there rather than in MAP.  The rest
+of the overlay does not depend on the list, and the overlay object itself must
+not change: a buffer may be wearing it right now."
   (lambda (symbol value)
     (set-default symbol value)
     (when (and (boundp map) (keymapp (symbol-value map)))
       (let ((events (mapcar #'cooked--exception-event value))
             (keymap (symbol-value map)))
-        (cooked--replace-keymap
+        (cooked--regenerate-keymap
          keymap (cooked--build-passthrough-map events reserve-chords))
         (when-let* ((overlay (cdr (assq keymap cooked--meta-overlays))))
-          (cooked--replace-keymap
-           overlay (cooked--build-meta-overlay keymap events)))))))
+          (define-key overlay (vector meta-prefix-char)
+                      (cooked--build-meta-prefix-map events)))))))
 
 (defcustom cooked-raw-exceptions '("C-g" "C-x" "C-h" "C-u" "C-l")
   "Keys kept for Emacs during a raw read outside the alternate screen.
@@ -491,8 +524,14 @@ regardless of this list, for a raw program that wants one of these keys back."
   :group 'cooked)
 
 (defvar cooked-raw-map
-  (cooked--build-passthrough-map (mapcar #'cooked--exception-event cooked-raw-exceptions))
-  "Keymap while the child is doing a raw, non-alt-screen read.")
+  (cooked--public-keymap
+   (cooked--build-passthrough-map
+    (mapcar #'cooked--exception-event cooked-raw-exceptions)))
+  "Keymap while the child is doing a raw, non-alt-screen read.
+
+What `cooked-raw-exceptions' shapes is the generated map beneath this one, so a
+`keymap-set' here stays put across a `setopt' of the list and shadows what the
+list left forwarding; see `cooked--public-keymap'.")
 
 (defvar cooked-command-map
   (cooked--build-passthrough-map nil)
@@ -533,14 +572,16 @@ child anyway, for the program that wants it back."
   :group 'cooked)
 
 (defvar cooked--semi-forwarding-map
-  (cooked--build-passthrough-map
-   (mapcar #'cooked--exception-event cooked-semi-exceptions) t)
-  "What `cooked-semi-map' forwards, on its own and with no parent.
+  (cooked--public-keymap
+   (cooked--build-passthrough-map
+    (mapcar #'cooked--exception-event cooked-semi-exceptions) t))
+  "What `cooked-semi-map' forwards, with nothing but its generated half beneath.
 
 `cooked-semi-map' is this and `cooked-mode-map' beneath it.  Kept apart because
 evil needs the forwarding alone: cooked-evil.el puts it above evil's insert
-state maps, and the parent would put `comint-mode-map''s `<delete>' and its
-Meta bindings above them too.")
+state maps, and `cooked-mode-map' would put `comint-mode-map''s `<delete>' and
+its Meta bindings above them too.  The chain ends at the generated map, which
+`cooked-semi-exceptions' rebuilds; see `cooked--public-keymap'.")
 
 (defvar cooked-semi-map
   (make-composed-keymap cooked--semi-forwarding-map)
@@ -702,13 +743,17 @@ than to `completion-at-point'."
 (defvar cooked-input-map
   ;; `cooked-delegate-keys' is defined below and cannot be read here; its `:set'
   ;; is what keeps the two in step from load onwards.
-  (cooked--build-input-map '("C-r"))
+  (cooked--public-keymap (cooked--build-input-map '("C-r")))
   "Keymap while Emacs owns the input line.
 
 Cooked's own `C-c'-prefixed commands (interrupt, EOF, paste, and the rest)
-are not repeated here -- they live on `cooked-mode-map', this map's parent,
-so the same set reaches `cooked-raw-map'/`cooked-alt-map' and a bare peek
-without being declared three times over.")
+are not repeated here -- they live on `cooked-mode-map', reached through this
+map's generated half, so the same set reaches `cooked-raw-map'/`cooked-alt-map'
+and a bare peek without being declared three times over.
+
+`cooked-delegate-keys' shapes that generated half and not this map, so a
+`keymap-set' here survives a change to the option; see
+`cooked--public-keymap'.")
 
 (defun cooked-delegate-key (key)
   "Hand the pending input to the child's line editor, then send KEY to it.
@@ -790,8 +835,8 @@ no completion channel reaches `git checkout <TAB>' -- but it should be chosen."
   :set (lambda (symbol value)
          (set-default symbol value)
          (when (and (boundp 'cooked-input-map) (keymapp cooked-input-map))
-           (cooked--replace-keymap cooked-input-map
-                                   (cooked--build-input-map value))))
+           (cooked--regenerate-keymap cooked-input-map
+                                      (cooked--build-input-map value))))
   :group 'cooked)
 
 ;;;; A real `escape' on a tty
