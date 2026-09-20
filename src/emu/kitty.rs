@@ -76,7 +76,10 @@ impl Payload {
 }
 
 /// One parsed command, before its payload has been reassembled.
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+///
+/// `Copy` because it is plain control data and a transfer keeps the one that opened it
+/// while the chunk that arrived is still being read.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub(crate) struct Command {
     pub action: Action,
     pub format: Payload,
@@ -97,9 +100,9 @@ pub(crate) struct Command {
     /// protocol says a chunk after the first carries only `m` and perhaps `q`.
     ///
     /// Kept apart from `action` because that one has already had the protocol's default
-    /// applied, so it cannot answer "did the child say so, or did we assume it?" — and
-    /// that is the whole question [`Kitty::feed`] has to settle before deciding whether
-    /// a payload continues a transfer or starts something else.
+    /// applied, so it cannot answer "did the child say so, or did we assume it?" — which
+    /// is what [`refuse_probe`] has to settle before refusing a payload that may be a
+    /// continuation of somebody's picture rather than a probe of its own.
     pub explicit_action: Option<Action>,
     /// The id the control data named, `None` when `i=` was absent. Same distinction as
     /// `explicit_action` and for the same reason: on a chunk, an absent `i=` means "the
@@ -186,11 +189,39 @@ pub(crate) enum CursorMove {
     Stay,
 }
 
-/// A transmission collected whole and not yet decoded; see [`Transfer::decode`].
+/// A transmission collected whole and not yet decoded; see [`Collected::decode`].
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct Transfer {
+pub(crate) struct Collected {
     cmd: Command,
     base64: Vec<u8>,
+}
+
+/// A chunked transmission still arriving: the command that opened it, the base64
+/// collected so far, and when the last chunk landed.
+///
+/// Every chunk moves it through [`Transfer::chunk`], which either hands one back or
+/// consumes it, so a transfer that has completed, been displaced or been abandoned is
+/// gone rather than left in a field somebody must remember to clear. That is what keeps
+/// a stray command from being swallowed as more of the picture: the case the comments
+/// here used to have to argue, the type now refuses to represent.
+#[derive(Debug)]
+struct Transfer {
+    opened: Command,
+    base64: Vec<u8>,
+    since: std::time::Instant,
+}
+
+/// What one chunk did to the transfer it was fed to. Every arm consumes the transfer;
+/// only [`Step::More`] hands one back.
+#[derive(Debug)]
+enum Step {
+    /// `m=1`: the transfer carries on, with this chunk in it and its clock restarted.
+    More(Transfer),
+    /// `m=0`: the payload is whole and owed a decode.
+    Complete(Collected),
+    /// The payload passed [`MAX_PAYLOAD`]. Both the chunk and everything collected
+    /// before it go, with this refusal owed to the command that opened the transfer.
+    Abandoned(Option<Vec<u8>>),
 }
 
 /// What the terminal should do once a command's payload is complete.
@@ -202,7 +233,7 @@ pub(crate) enum Outcome {
     /// the whole protocol -- base64, an inflate, a re-encode as PNG -- and is a pure
     /// function of what was collected, so it is handed back rather than done here: the
     /// reader does it with the terminal unlocked, and brings the [`Outcome`] back.
-    Decode(Transfer),
+    Decode(Collected),
     /// Hand these bytes to the image store, and display them if `display` says how.
     Image {
         format: ImageFormat,
@@ -231,11 +262,10 @@ pub(crate) struct Kitty {
     ///
     /// Bounded by [`MAX_PAYLOAD`], and in time by [`TRANSFER_TIMEOUT`]: a client that
     /// begins a chunked transfer and then goes permanently silent would otherwise hold
-    /// this buffer until the session ended or another transmission displaced it. The
-    /// instant is when the last chunk arrived, and [`Kitty::abandon_stale`] is what reads
-    /// it, from the reader thread's tick, since nothing here is called while the child
-    /// is quiet.
-    pending: Option<(Command, Vec<u8>, std::time::Instant)>,
+    /// this buffer until the session ended or another transmission displaced it.
+    /// [`Kitty::abandon_stale`] is what reads the clock, from the reader thread's tick,
+    /// since nothing here is called while the child is quiet.
+    pending: Option<Transfer>,
     /// The child's own image ids, which are not ours — ours are content-addressed, so
     /// two clients reusing the same number cannot collide, and one client reusing a
     /// number for a different picture cannot alias.
@@ -258,7 +288,7 @@ impl Kitty {
     /// refusal typed at the next prompt would be worse than none.
     pub(crate) fn abandon_stale(&mut self, now: std::time::Instant) -> bool {
         self.pending
-            .take_if(|(_, _, since)| now.saturating_duration_since(*since) >= TRANSFER_TIMEOUT)
+            .take_if(|transfer| transfer.stale_at(now))
             .is_some()
     }
 
@@ -311,63 +341,41 @@ impl Kitty {
         let cmd = Command::parse(&control);
 
         // Settled before anything is appended, because a transfer in flight otherwise
-        // swallows whatever arrives next as though it were more of the picture.
-        if self.pending.is_some() {
-            // A probe, a delete and a place carry no payload and are never a chunk, so
-            // they are answered where they stand and the transfer is left alone. Eating
-            // one corrupts the image *and* misanswers the probe -- and `a=q` in
-            // particular is defined to leave no trace, which being spliced into somebody
-            // else's picture is not.
-            if matches!(
-                cmd.explicit_action,
-                Some(Action::Query | Action::Delete | Action::Put)
-            ) {
-                return self.standalone(cmd);
-            }
-            // An explicit `i=` naming a *different* picture is a second transmission
-            // rather than a chunk of this one. Told out loud, as the module's rule is,
-            // and addressed to the transfer being abandoned rather than to the one
-            // displacing it -- the client is owed an answer about the picture it will
-            // now never get. A repeated or absent `i=' continues as before, so a sender
-            // that restates its full control data on every chunk is unaffected; two
-            // transfers sharing one id are indistinguishable from a continuation by any
-            // means, and nothing here pretends otherwise.
-            if let Some((stale, ..)) = self
-                .pending
-                .take_if(|(pending, ..)| cmd.explicit_id.is_some_and(|id| id != pending.id))
-            {
-                let refusal = response(&stale, Some("EINVAL:interleaved"));
-                let (outcome, reply) = self.begin(cmd, body);
-                // Both answers go back, in the order the two commands happened. Each is a
-                // complete APC, so a client reading them apart is reading them the same
-                // way it would have had they arrived in separate writes.
-                return (outcome, join(refusal, reply));
-            }
+        // swallows whatever arrives next as though it were more of the picture. A probe,
+        // a delete and a place carry no payload and are never a chunk, so they are
+        // answered where they stand and any transfer is left alone. Eating one corrupts
+        // the image *and* misanswers the probe -- and `a=q` in particular is defined to
+        // leave no trace, which being spliced into somebody else's picture is not.
+        //
+        // `cmd.action` is only one of these when the control data named it: an absent
+        // `a=` resolves to `Transmit`, which is what a continuation chunk looks like.
+        match cmd.action {
+            Action::Query | Action::Delete | Action::Put => return self.standalone(cmd),
+            Action::Transmit | Action::Display => {}
         }
 
-        // A continuation carries only `m=` and perhaps `q=`; the command it continues is
-        // the one already in flight, whose format and geometry still apply. Only `m=` is
-        // read off the chunk itself -- everything else about the picture was settled by
-        // the command that opened the transfer.
-        if let Some((opened, mut buf, _)) = self.pending.take() {
-            if !append(&mut buf, body) {
-                return (Outcome::Nothing, response(&opened, Some("EBIG:payload")));
-            }
-            if cmd.more {
-                self.pending = Some((opened, buf, std::time::Instant::now()));
-                return (Outcome::Incomplete, None);
-            }
-            return Self::collected(opened, buf);
+        match self.pending.take() {
+            None => self.begin(cmd, body),
+            Some(transfer) => match transfer.displaced_by(&cmd) {
+                Ok(transfer) => {
+                    let step = transfer.chunk(&cmd, body);
+                    self.settle(step)
+                }
+                Err(refusal) => {
+                    let (outcome, reply) = self.begin(cmd, body);
+                    // Both answers go back, in the order the two commands happened. Each
+                    // is a complete APC, so a client reading them apart is reading them
+                    // the same way it would have had they arrived in separate writes.
+                    (outcome, join(refusal, reply))
+                }
+            },
         }
-
-        self.begin(cmd, body)
     }
 
-    /// Answer a command that carries no payload, or `Nothing` if it is not one.
+    /// Answer a probe, a delete or a place -- the three commands that carry no payload.
     ///
-    /// Split out because these three are reachable from two places -- an ordinary
-    /// command, and one arriving while a chunked transfer is in flight -- and the second
-    /// path exists precisely so that they behave identically either way.
+    /// Reached before anything looks at the transfer in flight, so one of these behaves
+    /// the same whether or not a picture is arriving around it.
     fn standalone(&mut self, cmd: Command) -> (Outcome, Option<Vec<u8>>) {
         if let Some(why) = cmd.unsupported {
             return (Outcome::Nothing, response(&cmd, Some(why)));
@@ -395,37 +403,95 @@ impl Kitty {
                 // can do about either is send the picture again.
                 None => (Outcome::Nothing, response(&cmd, Some("ENOENT:image"))),
             },
+            // Not reachable through `feed`, which sends a transmission to `begin`
+            // instead; spelled out rather than caught by a wildcard so that a new
+            // action has to be placed on one side of that split or the other.
             Action::Transmit | Action::Display => (Outcome::Nothing, None),
         }
     }
 
-    /// Start a command that was not a continuation of anything.
+    /// Start a transmission that was not a continuation of anything.
+    ///
+    /// Its payload is the first chunk of a transfer that opens empty, so that a
+    /// transmission arriving whole and one arriving in pieces take the same path: `m=`
+    /// is read in [`Transfer::chunk`] and nowhere else.
     fn begin(&mut self, cmd: Command, body: &[u8]) -> (Outcome, Option<Vec<u8>>) {
         if let Some(why) = cmd.unsupported {
             return (Outcome::Nothing, response(&cmd, Some(why)));
         }
-        if !matches!(cmd.action, Action::Transmit | Action::Display) {
-            return self.standalone(cmd);
-        }
-
-        let mut buf = Vec::new();
-        if !append(&mut buf, body) {
-            return (Outcome::Nothing, response(&cmd, Some("EBIG:payload")));
-        }
-        if cmd.more {
-            self.pending = Some((cmd, buf, std::time::Instant::now()));
-            return (Outcome::Incomplete, None);
-        }
-        Self::collected(cmd, buf)
+        let step = Transfer::opening(cmd).chunk(&cmd, body);
+        self.settle(step)
     }
 
-    /// The whole payload is in: hand it back to be decoded.
-    fn collected(cmd: Command, base64: Vec<u8>) -> (Outcome, Option<Vec<u8>>) {
-        (Outcome::Decode(Transfer { cmd, base64 }), None)
+    /// Take up what a chunk did: hold the transfer that continues, hand back the payload
+    /// that is whole, or answer for the one that is gone.
+    fn settle(&mut self, step: Step) -> (Outcome, Option<Vec<u8>>) {
+        match step {
+            Step::More(transfer) => {
+                self.pending = Some(transfer);
+                (Outcome::Incomplete, None)
+            }
+            Step::Complete(collected) => (Outcome::Decode(collected), None),
+            Step::Abandoned(refusal) => (Outcome::Nothing, refusal),
+        }
     }
 }
 
 impl Transfer {
+    /// A transfer with nothing collected yet, opened by CMD.
+    fn opening(opened: Command) -> Self {
+        Self {
+            opened,
+            base64: Vec::new(),
+            since: std::time::Instant::now(),
+        }
+    }
+
+    /// Whether the last chunk landed longer than [`TRANSFER_TIMEOUT`] before NOW.
+    fn stale_at(&self, now: std::time::Instant) -> bool {
+        now.saturating_duration_since(self.since) >= TRANSFER_TIMEOUT
+    }
+
+    /// This transfer still, or the refusal owed to it because CMD is a second picture.
+    ///
+    /// An explicit `i=` naming a *different* picture is a second transmission rather
+    /// than a chunk of this one. Told out loud, as the module's rule is, and addressed
+    /// to the transfer being abandoned rather than to the one displacing it -- the
+    /// client is owed an answer about the picture it will now never get. A repeated or
+    /// absent `i=` continues as before, so a sender that restates its full control data
+    /// on every chunk is unaffected; two transfers sharing one id are indistinguishable
+    /// from a continuation by any means, and nothing here pretends otherwise.
+    fn displaced_by(self, cmd: &Command) -> Result<Self, Option<Vec<u8>>> {
+        if cmd.explicit_id.is_some_and(|id| id != self.opened.id) {
+            return Err(response(&self.opened, Some("EINVAL:interleaved")));
+        }
+        Ok(self)
+    }
+
+    /// Take CMD's payload into this transfer, which CMD's `m=` either continues or ends.
+    ///
+    /// A continuation carries only `m=` and perhaps `q=`; the command it continues is the
+    /// one already in flight, whose format and geometry still apply. So `m=` is all that
+    /// is read off CMD here -- everything else about the picture was settled by the
+    /// command that opened the transfer, and that is the one every answer is addressed to.
+    fn chunk(mut self, cmd: &Command, body: &[u8]) -> Step {
+        if self.base64.len() + body.len() > MAX_PAYLOAD {
+            return Step::Abandoned(response(&self.opened, Some("EBIG:payload")));
+        }
+        self.base64.extend_from_slice(body);
+        if cmd.more {
+            self.since = std::time::Instant::now();
+            Step::More(self)
+        } else {
+            Step::Complete(Collected {
+                cmd: self.opened,
+                base64: self.base64,
+            })
+        }
+    }
+}
+
+impl Collected {
     /// Decode the payload into the picture it carries, or the refusal it earns.
     ///
     /// Nothing here touches the session: the answer depends on the bytes alone, which is
@@ -495,14 +561,6 @@ impl Transfer {
             response(&cmd, None),
         )
     }
-}
-
-fn append(buf: &mut Vec<u8>, body: &[u8]) -> bool {
-    if buf.len() + body.len() > MAX_PAYLOAD {
-        return false;
-    }
-    buf.extend_from_slice(body);
-    true
 }
 
 /// Two answers as one, for the one command that produces both.
@@ -676,6 +734,30 @@ mod tests {
         // The chunk that comes after is a command of its own rather than a
         // continuation of the transfer that was dropped.
         assert!(matches!(fed(&mut k, b"Ga=q,i=1;").0, Outcome::Nothing));
+    }
+
+    #[test]
+    fn a_transfer_that_outgrows_the_cap_is_gone_rather_than_left_half_collected() {
+        // The chunk that overruns `MAX_PAYLOAD` ends the transfer: the client is told
+        // `EBIG:payload` for the picture it opened, and what arrives next is a command
+        // of its own. A transfer kept past its refusal would splice the next thing the
+        // child wrote onto 32MB it had already been told were lost.
+        let mut k = Kitty::default();
+        let full = "A".repeat(MAX_PAYLOAD);
+        assert_eq!(
+            fed(&mut k, format!("Ga=T,f=100,i=1,m=1;{full}").as_bytes()).0,
+            Outcome::Incomplete
+        );
+        let (outcome, reply) = fed(&mut k, b"Gm=1;A");
+        assert_eq!(outcome, Outcome::Nothing);
+        assert_eq!(reply.unwrap(), b"\x1b_Gi=1;EBIG:payload\x1b\\");
+        assert!(k.pending.is_none());
+
+        let (outcome, _) = fed(&mut k, format!("Gf=100,m=0;{}", b64(b"PNGDATA")).as_bytes());
+        match outcome {
+            Outcome::Image { bytes, .. } => assert_eq!(bytes, b"PNGDATA"),
+            other => panic!("{other:?}"),
+        }
     }
 
     /// [`Kitty::feed`] with the decode done on the spot, which is what these tests are

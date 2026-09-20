@@ -1703,7 +1703,7 @@ pub struct Decode(Job);
 /// is not one: its file is bounded by the OSC limit and sniffed rather than decoded.
 #[derive(Debug)]
 enum Job {
-    Kitty(crate::emu::kitty::Transfer),
+    Kitty(crate::emu::kitty::Collected),
     Sixel(Vec<u8>),
 }
 
