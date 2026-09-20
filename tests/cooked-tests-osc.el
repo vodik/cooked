@@ -1896,7 +1896,7 @@ colours it draws, which DECSCNM exchanges."
                      (lambda () (string-match-p "11;rgb:" (cooked-tests--contents out)))))
             (should (equal (cooked-tests--contents out)
                            (format "\033]10;rgb:ffff/0000/0000\007\033]11;%s\007"
-                                   (cooked--color-to-osc foreground))))
+                                   (cooked-tests--rgb foreground))))
             ;; And the scheme `CSI ? 996 n' is answered with reads that background.
             (should (eq (cooked--color-scheme)
                         (if (color-dark-p (mapcar (lambda (v) (/ v 65535.0))
@@ -1935,8 +1935,8 @@ used one."
   "The reply a query for palette INDEX is owed.
 
 The colour comes from `cooked--color', the function that paints cells, with the
-fallback `cooked--osc-palette' has always used for an `ansi-color-' face that a
-tty frame leaves unreadable."
+fallback `cooked--palette-colors' uses for an `ansi-color-' face that a tty
+frame leaves unreadable."
   (format "\033]4;%d;%s\007" index
           (cooked-tests--rgb (if (color-values (cooked--color index))
                                  (cooked--color index)
@@ -2047,58 +2047,50 @@ Each answer was once its own synchronous write to the pty, so the sweep cost
 256 of them, each able to stall on a child that had stopped reading; then it
 cost one drain and one reply batch, which still put a wake and
 `cooked-min-redisplay-interval' between the child and its answer.  The colours
-are now held in the core -- `cooked--sync-palette' pushes them at the spawn --
-and a query for an entry it holds is answered where it arrives.
+are held in the core now -- `cooked--sync-palette' pushes all 256 -- and the
+sweep is answered where it arrives.
 
-So the assertion is that `cooked--osc-palette', which is still where a query
-the core declines is answered and still where the colours themselves are
-decided, was not reached once, and that all 256 answers came back in order and
-in the form xterm uses."
+Lisp has no OSC 4 handler left to fall back on, which is the other half of the
+assertion: nothing is registered for the code, so an answer that did not come
+from the core would not come at all."
   (let ((out (make-temp-file "cooked-osc4-sweep"))
         (queries (make-temp-file "cooked-osc4-queries"))
-        (reached 0)
-        (palette (symbol-function 'cooked--osc-palette))
         (expected (mapconcat #'cooked-tests--palette-answer
                              (number-sequence 0 255))))
+    (should-not (alist-get 4 cooked-osc-handlers))
     (unwind-protect
         (progn
           (with-temp-file queries
             (dotimes (index 256) (insert (format "\e]4;%d;?\a" index))))
-          (cl-letf (((symbol-function 'cooked--osc-palette)
-                     (lambda (parts)
-                       (setq reached (1+ reached))
-                       (funcall palette parts))))
-            (cooked-tests--with-session
-                (list "/bin/sh" "-c"
-                      (format "stty raw -echo; cat %s; cat > %s" queries out))
-              (should (cooked-tests--settle
-                       (lambda () (string-match-p "4;255;rgb:"
-                                                  (cooked-tests--contents out)))))
-              (should (equal (cooked-tests--contents out) expected))
-              (should (eql reached 0)))))
+          (cooked-tests--with-session
+              (list "/bin/sh" "-c"
+                    (format "stty raw -echo; cat %s; cat > %s" queries out))
+            (should (cooked-tests--settle
+                     (lambda () (equal (cooked-tests--contents out) expected))))
+            (should (equal (cooked-tests--contents out) expected))))
       (delete-file out)
       (delete-file queries))))
 
-(ert-deftest cooked-a-frozen-buffer-keeps-a-colour-answer-ahead-of-da1 ()
-  "DA1 behind a colour query waits with the query for the thaw, and follows it.
+(ert-deftest cooked-a-frozen-buffer-keeps-a-lisp-answer-ahead-of-da1 ()
+  "DA1 behind a query only Lisp answers waits with it for the thaw, and follows.
 
-A program asks for a colour and then DA1, and takes DA1 answered first as the
-colour never coming.  Where only Lisp can answer the colour, and a frozen
-buffer does not drain, the core must not send DA1 on ahead of it.
+A program asks something and then DA1, and takes DA1 answered first as the
+first answer never coming.  Lisp answers this one, a frozen buffer does not
+drain, and so the core must not send DA1 on ahead of it.
 
-`OSC 12', the cursor, is the query asked here, and the cursor is the reason:
-it is the frame's colour and not the buffer's, so it is not in the palette
-`cooked--set-palette' holds and it is still answered from Lisp.  The
-background, which this test used to ask for, is now answered in the core where
-it arrives -- so it is no longer behind anything, and asking it here would
-assert the opposite of what the test is for."
-  (let ((out (make-temp-file "cooked-frozen-osc11"))
+The query used to be `OSC 11 ; ?', and it cannot be: the core answers every
+colour query now, from a palette that does not depend on a drain, so a colour
+is never behind a freeze and asking for one here would assert the opposite of
+what this test is for.  `OSC 22 ; ?' -- what pointer shape is this? -- is a
+question Lisp still answers, being about a window rather than a colour, and it
+holds DA1 back in exactly the same way."
+  (let ((out (make-temp-file "cooked-frozen-osc22"))
         (flag (make-temp-name (expand-file-name "cooked-frozen-flag"
                                                 temporary-file-directory))))
     (unwind-protect
         (cooked-tests--with-session
             (list "/bin/sh" "-c"
-                  (format "stty raw -echo; printf ready; until [ -e %s ]; do sleep 0.02; done; printf '\\033]12;?\\033\\\\\\033[c'; cat > %s"
+                  (format "stty raw -echo; printf ready; until [ -e %s ]; do sleep 0.02; done; printf '\\033]22;?text\\033\\\\\\033[c'; cat > %s"
                           flag out))
           (should (cooked-tests--settle
                    (lambda () (string-match-p "ready" (cooked-tests--text)))))
@@ -2109,7 +2101,7 @@ assert the opposite of what the test is for."
           (setq cooked--input-mode nil)
           (should (cooked-tests--settle
                    (lambda () (string-suffix-p "c" (cooked-tests--contents out)))))
-          (should (string-match-p "\\`\e\\]12;rgb:[^\e]+\e\\\\\e\\[\\?62[;0-9]*c\\'"
+          (should (string-match-p "\\`\e\\]22;[^\e]+\e\\\\\e\\[\\?62[;0-9]*c\\'"
                                   (cooked-tests--contents out))))
       (delete-file out)
       (ignore-errors (delete-file flag)))))
@@ -2182,8 +2174,8 @@ hold."
   (let ((out (make-temp-file "cooked-osc4"))
         (expected (mapconcat
                    (lambda (n)
-                     (format "\033]4;%d;%s\007"
-                             n (cooked--color-to-osc (cooked--color n))))
+                     (format "\033]4;%d;%s\007" n
+                             (cooked-tests--rgb (cooked--color n))))
                    '(1 196 244))))
     (unwind-protect
         (cooked-tests--with-session
@@ -2199,44 +2191,22 @@ hold."
                    (cooked-tests--contents out))))
       (delete-file out))))
 
-(ert-deftest cooked-osc-4-walks-its-pairs ()
-  "A chained query gets one reply per `?', a bad index is skipped without
-shifting the pairs after it, and a set stays silent even with sets allowed."
-  (let ((replies nil)
-        (before (cooked--color 1))
-        (cooked-allow-color-set t)
-        (cooked--osc-bell-terminated nil))
-    (cl-letf (((symbol-function 'cooked--reply-osc)
-               (lambda (_session code payload bell)
-                 (push (list code payload bell) replies))))
-      (with-temp-buffer
-        (cooked--osc-palette '("1" "#00ff00" "x" "?" "256" "?" "7" "?" "9"))
-        (should-not face-remapping-alist))
-      (should (equal (mapcar #'car replies) '(4)))
-      (should (string-prefix-p "7;rgb:" (nth 1 (car replies))))
-      (should-not (nth 2 (car replies)))
-      (should (equal (cooked--color 1) before)))))
+(ert-deftest cooked-osc-17-and-19-are-answered-and-never-set ()
+  "The selection colours are xterm's to report and the theme's to choose.
 
-(ert-deftest cooked-osc-17-and-19-answer-from-the-region-face ()
-  "The selection colours are read, chained through 18, and never set."
-  (let ((replies nil)
-        (cooked-allow-color-set t)
-        (cooked--osc-bell-terminated t))
-    (cl-letf (((symbol-function 'cooked--reply-osc)
-               (lambda (_session code payload _bell)
-                 (push (cons code payload) replies))))
-      (with-temp-buffer
-        (let ((cooked--osc-code 17))
-          (cooked--osc-color '("?" "?" "?")))
-        (should (equal (mapcar #'car (reverse replies)) '(17 18 19)))
-        (should (equal (cdr (assq 17 replies))
-                       (cooked--color-to-osc
-                        (cooked--default-color 'highlight-background))))
-        (dolist (code '(17 19))
-          (let ((cooked--osc-code code))
-            (cooked--osc-color '("#ff0000"))))
-        (should-not cooked--color-remaps)
-        (should-not face-remapping-alist)))))
+The answers are in `cooked-every-colour-query-is-answered-with-the-same-bytes',
+which reads them off the wire; what is left here is the half that is still a
+decision -- a child repainting `region' would be restyling a face every other
+buffer shares, for a selection it cannot even see, so the set is refused with
+sets switched on."
+  (let ((cooked-allow-color-set t))
+    (with-temp-buffer
+      (dolist (code '(17 19))
+        (let ((cooked--osc-code code)
+              (cooked--osc-bell-terminated t))
+          (cooked--osc-color '("#ff0000"))))
+      (should-not cooked--color-remaps)
+      (should-not face-remapping-alist))))
 
 (ert-deftest cooked-osc-13-to-18-answer-a-lone-query ()
   "Every colour xterm answers from 10 to 19 is answered, so a child asking one of
@@ -2256,7 +2226,7 @@ default colours and the cursor's.  None of them is settable."
                          (mapconcat
                           (pcase-lambda (`(,code . ,kind))
                             (format "\033]%d;%s\007" code
-                                    (cooked--color-to-osc (cooked--default-color kind))))
+                                    (cooked-tests--rgb (cooked--default-color kind))))
                           '((13 . pointer-foreground) (14 . background)
                             (15 . foreground) (16 . background) (18 . cursor))
                           "")))

@@ -1110,22 +1110,44 @@ keyboard to a prompt that is about to hand it straight back."
       (selected-window)))
 
 (defun cooked--update-attention (&rest _)
-  "Track, for every live session, whether the user is looking at it.
-From `window-selection-change-functions'; see `cooked--update-buffer-attention'."
-  (cooked--dolist-buffers
-    (cooked--update-buffer-attention)))
+  "Track, for every live session, whether the user is looking at it, and tell
+each of them what colour a query would be answered with now.
 
-(defun cooked--window-buffers-changed (&rest _)
-  "Update attention and graphics in every session, in one walk of the sessions.
+Two questions in one walk because a window change is the moment for both:
+whether the user is reading this buffer, and which buffer's cursor colour the
+frame is wearing, which is what an `OSC 12' query is owed.  See
+`cooked--update-buffer-attention' and `cooked--sync-palette'."
+  (cooked--dolist-buffers
+    (cooked--protect-hook (cooked--update-buffer-attention))
+    (cooked--protect-hook (cooked--sync-palette))))
+
+(defun cooked--selected-window-changed (&optional frame)
+  "Follow the selected window moving on FRAME.
+
+From `window-selection-change-functions', whose global value runs once per
+frame that changed; the buffer-local entry is
+`cooked--window-selection-changed', which is about this buffer's own keymap and
+focus.  FRAME's cursor colour is put on or taken off first, because the walk
+after it tells each session what an `OSC 12' query is now owed and that is the
+colour this has just settled."
+  (cooked--sync-cursor-color frame)
+  (cooked--update-attention))
+
+(defun cooked--window-buffers-changed (&optional frame)
+  "Update what FRAME's windows show, in one walk of the sessions.
 
 From `window-buffer-change-functions', whose global value runs once per frame
-that changed.  Both questions are about which windows show a buffer, so one
-walk answers both rather than each walking the sessions for itself."
+that changed.  Attention, visibility, graphics and the colours a query is
+answered with are all questions about which windows show a buffer, so one walk
+answers them rather than each walking the sessions for itself.  FRAME's cursor
+colour goes first, for the reason `cooked--selected-window-changed' gives."
+  (cooked--sync-cursor-color frame)
   (cooked--dolist-buffers
-    ;; Protected apart, so a failure in one still lets the other run.
+    ;; Protected apart, so a failure in one still lets the others run.
     (cooked--protect-hook (cooked--update-buffer-attention))
     ;; After attention, which is what says the buffer has been on screen at all.
     (cooked--protect-hook (cooked--update-buffer-visibility))
+    (cooked--protect-hook (cooked--sync-palette))
     (when cooked--session
       (cooked--sync-graphics))))
 
@@ -1245,16 +1267,13 @@ command line.  See `cooked--screen-kept-still-p'."
   (add-hook 'kill-emacs-hook #'cooked--kill-emacs)
   ;; Both, because they answer different halves of "is the user looking at it":
   ;; selection moving to another window, and the window they are in showing
-  ;; something else.
-  (add-hook 'window-selection-change-functions #'cooked--update-attention)
-  ;; One function for both halves on the buffer side, since graphics below asks
-  ;; about the same windows: see `cooked--window-buffers-changed'.
+  ;; something else.  One function per half, each walking the sessions once for
+  ;; everything that half decides -- attention, visibility, graphics, and the
+  ;; cursor colour a query is answered with; see `cooked--window-buffers-changed'.
+  ;; The global values are the ones that still run when the window being left
+  ;; shows a buffer that is no longer cooked, or no longer live.
+  (add-hook 'window-selection-change-functions #'cooked--selected-window-changed)
   (add-hook 'window-buffer-change-functions #'cooked--window-buffers-changed)
-  ;; The same two halves decide which buffer's OSC 12 colour a frame's cursor
-  ;; wears, and the global values are the ones that still run when the window
-  ;; being left shows a buffer that is no longer cooked, or no longer live.
-  (add-hook 'window-selection-change-functions #'cooked--cursor-color-changed)
-  (add-hook 'window-buffer-change-functions #'cooked--cursor-color-changed)
   ;; Whether a picture can be shown is a question about every frame the buffer
   ;; is on, so it is asked by walking sessions too; see `cooked--sync-graphics'.
   ;; On a window change `cooked--window-buffers-changed' asks it.

@@ -28,23 +28,27 @@ impl std::fmt::Display for Rgb {
 /// 13 and 14 are the mouse pointer, 15, 16 and 18 the Tektronix window xterm has and we
 /// do not, 17 and 19 the selection. The core keeps their order and not their meaning,
 /// except for the two DECSCNM exchanges; see [`Palette::color`].
+/// The discriminants are the codes themselves, so the slot a code names and the place
+/// its colour sits in the pushed table are one fact rather than two.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u16)]
 pub(crate) enum Slot {
-    Foreground,
-    Background,
-    Cursor,
-    PointerForeground,
-    PointerBackground,
-    TekForeground,
-    TekBackground,
-    HighlightBackground,
-    TekCursor,
-    HighlightForeground,
+    Foreground = 10,
+    Background = 11,
+    Cursor = 12,
+    PointerForeground = 13,
+    PointerBackground = 14,
+    TekForeground = 15,
+    TekBackground = 16,
+    HighlightBackground = 17,
+    TekCursor = 18,
+    HighlightForeground = 19,
 }
 
 impl Slot {
-    /// The slots in the order their codes run, which is the order Lisp pushes them in.
-    pub(crate) const ALL: [Slot; 10] = [
+    /// The slots in the order their codes run, which is the order Lisp pushes them in;
+    /// `slots_are_the_codes_in_order` holds the two together.
+    pub(super) const ALL: [Slot; 10] = [
         Slot::Foreground,
         Slot::Background,
         Slot::Cursor,
@@ -58,7 +62,12 @@ impl Slot {
     ];
 
     /// The lowest code that names a slot, so the table is indexed by `code - FIRST`.
-    const FIRST: u16 = 10;
+    const FIRST: u16 = Slot::Foreground as u16;
+
+    /// Where this slot's colour sits in the table Lisp pushed.
+    fn index(self) -> usize {
+        usize::from(self as u16 - Self::FIRST)
+    }
 }
 
 impl TryFrom<u16> for Slot {
@@ -67,8 +76,8 @@ impl TryFrom<u16> for Slot {
     /// The slot `OSC CODE` asks about, for a CODE in 10 to 19 and nothing else.
     ///
     /// A chained query walks past 19 -- `OSC 19 ; ? ; ?` asks about a code that names
-    /// nothing -- and that field is answered by silence, which is what
-    /// `cooked--osc-color' has always done with it.
+    /// nothing -- and that field is answered by silence, which is what the Lisp handler
+    /// this replaced always did with it.
     fn try_from(code: u16) -> Result<Self, Self::Error> {
         let index = code.checked_sub(Self::FIRST).ok_or(())?;
         Self::ALL.get(usize::from(index)).copied().ok_or(())
@@ -144,7 +153,7 @@ impl Palette {
             (Slot::Background, true) => Slot::Foreground,
             (slot, _) => slot,
         };
-        self.defaults[slot as usize]
+        self.defaults[slot.index()]
     }
 }
 
@@ -172,8 +181,7 @@ impl State {
     ///
     /// A field nobody can answer -- a palette index that is not a number, a code past 19,
     /// a colour Lisp has not reported -- contributes nothing and does not disturb the
-    /// fields around it, which is what `cooked--osc-color' and `cooked--osc-palette' did
-    /// with it.
+    /// fields around it, which is what the Lisp handlers this replaced did with it.
     pub(super) fn color_query<'a>(
         &self,
         code: u16,
@@ -229,8 +237,8 @@ impl State {
 
 /// The palette index PAIR asks about, if it is a query for one this can read.
 ///
-/// `cooked--osc-palette' read the index with `[0-9]\{1,3\}' and then refused anything
-/// over 255, which is what parsing it as a `u8` says in one step.
+/// The Lisp handler this replaced read the index with `[0-9]\{1,3\}' and then refused
+/// anything over 255, which is what parsing it as a `u8` says in one step.
 fn query_index(pair: &[&[u8]]) -> Option<u8> {
     (pair[1] == b"?")
         .then(|| std::str::from_utf8(pair[0]).ok()?.parse().ok())

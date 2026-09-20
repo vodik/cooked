@@ -215,10 +215,14 @@ query rather than trusting a level that may have moved since this ran."
 
 Everything that can move one of these answers ends up here: a theme, through
 `cooked-theme-change-hook\\='; an OSC 10, 11 or 12 set or reset, which reaches
-that same hook through `cooked--flush-face-cache\\='; the frame\\='s cursor colour,
-through `cooked--resync-palettes\\=' on the window hooks `cooked--sync-cursor-color\\='
-already runs on; and the spawn, so a child that probes in its first instant is
-answered.
+that same hook through `cooked--flush-face-cache\\='; the frame\\='s cursor
+colour, from the same walk of the sessions the window hooks already make, after
+`cooked--sync-cursor-color\\=' has settled it; and the spawn, so a child that
+probes in its first instant is answered.
+
+Compared before it is pushed, because most of those moments have nothing to
+report: a window change asks this of every session and is otherwise a handful
+of face lookups rather than 266 colours across the module boundary.
 
 The one thing not covered is `set-cursor-color\\=' by itself, which changes a
 frame parameter and runs no hook at all: a query between that and the next
@@ -228,16 +232,6 @@ window change is answered with the cursor colour the frame had before it."
       (unless (equal palette cooked--pushed-palette)
         (setq cooked--pushed-palette palette)
         (cooked--set-palette session (car palette) (cdr palette))))))
-
-(defun cooked--resync-palettes (&rest _)
-  "Tell every session the colours it draws with now.
-
-For the changes that are not the buffer\\='s own: the frame\\='s cursor colour is
-what OSC 12 answers with, and it moves when another window is selected or shows
-something else.  `cooked--sync-palette\\=' compares before it pushes, so the
-ordinary window change costs each session a handful of face lookups and no call
-into the core."
-  (cooked--dolist-buffers (cooked--sync-palette)))
 
 (add-hook 'cooked-theme-change-hook #'cooked--sync-palette)
 
@@ -285,9 +279,10 @@ its place in the order, since it is this turn that releases it."
   ;; that landed has already pushed through the face cache flush, and saying it again is
   ;; how this function does not have to know that.
   (cooked--sync-palette)
-  (when-let* ((bytes (cooked--answer-color-query cooked--session cooked--osc-code parts
+  (when-let* ((session (cooked--live-session))
+              (bytes (cooked--answer-color-query session cooked--osc-code parts
                                                  cooked--osc-bell-terminated)))
-    (cooked--queue-reply cooked--session bytes)))
+    (cooked--queue-reply session bytes)))
 
 (defun cooked--set-default-color (kind spec)
   "Remap this buffer's default KIND to SPEC, if it parses.
@@ -383,8 +378,10 @@ changed it, and that newer color is the frame's own."
   "Put on or take off FRAME's OSC 12 cursor color, for its selected window.
 What is taken off is replaced by `cooked--frame-cursor-color'.
 
-The frame's half alone; `cooked--cursor-color-changed' is what the two window
-hooks run, and it tells the sessions afterwards."
+The frame's half alone.  `cooked--selected-window-changed' and
+`cooked--window-buffers-changed' are what the two window hooks run: each syncs
+the frame here and then walks the sessions, which is where the colour this
+settles is handed to the core."
   (when (frame-live-p frame)
     (let* ((color (buffer-local-value 'cooked--cursor-color
                                       (window-buffer (frame-selected-window frame))))
@@ -401,19 +398,13 @@ hooks run, and it tells the sessions afterwards."
                (set-frame-parameter frame 'cursor-color own)))))))
 
 (defun cooked--sync-cursor-color-everywhere (&rest _)
-  "Run `cooked--sync-cursor-color' on every frame, then re-tell every session."
+  "Run `cooked--sync-cursor-color' on every frame, then re-tell every session.
+
+The sessions and not just this buffer: one frame can only wear one cursor
+colour, so a buffer setting one moves what every session on that frame would
+answer an `OSC 12' query with."
   (mapc #'cooked--sync-cursor-color (frame-list))
-  (cooked--resync-palettes))
-
-(defun cooked--cursor-color-changed (frame)
-  "Put FRAME\\='s OSC 12 colour on or take it off, then re-tell every session.
-
-The hook function, where `cooked--sync-cursor-color\\=' is the frame\\='s half alone.
-OSC 12 answers with the colour of the frame whose window is selected, so a
-selection change moves the answer for every session and not only for the buffer
-that gained or lost the window."
-  (cooked--sync-cursor-color frame)
-  (cooked--resync-palettes))
+  (cooked--dolist-buffers (cooked--sync-palette)))
 
 (defun cooked--sync-cursor-color-here ()
   "Sync the cursor color of each frame whose selected window shows this buffer.

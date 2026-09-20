@@ -261,3 +261,18 @@ fn osc_terminator_travels_with_the_event() {
         ]
     );
 }
+
+/// The ten slots and the ten codes are one table read two ways -- by discriminant, for
+/// where a colour sits in what Lisp pushed, and by position in `Slot::ALL`, for which
+/// code names it -- so a slot inserted in one and not the other would answer every
+/// later query with its neighbour's colour.
+#[test]
+fn slots_are_the_codes_in_order() {
+    for (index, slot) in super::super::osc::Slot::ALL.into_iter().enumerate() {
+        let code = 10 + index as u16;
+        assert_eq!(slot as u16, code);
+        assert_eq!(super::super::osc::Slot::try_from(code), Ok(slot));
+    }
+    assert!(super::super::osc::Slot::try_from(9).is_err());
+    assert!(super::super::osc::Slot::try_from(20).is_err());
+}
