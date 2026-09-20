@@ -26,6 +26,8 @@
 (require 'cooked-keys)
 (require 'cooked-input)
 
+(cooked--declare-core)
+
 (defconst cooked--escape-key ?\C-c
   "Prefix reserved for cooked's own commands while the child owns the keyboard.
 Everything `cooked-raw-map' and `cooked-alt-map' cover is otherwise forwarded
