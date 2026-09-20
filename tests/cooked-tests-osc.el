@@ -2040,6 +2040,31 @@ background is a question about the next colour along."
             (should-not cooked--color-remaps)))
       (delete-file out))))
 
+(ert-deftest cooked-a-cursor-colour-the-frame-took-on-is-what-a-query-reports ()
+  "OSC 12 answers with the cursor colour the frame wears now, not at the spawn.
+
+The cursor is the one colour that is not the buffer's: Emacs has one per frame,
+so what a query is owed moves when the frame's own colour changes or when
+another window is selected.  It is held in the core like the rest, and stays
+true because the window hooks push after `cooked--sync-cursor-color' has
+settled the frame -- `cooked--selected-window-changed' here, which is what
+`window-selection-change-functions' runs.
+
+`set-cursor-color' on its own is the gap: it sets a frame parameter and runs no
+hook, so a query between it and the next window change still hears the colour
+the frame had before.  This drives the hook, which is the covered path."
+  (let ((was (frame-parameter nil 'cursor-color)))
+    (unwind-protect
+        (cooked-tests--with-echoing-child ""
+          (set-frame-parameter nil 'cursor-color "#00ff00")
+          (cooked--selected-window-changed (selected-frame))
+          (cooked--feed cooked--session "\e]12;?\a")
+          (cooked--ready cooked--session)
+          (should (cooked-tests--settle
+                   (lambda () (string-match-p "]12;rgb:0000/ffff/0000"
+                                              (cooked-tests--text))))))
+      (set-frame-parameter nil 'cursor-color was))))
+
 (ert-deftest cooked-osc-4-sweep-is-answered-without-waking-lisp ()
   "A theme picker asking for all 256 palette entries never reaches Lisp at all.
 
