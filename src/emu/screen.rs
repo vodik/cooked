@@ -24,20 +24,29 @@ struct Damage {
     /// How many rows have been marked damaged over the screen's life; see
     /// [`Screen::touches`].
     touches: u64,
-    /// No row below this one held text when the last damage was taken; see
-    /// [`Damage::reach`], which widens it over the rows damaged since.
-    ///
-    /// An upper bound, not the answer, and a cache in one direction only: it is widened by
-    /// the damage, and only [`Damage::last_text`] pulls it back up, tightening it to the
-    /// truth as it scans. Nothing has to invalidate it -- an erase, a scroll or a row
-    /// removal can only leave it loose, and the next scan tightens it again -- so it is
-    /// never wrong, only sometimes pessimistic, and the scan it guards is never longer than
-    /// the unconditional one from the bottom row that it replaces.
-    ///
-    /// What it is worth: a spinner on a screen using five of its fifty rows asks
-    /// [`Screen::used`] twice a drain, and each ask was forty-five `has_text` calls over
-    /// blank rows -- about 9,000 cell reads, most of that drain's cost.
-    reach: Memo<usize>,
+    /// How far down the grid text reaches, as far as the flags have been read; see
+    /// [`Reach`] and [`Damage::reach`].
+    reach: Memo<Reach>,
+}
+
+/// No row below `row` held text as of the `touches`th damage.
+///
+/// An upper bound, not the answer, and a cache in one direction only: [`Damage::reach`]
+/// widens it over the rows damaged since, and only [`Damage::last_text`] pulls it back up,
+/// tightening it to the truth as it scans. Nothing has to invalidate it -- an erase, a
+/// scroll or a row removal can only leave it loose, and the next scan tightens it again --
+/// so it is never wrong, only sometimes pessimistic, and the scan it guards is never longer
+/// than the unconditional one from the bottom row that it replaces.
+///
+/// What it is worth: a spinner on a screen using five of its fifty rows asks
+/// [`Screen::used`] twice a drain, and each ask was forty-five `has_text` calls over blank
+/// rows -- about 9,000 cell reads, most of that drain's cost.
+#[derive(Debug, Clone, Copy)]
+struct Reach {
+    row: usize,
+    /// The damage count the row was read at, so that a second ask with nothing written
+    /// between the two reads no flags at all. A whole drain asks twice.
+    touches: u64,
 }
 
 impl Damage {
@@ -45,18 +54,29 @@ impl Damage {
         Self {
             dirty: vec![true; rows],
             touches: 0,
-            reach: Memo::new(rows.saturating_sub(1)),
+            reach: Memo::new(Reach {
+                row: rows.saturating_sub(1),
+                touches: 0,
+            }),
         }
     }
 
-    /// Damage row INDEX, which may now hold text, and say whether the grid has such a row.
+    /// Damage row INDEX, for a caller that has already written to it.
     ///
     /// Nothing is done to the reach here, and that is deliberate: this is the parser's hot
-    /// path -- `Screen::edit` reaches it once per printed character -- and folding the row
-    /// into the reach costs about one instruction a character, which measured as +0.13% on
-    /// the plain `feed_only` row and +0.64% on the wide one. [`Damage::reach`] reads the
-    /// flags instead, once per ask, where the scan is fifty bytes against the nine thousand
-    /// cell reads it saves.
+    /// path, reached once per printed character through [`Screen::edit`]. Widening the reach
+    /// per character measured as +0.13% on the plain `feed_only` row and +0.64% on the wide
+    /// one, and so did returning from here whether the row existed. [`Damage::reach`] reads
+    /// the flags instead, once per ask and only when something has been damaged since the
+    /// last ask.
+    fn damaged(&mut self, index: usize) {
+        if let Some(dirty) = self.dirty.get_mut(index) {
+            *dirty = true;
+        }
+        self.touches += 1;
+    }
+
+    /// Damage row INDEX before it is written, and say whether the grid has such a row.
     fn wrote(&mut self, index: usize) -> bool {
         let Some(dirty) = self.dirty.get_mut(index) else {
             return false;
@@ -83,7 +103,7 @@ impl Damage {
     fn wrote_all(&mut self) {
         self.dirty.fill(true);
         self.touches += 1;
-        self.reach.set(self.dirty.len().saturating_sub(1));
+        self.set_reach(self.dirty.len().saturating_sub(1));
     }
 
     /// A grid of ROWS rows, every one of them damaged; see [`Screen::resize`].
@@ -103,31 +123,55 @@ impl Damage {
             Direction::Up => self.dirty[top..=bottom].rotate_left(n),
             Direction::Down => {
                 self.dirty[top..=bottom].rotate_right(n);
+                // The remembered row moves with the rows it bounds, and the damage count
+                // it was read at does not: a row damaged since then has moved too, and its
+                // flag has moved with it, so the fold that has yet to happen still finds
+                // it. Nothing here depends on the caller damaging a range afterwards.
                 let reach = self.reach.get();
-                if reach <= bottom {
-                    self.reach.set((reach + n).min(bottom));
+                if reach.row <= bottom {
+                    self.reach.set(Reach {
+                        row: (reach.row + n).min(bottom),
+                        ..reach
+                    });
                 }
             }
         }
     }
 
+    /// Remember ROW as the reach as of the damage done so far.
+    fn set_reach(&self, row: usize) {
+        self.reach.set(Reach {
+            row,
+            touches: self.touches,
+        });
+    }
+
     /// How far down the grid text can reach: the remembered bound widened over every row
-    /// damaged since it was taken.
+    /// damaged since it was read.
     ///
     /// A row can only come to hold text by being written, and a write damages it, so the
-    /// damage is a superset of the rows that have gained text. A scan of the flags rather
-    /// than bookkeeping per write; see [`Damage::wrote`].
+    /// damaged rows are a superset of the rows that have gained text, and the highest of
+    /// them bounds the reach. A scan of the flags rather than bookkeeping per write (see
+    /// [`Damage::damaged`]), skipped entirely when nothing has been damaged since the last
+    /// read -- which is the second of a drain's two asks, and the whole of a drain that
+    /// changed nothing.
     fn reach(&self) -> usize {
         let last = self.dirty.len().saturating_sub(1);
+        let reach = self.reach.get();
+        if reach.touches == self.touches {
+            return reach.row.min(last);
+        }
         let damaged = self.dirty.iter().rposition(|&dirty| dirty).unwrap_or(0);
-        self.reach.get().max(damaged).min(last)
+        let row = reach.row.max(damaged).min(last);
+        self.set_reach(row);
+        row
     }
 
     /// Indices of the damaged rows, clearing them.
     fn take(&mut self) -> Vec<usize> {
         // Folded in before the flags go: they are what the reach is widened by, and after
         // this they say nothing about the rows that were written.
-        self.reach.set(self.reach());
+        self.reach();
         let changed = self
             .dirty
             .iter()
@@ -145,7 +189,7 @@ impl Damage {
         while index > 0 && !has_text(index) {
             index -= 1;
         }
-        self.reach.set(index);
+        self.set_reach(index);
         index
     }
 }
@@ -808,7 +852,7 @@ impl Screen {
 
     /// Mark row INDEX damaged without touching it, for a caller that has already written.
     fn damage(&mut self, index: usize) {
-        self.damage.wrote(index);
+        self.damage.damaged(index);
     }
 
     /// Mark every row in an inclusive range damaged.
@@ -2987,25 +3031,31 @@ mod tests {
         #[test]
         fn the_used_row_cache_tracks_the_scan(
             (rows, cols) in (1usize..8, 1usize..10),
-            pokes in proptest::collection::vec(poke_strategy(), 1..40),
+            pokes in proptest::collection::vec((poke_strategy(), any::<bool>()), 1..40),
         ) {
             let mut screen = Screen::new(rows, cols);
             // The screen starts fully damaged, so the first reading is the full scan; the
             // interesting readings are the ones after it, where the reach has been
             // tightened and the pokes have to widen it again.
             prop_assert_eq!(screen.last_used_row(), screen.last_used_row_by_scan());
-            for poke in &pokes {
+            for (poke, ask) in &pokes {
                 apply(&mut screen, poke);
-                prop_assert_eq!(
-                    screen.last_used_row(),
-                    screen.last_used_row_by_scan(),
-                    "after {:?}",
-                    poke
-                );
-                // Twice, because a drain asks twice and the second ask reads a reach the
-                // first one moved.
-                prop_assert_eq!(screen.last_used_row(), screen.last_used_row_by_scan());
+                // Not after every poke: reading tightens the reach, so a script that read
+                // after each one would never leave the reach stale across a move, which is
+                // the state a `CSI L` between two drains puts it in.
+                if *ask {
+                    prop_assert_eq!(
+                        screen.last_used_row(),
+                        screen.last_used_row_by_scan(),
+                        "after {:?}",
+                        poke
+                    );
+                    // Twice, because a drain asks twice and the second ask reads a reach
+                    // the first one moved.
+                    prop_assert_eq!(screen.last_used_row(), screen.last_used_row_by_scan());
+                }
             }
+            prop_assert_eq!(screen.last_used_row(), screen.last_used_row_by_scan());
         }
     }
 }
