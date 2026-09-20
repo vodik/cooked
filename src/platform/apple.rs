@@ -181,13 +181,8 @@ pub(crate) fn process_name(pid: Pid) -> Option<String> {
     let mut buf = [0u8; 2 * libc::MAXCOMLEN + 1];
     // SAFETY: `proc_name` writes at most `buffersize` bytes into `buffer` and returns how
     // many; the buffer is ours and its length is what is passed.
-    let written = unsafe {
-        libc::proc_name(
-            pid.as_raw(),
-            buf.as_mut_ptr().cast(),
-            buf.len() as u32 - 1,
-        )
-    };
+    let written =
+        unsafe { libc::proc_name(pid.as_raw(), buf.as_mut_ptr().cast(), buf.len() as u32 - 1) };
     let name = std::str::from_utf8(buf.get(..usize::try_from(written).ok()?)?).ok()?;
     (!name.is_empty()).then(|| name.to_owned())
 }

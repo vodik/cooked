@@ -1997,8 +1997,16 @@ impl Shared {
             //
             // Both are taken before either is acted on, so one tick's wakeup carries
             // whichever of them moved rather than the mode's short-circuiting the other.
+            //
+            // A hidden buffer is not woken for the foreground program alone: nothing
+            // shows the mode line that would name it and no keystroke can reach the
+            // keymap it would change, so the sample is kept and the level rides the drain
+            // `Session::set_hidden` announces when a window shows the buffer again. The
+            // mode is announced either way, because a secret prompt is owed its debounce
+            // whether or not anyone is looking yet.
             let mode_changed = self.sample_mode();
-            let foreground_changed = self.sample_foreground();
+            let foreground_changed =
+                self.sample_foreground() && !self.hidden.load(Ordering::Relaxed);
             if mode_changed || foreground_changed {
                 self.announce();
             }
