@@ -282,6 +282,20 @@ impl State {
         if let Some(pen) = self.pen.ids() {
             return pen;
         }
+        self.resolve_pen()
+    }
+
+    /// Resolve the pen the child has set to the ids it writes with, and cache them.
+    ///
+    /// Kept out of line deliberately. It is reached once per `SGR`, while its caller is
+    /// reached once per character, and everything the store does to reach an id --
+    /// lookup, collection and insert -- is inlined into it. Let the inliner fold that
+    /// into [`Self::pen`] and `pen` in turn stops being small enough to fold into
+    /// `print_bytes`, which is the parser's hot loop: measured on `feed_only`, the
+    /// difference is 0.19% on the plain row and 1.87% on the wide one, neither of which
+    /// changes the pen at all after the first character.
+    #[inline(never)]
+    fn resolve_pen(&mut self) -> Pen {
         let (style, link) = (self.pen.style(), self.pen.link());
         let erase = style.erase();
         let text = self.style_id(style);
