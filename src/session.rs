@@ -6,7 +6,7 @@
 
 use crate::emu::{ColorScheme, Delta, Feed, FrameSize, Palette, Reply, ReplyKind, Term};
 use crate::error::Result;
-use crate::lock::LockExt;
+use crate::lock::{CondvarExt, LockExt};
 use crate::pty::{
     AtomicMode, Foreground, HangupGrace, JobControl, KILL_GRACE, Mode, Pty, WRITE_TIMEOUT, Wait,
     Winsize,
@@ -183,6 +183,23 @@ pub(crate) enum Exit {
     /// The reader gave up on the pty with the child still unreapable, so nobody will ever
     /// have a status for it. Lisp still needs the session to end.
     Lost,
+}
+
+/// What the session knows about its child, and whether anyone is finding out.
+///
+/// `Reaping` is a state of this rather than a flag beside it because the thread in it
+/// holds nothing: `alive` and the drains read this and answer while a hangup grace and a
+/// kill are still running, which is the whole reason the wait moved out from under the
+/// lock. It is also what a second reaper needs, since "not known yet" and "being found
+/// out right now" call for different things from it; see [`Shared::reap_after_hangup`].
+#[derive(Debug)]
+enum Exited {
+    /// The child is ours and nobody is waiting on it.
+    Running,
+    /// A thread is inside the grace, the kill and the reap, with the lock let go.
+    Reaping,
+    /// What the child exited with, as `cooked--live-p' and every drain report it.
+    Done(Exit),
 }
 
 /// How quiet the pty must go before a frame is drawn; see [`NotifyState::quiescent_until`].
@@ -890,10 +907,12 @@ fn remaining(
 /// 3. `state` is a leaf; see [`ReaderState`]. Nothing is taken under it and no syscall is
 ///    made under it, so a `resize` or a `send` on Emacs' thread never waits on more than
 ///    the few field writes another thread is making.
-/// 4. `exited` is taken alone, with one deliberate exception:
-///    [`Shared::reap_after_hangup`] holds it across the reap and the kill, so that `alive`
-///    cannot answer yes about a child that has already been collected. Nothing is taken
-///    under it there either.
+/// 4. `exited` is taken alone, and only ever to read the child's fate or to publish it.
+///    [`Shared::reap_after_hangup`] lets it go across the grace, the kill and the reap and
+///    takes it again for the one write, so that a `cooked--live-p' or a drain on Emacs'
+///    thread waits on a `match` rather than on a child ignoring SIGHUP. The second reaper
+///    waits for the first on `reaped`, and a [`std::sync::Condvar`] lets the lock go too.
+///    Nothing is taken under it.
 /// 5. `notifier.state` is a leaf, and `notifier.wake` is only ever taken with it let go;
 ///    see [`Notifier::notify`]. `interrupt.ends` is a leaf, held for a `clone` and no
 ///    longer.
@@ -966,7 +985,10 @@ struct Shared {
     /// false, for the reason `attended` starts true.
     hidden: AtomicBool,
     interrupt: Interrupt,
-    exited: Mutex<Option<Exit>>,
+    exited: Mutex<Exited>,
+    /// Signalled whenever `exited` is written, for a reaper waiting on another's answer;
+    /// see [`Shared::reap_after_hangup`].
+    reaped: std::sync::Condvar,
     /// Make the next read from the pty panic, to stand in for a defect in the parser or
     /// a decoder; see [`Shared::run_reader`]. Compiled out of a release build.
     #[cfg(test)]
@@ -1334,7 +1356,8 @@ impl Session {
             attended: AtomicBool::new(true),
             hidden: AtomicBool::new(false),
             interrupt: Interrupt::new()?,
-            exited: Mutex::new(None),
+            exited: Mutex::new(Exited::Running),
+            reaped: std::sync::Condvar::new(),
             #[cfg(test)]
             panic_on_read: AtomicBool::new(false),
             #[cfg(test)]
@@ -1441,22 +1464,60 @@ impl Shared {
     /// Wait out the grace [`Session::begin_shutdown`]'s hangup bought, kill a child that
     /// ignored it, and record what it exited with.
     ///
-    /// Whichever thread gets here first does the work, and the other finds the status
-    /// already written and returns at once. Idempotent, and after the first call it is
-    /// three atomic reads: [`Pty::reap`] answers `None` immediately once the child has
-    /// been collected, and [`Pty::kill`] refuses to signal a reaped pid.
+    /// Whichever thread gets here first does the work; a second waits for that thread's
+    /// answer and records nothing of its own. Every caller returns with the child reaped,
+    /// which is what [`Session::shutdown`] promises Lisp. Idempotent, and after the first
+    /// call it is a lock and a `match`.
+    ///
+    /// The wait is paid with `exited` let go, and that is the point: `alive` and both
+    /// drains take that lock on Emacs' thread, and holding it across a grace plus
+    /// [`KILL_GRACE`] froze the editor for seconds whenever a child ignored SIGHUP. They
+    /// read [`Exited::Reaping`] and answer that the child is still running, which it is --
+    /// nothing has collected it yet -- and the status reaches them on the drain after this
+    /// publishes it.
+    ///
+    /// One reaper at a time rather than a grace each. `reap_lock` already hands the
+    /// `waitpid` itself to exactly one thread and leaves the status in [`Pty::collected`]
+    /// for the loser -- which [`Shared::reap_or_kill`] reads -- but it says nothing about
+    /// whose budget runs out first, and a second reaper whose grace expired while the
+    /// first was still inside its own would publish [`Exit::Lost`] over a status the other
+    /// was moments from collecting. [`Exit::Lost`] is for a child nobody reaped at all.
     fn reap_after_hangup(&self, grace: HangupGrace) {
         let mut exited = self.exited.held();
-        if exited.is_none() {
-            // Held across the reap, so the reader cannot record a status in the middle of
-            // it. The two can still race for the `waitpid` itself -- a reader already past
-            // its own `shutdown` check is the window -- and `reap_lock` lets exactly one of
-            // them collect it. Losing that race is not losing the status: `Pty::collected`
-            // is where the winner left it, and reading it here rather than waiting for the
-            // reader to record it is what keeps `alive` answering no the moment this
-            // returns. [`Exit::Lost`] is left for a child nobody reaped at all.
-            *exited = Some(self.reap_or_kill(grace).map_or(Exit::Lost, Exit::Status));
+        loop {
+            match *exited {
+                Exited::Done(_) => return,
+                Exited::Reaping => exited = self.reaped.awaited(exited),
+                Exited::Running => break,
+            }
         }
+        *exited = Exited::Reaping;
+        drop(exited);
+        // Nothing between here and the publish can unwind and leave `Reaping` standing:
+        // `reap_or_kill` is syscalls and locks taken through [`LockExt::held`].
+        self.publish_exit(self.reap_or_kill(grace).map_or(Exit::Lost, Exit::Status));
+    }
+
+    /// What the child exited with, or `None` while it is still ours -- a reap inside its
+    /// grace included, since a child nothing has collected yet is a child still running.
+    fn exit(&self) -> Option<Exit> {
+        match *self.exited.held() {
+            Exited::Done(exit) => Some(exit),
+            Exited::Running | Exited::Reaping => None,
+        }
+    }
+
+    /// Record STATUS as the child's fate, and wake a reaper waiting to hear it.
+    ///
+    /// Never over a status already recorded: an abort races the ordinary end, since the
+    /// hangup it sends is what makes the child exit, and [`Session::shutdown`] reaps on
+    /// its own thread. The first real answer is the one Lisp is told.
+    fn publish_exit(&self, status: Exit) {
+        let mut exited = self.exited.held();
+        if !matches!(*exited, Exited::Done(_)) {
+            *exited = Exited::Done(status);
+        }
+        self.reaped.notify_all();
     }
 }
 
@@ -1497,7 +1558,7 @@ impl Session {
             delta,
             mode: self.shared.mode.load(),
             foreground,
-            exit: *self.shared.exited.held(),
+            exit: self.shared.exit(),
         }
     }
 
@@ -1507,7 +1568,7 @@ impl Session {
     /// Lisp appends its exit line below that screen, which has to be there first.
     pub(crate) fn drain_hidden(&self) -> Update {
         self.shared.notifier.acknowledge();
-        let exit = *self.shared.exited.held();
+        let exit = self.shared.exit();
         let mut term = self.shared.term_for_lisp();
         let delta = if exit.is_some() {
             term.drain()
@@ -1778,8 +1839,13 @@ impl Session {
         self.shared.pty.job_control()
     }
 
+    /// Whether the child is still ours.
+    ///
+    /// Yes until a status is published, so a teardown still inside the grace it gave the
+    /// child answers yes here; see [`Exited`]. What it never answers yes about is a child
+    /// Lisp has already been told the exit status of.
     pub(crate) fn alive(&self) -> bool {
-        self.shared.exited.held().is_none()
+        self.shared.exit().is_none()
     }
 }
 
@@ -2367,42 +2433,39 @@ impl Shared {
     }
 
     fn finish(&self, why: Ended) {
-        let status = match why {
+        match why {
             // A child can hang the pty up without being reapable yet, and even without
             // exiting at all; see [`Shared::linger_for_exit`].
-            Ended::ChildGone => self
-                .pty
-                .reap_for(REAP_PATIENCE)
-                .map(Exit::Status)
-                .or_else(|| self.linger_for_exit()),
+            Ended::ChildGone => {
+                let status = self
+                    .pty
+                    .reap_for(REAP_PATIENCE)
+                    .map(Exit::Status)
+                    .or_else(|| self.linger_for_exit());
+                let Some(status) = status else {
+                    return;
+                };
+                self.publish_exit(status);
+            }
             // The reader is leaving with the child still there. Nothing will read the pty
             // again, so the session is over whether or not the child agrees, and a
             // session that ends has to say so: left as it was, `alive` went on
             // answering yes for a buffer nothing would ever write to again.
             Ended::Aborted => {
                 let _ = self.pty.hangup();
-                Some(
-                    // Through `reap_or_kill`, which reads `Pty::collected` when the reap
-                    // itself lost the race: an abort races the ordinary end for the child.
-                    //
-                    // The short grace, even though this is the reader's own thread: the
-                    // notifier is still open and the wakeup that says the session ended
-                    // goes out below, *after* this. [`HangupGrace::detached`] is for the
-                    // teardown nobody is listening to; here a buffer is waiting to be
-                    // told its child is gone, and five seconds of silence would be worse
-                    // for it than a child killed four seconds sooner.
-                    self.reap_or_kill(HangupGrace::explicit())
-                        .map_or(Exit::Lost, Exit::Status),
-                )
+                // Through `reap_after_hangup` rather than a reap of its own, since an
+                // abort races the ordinary end for the child and that is where the one
+                // reaper lives.
+                //
+                // The short grace, even though this is the reader's own thread: the
+                // notifier is still open and the wakeup that says the session ended goes
+                // out below, *after* this. [`HangupGrace::detached`] is for the teardown
+                // nobody is listening to; here a buffer is waiting to be told its child is
+                // gone, and five seconds of silence would be worse for it than a child
+                // killed four seconds sooner.
+                self.reap_after_hangup(HangupGrace::explicit());
             }
-        };
-        let Some(status) = status else {
-            return;
-        };
-        // Never over a status already recorded: an abort races the ordinary end, since
-        // the hangup it sends is what makes the child exit, and `Session::shutdown`
-        // reaps on its own thread.
-        self.exited.held().get_or_insert(status);
+        }
         // Acknowledged on Emacs' behalf, because a wakeup still in flight would otherwise
         // swallow the one below, which is the last this session sends. Not `rearm`: the
         // byte goes out regardless of the throttle.
@@ -4448,7 +4511,7 @@ mod tests {
     /// loser reported [`Exit::Lost`] for a child that had, in fact, exited by signal.
     ///
     /// Reproduced here without racing anything: run the child to a real exit first, so
-    /// `Pty::collected` holds a real status, then put `exited` back to `None` -- the
+    /// `Pty::collected` holds a real status, then put `exited` back to `Running` -- the
     /// state `Ended::Aborted` finds itself in when it is the call that loses the race
     /// -- and check what a fresh `finish(Ended::Aborted)` reports for an already-reaped
     /// child.
@@ -4458,7 +4521,7 @@ mod tests {
         session.shared.pty.kill().expect("kill");
         let real_exit = wait_for(&session, |u| u.exit.is_some()).exit;
         assert_eq!(real_exit, Some(Exit::Status(128 + Signal::SIGKILL as i32)));
-        *session.shared.exited.held() = None;
+        *session.shared.exited.held() = Exited::Running;
         session.shared.finish(Ended::Aborted);
         assert_eq!(
             session.drain().exit,
@@ -4553,6 +4616,83 @@ mod tests {
             alive(pid),
             Err(Errno::ESRCH),
             "SIGHUP alone is not enough here"
+        );
+    }
+
+    /// `alive` and a drain answer while another thread is inside the reap's grace.
+    ///
+    /// [`Shared::reap_after_hangup`] used to hold `exited` across the whole of
+    /// [`Shared::reap_or_kill`], and `alive` and both drains take that lock on the thread
+    /// holding the `emacs_env`. A child that ignores SIGHUP therefore froze Emacs for a
+    /// hangup grace plus [`KILL_GRACE`] for every `cooked--live-p' or drain that landed
+    /// while some other thread was tearing the session down.
+    ///
+    /// The clock is stopped, so the grace never expires on its own and what the probe
+    /// below measures is the lock alone rather than how loaded the machine is. Nothing
+    /// can then release the shutdown but the winding at the end, which is why the probe
+    /// runs on a thread of its own with a deadline: with the wait back under the lock
+    /// this fails on the probe's elapsed time instead of hanging.
+    #[test]
+    fn a_reap_in_its_grace_holds_up_neither_alive_nor_a_drain() {
+        let clock = TestClock::new();
+        let (session, _read) = session_with(
+            // `exec`, so the ignored disposition is the sleep's own and nothing here can
+            // end the child before the SIGKILL the grace leads to.
+            &["/bin/sh", "-c", "trap '' HUP; exec sleep 30"],
+            Options {
+                clock: clock.clock(),
+                ..Options::default()
+            },
+        );
+        let pid = session.pid().as_raw();
+        // Long enough for the shell to have installed the trap and reached the `exec`.
+        std::thread::sleep(Duration::from_millis(150));
+
+        std::thread::scope(|scope| {
+            let shutting = scope.spawn(|| session.shutdown());
+            // `begin_shutdown` sets the flag first, so this is the reaping thread on its
+            // way to the grace; the sleep covers the hangup and the wakeup in between.
+            let deadline = Instant::now() + patience(5.0);
+            while !session.shared.shutdown.load(Ordering::SeqCst) {
+                assert!(Instant::now() < deadline, "the shutdown never started");
+                std::thread::sleep(Duration::from_millis(1));
+            }
+            std::thread::sleep(patience(0.1));
+
+            let (answered, answer) = std::sync::mpsc::channel();
+            let probed = &session;
+            scope.spawn(move || {
+                let start = Instant::now();
+                let live = probed.alive();
+                let exit = probed.drain().exit;
+                let _ = answered.send((start.elapsed(), live, exit));
+            });
+            let probe = answer.recv_timeout(patience(1.0));
+
+            // Let the grace expire whatever the probe said, so that a regression fails on
+            // the assertions below rather than leaving the shutdown on a stopped clock.
+            let winding = Winding::on(&clock, HangupGrace::explicit().into());
+            assert!(shutting.join().expect("the shutdown thread panicked"));
+            drop(winding);
+
+            let (elapsed, live, exit) =
+                probe.expect("nothing answered: `alive` is waiting out the reap");
+            assert!(
+                elapsed < patience(0.05),
+                "`alive` and a drain took {elapsed:?} behind a reap in its grace"
+            );
+            assert!(live, "the child had not been collected yet");
+            assert_eq!(exit, None, "no status is published before the reap has one");
+        });
+
+        assert_eq!(
+            session.drain().exit,
+            Some(Exit::Status(128 + Signal::SIGKILL as i32))
+        );
+        assert_eq!(
+            alive(pid),
+            Err(Errno::ESRCH),
+            "the child outlived the grace it ignored"
         );
     }
 

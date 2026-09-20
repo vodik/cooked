@@ -1,6 +1,6 @@
 //! Taking a mutex without refusing over a poisoned one.
 
-use std::sync::{Mutex, MutexGuard, PoisonError};
+use std::sync::{Condvar, Mutex, MutexGuard, PoisonError};
 
 /// Take a lock, treating poisoning as nothing to refuse over.
 ///
@@ -23,5 +23,21 @@ pub(crate) trait LockExt<T> {
 impl<T> LockExt<T> for Mutex<T> {
     fn held(&self) -> MutexGuard<'_, T> {
         self.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+}
+
+/// Wait on a condition variable, treating poisoning the way [`LockExt::held`] does.
+///
+/// A wait ends by taking the mutex again, so it can refuse for the same reason and must
+/// recover for the same one: the single waiter in this crate is a second reaper waiting
+/// for the first's status, and refusing there would leave it reporting a child lost that
+/// somebody had just collected. See `Shared::reap_after_hangup` in `session.rs`.
+pub(crate) trait CondvarExt {
+    fn awaited<'a, T>(&self, guard: MutexGuard<'a, T>) -> MutexGuard<'a, T>;
+}
+
+impl CondvarExt for Condvar {
+    fn awaited<'a, T>(&self, guard: MutexGuard<'a, T>) -> MutexGuard<'a, T> {
+        self.wait(guard).unwrap_or_else(PoisonError::into_inner)
     }
 }
