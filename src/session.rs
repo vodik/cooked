@@ -8,7 +8,7 @@ use crate::emu::{ColorScheme, Delta, Feed, FrameSize, Palette, Reply, ReplyKind,
 use crate::error::Result;
 use crate::lock::LockExt;
 use crate::pty::{
-    AtomicMode, Foreground, HANGUP_GRACE, JobControl, KILL_GRACE, Mode, Pty, WRITE_TIMEOUT, Wait,
+    AtomicMode, Foreground, HangupGrace, JobControl, KILL_GRACE, Mode, Pty, WRITE_TIMEOUT, Wait,
     Winsize,
 };
 use crate::replies::ReplyQueue;
@@ -1289,10 +1289,10 @@ impl Session {
     /// did it. Idempotent, cheap after the first call, and safe from `Drop`.
     ///
     /// What a terminal window closing does: the shell is hung up, given
-    /// [`HANGUP_GRACE`] to forward that to its jobs and save its history, and only then
-    /// killed. Emacs must never wait on someone else's `sleep 3600`, and a child that
-    /// ignores SIGHUP -- `nohup`, `trap '' HUP` -- would otherwise survive an explicit
-    /// kill and never be reaped, which is what the SIGKILL is for.
+    /// [`HangupGrace::explicit`] to forward that to its jobs and save its history, and
+    /// only then killed. Emacs must never wait on someone else's `sleep 3600`, and a child
+    /// that ignores SIGHUP -- `nohup`, `trap '' HUP` -- would otherwise survive an
+    /// explicit kill and never be reaped, which is what the SIGKILL is for.
     ///
     /// The grace is a bound and not a cost: the reader reaps the child the moment its
     /// side of the pty closes, so a shell that exits at once is reaped at once.
@@ -1306,7 +1306,7 @@ impl Session {
         if !self.begin_shutdown() {
             return false;
         }
-        self.shared.reap_after_hangup();
+        self.shared.reap_after_hangup(HangupGrace::explicit());
 
         // The four descriptors a session holds -- the pty master, the exit watch, and the
         // two ends of the interrupt pipe -- go back here rather than at the collection that
@@ -1376,7 +1376,7 @@ impl Shared {
     /// already written and returns at once. Idempotent, and after the first call it is
     /// three atomic reads: [`Pty::reap`] answers `None` immediately once the child has
     /// been collected, and [`Pty::kill`] refuses to signal a reaped pid.
-    fn reap_after_hangup(&self) {
+    fn reap_after_hangup(&self, grace: HangupGrace) {
         let mut exited = self.exited.held();
         if exited.is_none() {
             // Held across the reap, so the reader cannot record a status in the middle of
@@ -1386,7 +1386,7 @@ impl Shared {
             // is where the winner left it, and reading it here rather than waiting for the
             // reader to record it is what keeps `alive` answering no the moment this
             // returns. [`Exit::Lost`] is left for a child nobody reaped at all.
-            *exited = Some(self.reap_or_kill().map_or(Exit::Lost, Exit::Status));
+            *exited = Some(self.reap_or_kill(grace).map_or(Exit::Lost, Exit::Status));
         }
     }
 }
@@ -1718,11 +1718,13 @@ impl Drop for Session {
     ///
     /// It hangs up and returns, rather than calling [`Session::shutdown`] and waiting.
     /// This runs inside Emacs' garbage collector, and a child that ignores SIGHUP --
-    /// `nohup`, `trap '' HUP` -- would hold the whole editor still for
-    /// [`HANGUP_GRACE`] plus [`KILL_GRACE`], half a second, at a moment nothing in Lisp
-    /// asked for. The grace, the kill and the reap are left to the reader thread, which
-    /// outlives this handle -- it holds an `Arc` of its own -- and which
-    /// [`Shared::read_loop`] sends through [`Shared::reap_after_hangup`] on its way out.
+    /// `nohup`, `trap '' HUP` -- would hold the whole editor still for a grace plus
+    /// [`KILL_GRACE`] at a moment nothing in Lisp asked for. The grace, the kill and the
+    /// reap are left to the reader thread, which outlives this handle -- it holds an
+    /// `Arc` of its own -- and which [`Shared::read_loop`] sends through
+    /// [`Shared::reap_after_hangup`] on its way out. That thread holds nobody up, so the
+    /// grace it waits out is the generous [`HangupGrace::detached`] rather than the half
+    /// second the explicit kill is held to.
     ///
     /// Nobody is left to hear the status, which is why it need not be waited for: the
     /// notifier is closed, the handle is being finalised, and a `Session` Lisp can no
@@ -2168,7 +2170,7 @@ impl Shared {
         // already done the same work, so this costs nothing after it -- or the poll
         // failed and this session has to end itself.
         if self.shutdown.load(Ordering::SeqCst) {
-            self.reap_after_hangup();
+            self.reap_after_hangup(HangupGrace::detached());
         } else {
             self.finish(Ended::Aborted);
         }
@@ -2180,12 +2182,16 @@ impl Shared {
     /// A reap that loses the race to another thread answers `None` at once, the winner
     /// having left the status in [`Pty::collected`]; that is read here, so that no caller
     /// can report a child lost whose status is sitting there. Two callers forgot.
-    fn reap_or_kill(&self) -> Option<i32> {
+    fn reap_or_kill(&self, grace: HangupGrace) -> Option<i32> {
+        // GRACE is read against the session's clock rather than the wall, so that a test
+        // can hold it still and wait on the child alone; see [`Pty::reap`]. The kill's own
+        // wait is not a grace anyone chose and stays on the wall.
+        let now = || self.now();
         self.pty
-            .reap(HANGUP_GRACE)
+            .reap(&Wait::new(grace.into(), &now, &|| false))
             .or_else(|| {
                 let _ = self.pty.kill();
-                self.pty.reap(KILL_GRACE)
+                self.pty.reap_for(KILL_GRACE)
             })
             .or_else(|| self.pty.collected())
     }
@@ -2200,7 +2206,7 @@ impl Shared {
     fn finish_at_hangup(&self) {
         self.finish(Ended::ChildGone);
         if self.shutdown.load(Ordering::SeqCst) {
-            self.reap_after_hangup();
+            self.reap_after_hangup(HangupGrace::detached());
         }
     }
 
@@ -2232,7 +2238,7 @@ impl Shared {
     /// [`Exit::Lost`] are.
     fn linger_for_exit(&self) -> Option<Exit> {
         while !self.shutdown.load(Ordering::SeqCst) {
-            if let Some(status) = self.pty.reap(REAP_PATIENCE) {
+            if let Some(status) = self.pty.reap_for(REAP_PATIENCE) {
                 return Some(Exit::Status(status));
             }
             // `Pty::reap` answers `None` three ways and only one of them, the timeout, is
@@ -2260,7 +2266,7 @@ impl Shared {
             // exiting at all; see [`Shared::linger_for_exit`].
             Ended::ChildGone => self
                 .pty
-                .reap(REAP_PATIENCE)
+                .reap_for(REAP_PATIENCE)
                 .map(Exit::Status)
                 .or_else(|| self.linger_for_exit()),
             // The reader is leaving with the child still there. Nothing will read the pty
@@ -2272,7 +2278,8 @@ impl Shared {
                 Some(
                     // Through `reap_or_kill`, which reads `Pty::collected` when the reap
                     // itself lost the race: an abort races the ordinary end for the child.
-                    self.reap_or_kill().map_or(Exit::Lost, Exit::Status),
+                    self.reap_or_kill(HangupGrace::detached())
+                        .map_or(Exit::Lost, Exit::Status),
                 )
             }
         };
@@ -2595,6 +2602,53 @@ mod tests {
 
         fn advance(&self, by: Duration) {
             *self.0.held() += by;
+        }
+    }
+
+    /// A [`TestClock`] wound on by a thread of its own until this is dropped.
+    ///
+    /// Stepping a clock by hand works while the test thread is the one deciding what
+    /// happens next. A teardown grace is waited out somewhere else -- on the reader
+    /// thread, or on the test thread itself inside [`Session::shutdown`] -- so the
+    /// stepping has to come from a third thread, as
+    /// `a_write_the_child_never_takes_ends_at_the_stepped_deadline` already does inline
+    /// for the write timeout.
+    ///
+    /// The clock only ever moves forward, so what this pins is not a race: however slow
+    /// the machine, the deadline under test is passed within a step or two and the
+    /// outcome is the same. What it removes is the other direction -- a grace that expires
+    /// because the machine was busy, when the test is about a child that never exits.
+    struct Winding {
+        stop: Arc<AtomicBool>,
+        thread: Option<std::thread::JoinHandle<()>>,
+    }
+
+    impl Winding {
+        /// Wind CLOCK on by STEP every millisecond of real time.
+        fn on(clock: &TestClock, step: Duration) -> Self {
+            let stop = Arc::new(AtomicBool::new(false));
+            let thread = std::thread::spawn({
+                let (clock, stop) = (clock.clone(), Arc::clone(&stop));
+                move || {
+                    while !stop.load(Ordering::SeqCst) {
+                        clock.advance(step);
+                        std::thread::sleep(Duration::from_millis(1));
+                    }
+                }
+            });
+            Self {
+                stop,
+                thread: Some(thread),
+            }
+        }
+    }
+
+    impl Drop for Winding {
+        fn drop(&mut self) {
+            self.stop.store(true, Ordering::SeqCst);
+            if let Some(thread) = self.thread.take() {
+                let _ = thread.join();
+            }
         }
     }
 
@@ -4061,25 +4115,41 @@ mod tests {
         );
     }
 
-    /// The hangup goes to the shell, not to whatever it is running.
+    /// The hangup goes to the shell, not to whatever it is running, and the shell is
+    /// given as long as its trap takes rather than as long as the machine can spare.
     ///
     /// An interactive bash puts `sleep` in a process group of its own and makes that the
     /// foreground. Hanging up the foreground group killed the sleep and left bash to
     /// carry on and exit 0 in its own time; hanging up bash's group runs its HUP trap,
     /// which is the exit status a shell saving its history on the way out would have.
+    ///
+    /// The trap sleeps a whole second before exiting, which is a shell writing a large
+    /// history file, and the clock is stopped, so the grace never expires and the only
+    /// thing this waits on is bash. That is the whole point: with the grace read off the
+    /// wall this test failed about one run in sixty at a load average around twenty, the
+    /// kill landing on a shell that was in the middle of doing exactly what the grace
+    /// exists to allow, and it reported `Status(137)`. Revert [`Pty::reap`] to a wall
+    /// deadline and the slow trap here fails it every time instead of one time in sixty.
     #[test]
     fn shutdown_hangs_up_the_shell_rather_than_its_foreground_job() {
         if !std::path::Path::new("/bin/bash").exists() {
             eprintln!("skipping: no /bin/bash");
             return;
         }
-        let (session, _read) = session(&[
-            "/bin/bash",
-            "--norc",
-            "-i",
-            "-c",
-            "trap 'exit 3' HUP; sleep 300; exit 9",
-        ]);
+        let clock = TestClock::new();
+        let (session, _read) = session_with(
+            &[
+                "/bin/bash",
+                "--norc",
+                "-i",
+                "-c",
+                "trap 'sleep 1; exit 3' HUP; sleep 300; exit 9",
+            ],
+            Options {
+                clock: clock.clock(),
+                ..Options::default()
+            },
+        );
         // Let bash reach the sleep and hand it the foreground; the trap is installed
         // first, so a hangup any earlier still lands on the shell.
         wait_for_within(&session, 5.0, |_| {
@@ -4091,6 +4161,40 @@ mod tests {
         });
         assert!(session.shutdown());
         assert_eq!(session.drain().exit, Some(Exit::Status(3)));
+    }
+
+    /// A child that ignores the hangup is killed once the grace really has expired.
+    ///
+    /// The other half of the policy the test above pins, and the reason the grace is
+    /// bounded at all: `trap '' HUP` and an `exec` so the ignored disposition is the
+    /// sleep's own, which leaves SIGKILL as the only thing that can end it. Stopping the
+    /// clock would hang here, so this winds it on instead -- forward only, a whole
+    /// explicit grace per millisecond -- and the deadline is therefore passed because the
+    /// test said so and not because the machine was slow.
+    #[test]
+    fn a_child_that_ignores_the_hangup_is_killed_when_the_grace_expires() {
+        let clock = TestClock::new();
+        let (session, _read) = session_with(
+            &["/bin/sh", "-c", "trap '' HUP; exec sleep 300"],
+            Options {
+                clock: clock.clock(),
+                ..Options::default()
+            },
+        );
+        let pid = session.pid().as_raw();
+        // Long enough for the shell to have installed the trap and reached the `exec`.
+        std::thread::sleep(Duration::from_millis(150));
+        let _winding = Winding::on(&clock, HangupGrace::explicit().into());
+        assert!(session.shutdown());
+        assert_eq!(
+            session.drain().exit,
+            Some(Exit::Status(128 + Signal::SIGKILL as i32))
+        );
+        assert_eq!(
+            alive(pid),
+            Err(Errno::ESRCH),
+            "the child outlived the grace it ignored"
+        );
     }
 
     /// An interrupt reaches the foreground group, whichever way the platform sends it.
@@ -4115,9 +4219,19 @@ mod tests {
     fn an_aborted_reader_still_ends_the_session() {
         // `exec`, so the ignored disposition is the sleep's own and the hangup is
         // refused by the only process there is.
-        let (session, _read) = session(&["/bin/sh", "-c", "trap '' HUP; exec sleep 300"]);
+        let clock = TestClock::new();
+        let (session, _read) = session_with(
+            &["/bin/sh", "-c", "trap '' HUP; exec sleep 300"],
+            Options {
+                clock: clock.clock(),
+                ..Options::default()
+            },
+        );
         let pid = session.pid().as_raw();
         std::thread::sleep(Duration::from_millis(150));
+        // An abort is the reader's own exit, so it waits out the generous detached grace;
+        // wound on, this reaches the kill without sitting through five real seconds.
+        let _winding = Winding::on(&clock, HangupGrace::detached().into());
         session.shared.finish(Ended::Aborted);
         assert!(!session.alive());
         assert_eq!(alive(pid), Err(Errno::ESRCH));
@@ -4209,7 +4323,17 @@ mod tests {
     /// `sleep` would still be running and `alive` would still say so.
     #[test]
     fn a_panicking_reader_ends_the_session_and_wakes_emacs() {
-        let (session, read) = session(&["/bin/sh", "-c", "trap '' HUP; echo hi; exec sleep 300"]);
+        let clock = TestClock::new();
+        let (session, read) = session_with(
+            &["/bin/sh", "-c", "trap '' HUP; echo hi; exec sleep 300"],
+            Options {
+                clock: clock.clock(),
+                ..Options::default()
+            },
+        );
+        // The panicking reader ends as an abort, and an abort pays the detached grace
+        // before it wakes Emacs; see `an_aborted_reader_still_ends_the_session`.
+        let _winding = Winding::on(&clock, HangupGrace::detached().into());
         let pid = session.pid().as_raw();
         // Set before the child's first write can be read, so that write is the one that
         // panics; the echo is what makes sure there is a read to panic on.
@@ -4335,17 +4459,29 @@ mod tests {
     /// Finalising a handle nobody killed must not park Emacs' garbage collector.
     ///
     /// `Drop` is reached from a collection, at a moment no Lisp asked for, and it used to
-    /// run the whole of `shutdown`: for a child that ignores SIGHUP that is `HANGUP_GRACE`
-    /// and then `KILL_GRACE`, better than half a second with all of Emacs stopped. It now
+    /// run the whole of `shutdown`: for a child that ignores SIGHUP that is a whole
+    /// hangup grace and then `KILL_GRACE`, better than half a second with all of Emacs
+    /// stopped. It now
     /// hangs up and leaves the grace to the reader thread, which is still there and still
     /// has to kill and reap the child -- the second half of this test.
     #[test]
     fn dropping_a_session_hands_the_grace_to_the_reader() {
-        let (session, _read) = session(&["/bin/sh", "-c", "trap '' HUP; sleep 300"]);
+        let clock = TestClock::new();
+        let (session, _read) = session_with(
+            &["/bin/sh", "-c", "trap '' HUP; sleep 300"],
+            Options {
+                clock: clock.clock(),
+                ..Options::default()
+            },
+        );
         let pid = session.pid().as_raw();
         // Long enough for the shell to have installed the trap, so the hangup below is one
         // the child really does ignore.
         std::thread::sleep(Duration::from_millis(150));
+        // The grace this hands over is [`HangupGrace::detached`], five seconds of it, so
+        // the clock is wound on rather than waited out; what the test is about is which
+        // thread pays it, not how long it is.
+        let _winding = Winding::on(&clock, HangupGrace::detached().into());
         let start = Instant::now();
         drop(session);
         let elapsed = start.elapsed();

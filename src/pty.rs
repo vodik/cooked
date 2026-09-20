@@ -330,21 +330,85 @@ impl<'a> Wait<'a> {
         }
         Ok(remaining.min(STOP_CHECK))
     }
+
+    /// How long one blocking call may last now, or `None` once there is no waiting left
+    /// to do -- the deadline has passed, or STOP says to stop.
+    ///
+    /// [`Self::check`] with the two reasons collapsed into one, for [`Pty::reap`], which
+    /// has nothing to report about *why* it stopped waiting: a reap that runs out of
+    /// patience and a reap the caller cut short both answer "not reapable yet".
+    fn slice(&self) -> Option<std::time::Duration> {
+        self.check().ok()
+    }
 }
 
 /// How long a hung-up child has to exit on its own before it is killed.
 ///
 /// What a closing terminal window gives its shell, and it has to cover what a shell does
-/// on SIGHUP: forward it to its jobs, write its history, run its exit hooks. zsh does all
-/// three in a few milliseconds on an idle machine and can take much longer on a loaded
-/// one, and a shell killed part-way through loses the history of the session. Fifty
-/// milliseconds, the old figure, was that loss on any busy machine.
+/// on SIGHUP: forward it to its jobs, write its history, run its exit hooks. A shell
+/// killed part-way through loses the history of the session, so the figure is chosen
+/// from measurement rather than from taste. An interactive bash and an interactive zsh,
+/// each with a three-thousand line history file, a `HUP` trap that writes it and an
+/// `EXIT` trap that writes it again, hung up exactly the way [`Pty::hangup`] does it,
+/// took from SIGHUP to reapable: 2.1 ms and 2.6 ms at the median idle, 4.1 and 4.3 at the
+/// 99th percentile of 60 runs each; 4.2 ms median and 9.1 ms worst for bash at a load
+/// average of 11, 6.2 ms median and 16.5 ms worst for zsh at 32, 6.0 ms median and 12.0
+/// ms worst for bash at 57. Nothing in 240 runs came near a tenth of a second. Fifty
+/// milliseconds, the figure before the last change, was a real risk of that loss; half a
+/// second is not.
 ///
 /// The wait is not paid in the common case: [`Pty::reap`] returns the moment the child
 /// is reapable, so a shell that exits at once costs its own exit time and nothing more.
-/// The full period is only spent on a child that ignores SIGHUP -- `nohup`, `trap ''
-/// HUP` -- and then once, on the thread tearing the session down.
-pub(crate) const HANGUP_GRACE: std::time::Duration = std::time::Duration::from_millis(500);
+/// The full period is only spent on a child that is still working through its HUP trap,
+/// or one that ignores SIGHUP -- `nohup`, `trap '' HUP` -- and then once, on the thread
+/// tearing the session down.
+///
+/// Which is why there are two of them rather than one constant: since teardown split in
+/// two, the thread that waits is not the same thread on both paths, and what a wait costs
+/// is entirely a question of whose thread it is spent on. A grace is therefore a value
+/// chosen at the call site, from the two named constructors below, and never a duration
+/// typed out again.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct HangupGrace(std::time::Duration);
+
+impl HangupGrace {
+    /// The grace for teardown nobody is waiting on: `Session::drop` hands the wait to
+    /// the reader thread, and the reader's own exit pays it too.
+    ///
+    /// That thread has nothing else left to do and blocks no one -- not Emacs' command
+    /// loop, not the garbage collector that dropped the handle -- so the only thing this
+    /// bound has to beat is a child that will never exit at all, and it can be as generous
+    /// as it likes. Five seconds: three hundred times the slowest shell measured above,
+    /// which leaves room for the exit work nobody here can measure -- a history file on a
+    /// network mount, a `zsh_history` merge, an `atexit` hook that talks to a daemon --
+    /// and is closer to what other terminals do, which is to close the pty and never send
+    /// SIGKILL at all.
+    pub(crate) fn detached() -> Self {
+        Self(std::time::Duration::from_secs(5))
+    }
+
+    /// The grace for the explicit kill, which is paid on Emacs' own thread.
+    ///
+    /// `cooked--kill' runs from `kill-buffer-hook' and `cooked--kill-emacs' from
+    /// `kill-emacs-hook', so this wait is Emacs sitting still: a half-second per session
+    /// is what a user notices when closing a window, and `kill-emacs-hook' pays it once
+    /// per live session in turn. It stays short on purpose, and it is the old figure
+    /// unchanged: the measurements above leave it a factor of thirty over the slowest
+    /// shell seen at a load average of 57. A child slower still is SIGKILLed part-way
+    /// through saving its history, which is a real loss; it is the loss
+    /// `cooked--kill-emacs' exists to accept, since that hook runs as the last code in the
+    /// process and a wait handed to the reader thread there is a wait nothing will ever
+    /// finish.
+    pub(crate) fn explicit() -> Self {
+        Self(std::time::Duration::from_millis(500))
+    }
+}
+
+impl From<HangupGrace> for std::time::Duration {
+    fn from(grace: HangupGrace) -> Self {
+        grace.0
+    }
+}
 
 /// How long a killed child has to become reapable. SIGKILL cannot be caught, so this
 /// only covers the kernel's own bookkeeping and a child stuck in uninterruptible sleep.
@@ -758,7 +822,7 @@ impl Pty {
         self.waitpid(WaitPidFlag::WNOHANG)
     }
 
-    /// Reap the child, giving it up to `patience` to become reapable.
+    /// Reap the child, giving it until WAIT's deadline to become reapable.
     ///
     /// A plain `try_wait` races a child that has closed the pty but has not yet been
     /// reaped, which loses the real exit code; a blocking `waitpid` would deadlock
@@ -767,8 +831,16 @@ impl Pty {
     /// The wait is spent in `poll` on the exit watch where the platform has one, so it
     /// returns the instant the child exits and costs nothing while it has not. Without
     /// one it asks `waitpid` every [`REAP_TICK`], which is the shape this always had.
-    pub(crate) fn reap(&self, patience: std::time::Duration) -> Option<i32> {
-        let deadline = std::time::Instant::now() + patience;
+    ///
+    /// A [`Wait`] rather than a plain duration, so the deadline and the blocking call are
+    /// two separate things: the call blocks in real time for at most [`STOP_CHECK`], and
+    /// between calls the deadline is re-read from WAIT's clock. In a session that is a
+    /// bounded wait with a 50 ms granularity on noticing it has run out, which nothing can
+    /// tell apart from the old one. In a test on a stepped clock it is the difference
+    /// between "the child exited" and "the grace expired": with the clock stopped, this
+    /// waits on the child alone and no amount of load can turn a slow HUP trap into a
+    /// kill. See `shutdown_hangs_up_the_shell_rather_than_its_foreground_job`.
+    pub(crate) fn reap(&self, wait: &Wait<'_>) -> Option<i32> {
         // Whether the watch has already said the child is gone; see the match below.
         let mut exited = false;
         loop {
@@ -782,10 +854,7 @@ impl Pty {
                 Ok(None) => {}
                 Err(_) => return None,
             }
-            let remaining = deadline.saturating_duration_since(std::time::Instant::now());
-            if remaining.is_zero() {
-                return None;
-            }
+            let slice = wait.slice()?;
             match self
                 .fds()
                 .ok()
@@ -795,10 +864,22 @@ impl Pty {
                 // A watch that reports the child gone while `waitpid` still says otherwise
                 // is the gap between the two the kernel is closing, and a tick covers it
                 // rather than a spin here.
-                Some(watch) if !exited => exited = watch.wait(remaining),
-                _ => std::thread::sleep(REAP_TICK.min(remaining)),
+                Some(watch) if !exited => exited = watch.wait(slice),
+                _ => std::thread::sleep(REAP_TICK.min(slice)),
             }
         }
+    }
+
+    /// [`Self::reap`] with a budget measured on the wall clock and nothing able to cut it
+    /// short, for the callers whose wait is not a grace anyone chose.
+    ///
+    /// [`KILL_GRACE`] is the kernel's own bookkeeping after an uncatchable signal and
+    /// `REAP_PATIENCE` in `session.rs` is how often the reader asks whether teardown has
+    /// started; neither is a policy a test would want to step past, and a session clock
+    /// that has stopped must not stop either of them.
+    pub(crate) fn reap_for(&self, patience: std::time::Duration) -> Option<i32> {
+        let now = std::time::Instant::now;
+        self.reap(&Wait::new(patience, &now, &|| false))
     }
 
     fn waitpid(&self, flags: WaitPidFlag) -> Result<Option<i32>> {
@@ -838,11 +919,14 @@ impl Drop for Pty {
             return;
         }
         let _ = self.hangup();
-        if self.reap(HANGUP_GRACE).is_some() {
+        // The explicit grace, short, because the caller here is whoever dropped the
+        // `Pty`, and on the failure path this exists for -- `Session::spawn` giving up
+        // after `Pty::spawn` succeeded -- that is Emacs' own thread inside a module call.
+        if self.reap_for(HangupGrace::explicit().into()).is_some() {
             return;
         }
         let _ = self.kill();
-        let _ = self.reap(KILL_GRACE);
+        let _ = self.reap_for(KILL_GRACE);
     }
 }
 
@@ -1167,7 +1251,7 @@ mod tests {
             None,
         )
         .unwrap();
-        assert!(pty.reap(std::time::Duration::from_secs(2)).is_some());
+        assert!(pty.reap_for(std::time::Duration::from_secs(2)).is_some());
         for _ in 0..3 {
             assert!(
                 pty.signal(Signal::SIGHUP).is_err(),
@@ -1275,7 +1359,7 @@ mod tests {
         )
         .expect("spawn");
         assert_eq!(
-            pty.reap(std::time::Duration::from_secs(2)),
+            pty.reap_for(std::time::Duration::from_secs(2)),
             Some(5),
             "127 here means PATH was never searched"
         );
@@ -1297,10 +1381,10 @@ mod tests {
         )
         .expect("spawn");
         assert_eq!(pty.collected(), None, "nothing has been collected yet");
-        assert_eq!(pty.reap(std::time::Duration::from_secs(2)), Some(7));
+        assert_eq!(pty.reap_for(std::time::Duration::from_secs(2)), Some(7));
         assert!(pty.reaped());
         assert_eq!(
-            pty.reap(std::time::Duration::from_secs(2)),
+            pty.reap_for(std::time::Duration::from_secs(2)),
             None,
             "the child is gone, so there is nothing left to collect"
         );
@@ -1341,7 +1425,7 @@ mod tests {
         )
         .expect("spawn");
         assert_eq!(
-            pty.reap(std::time::Duration::from_secs(2)),
+            pty.reap_for(std::time::Duration::from_secs(2)),
             Some(0),
             "an fd leaked past exec"
         );
