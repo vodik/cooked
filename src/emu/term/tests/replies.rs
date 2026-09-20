@@ -74,13 +74,12 @@ fn a_reply_after_a_question_for_lisp_waits_behind_it() {
 fn only_replies_ahead_of_an_undrained_question_are_released() {
     let mut t = answering(b"\x1b]10;?\x07");
     t.drain();
-    t.feed(b"\x1b[5n\x1b[19t\x1b[c");
+    t.feed(b"\x1b[5n\x1b]52;c;?\x1b\\\x1b[c");
     t.events_handled();
     assert_eq!(t.take_outbound(), vec![Event::answer(b"\x1b[0n".to_vec())]);
-    assert_eq!(
-        t.drain().events,
-        vec![Event::FrameSize(Unit::Cells), Event::answer(DA1.to_vec())]
-    );
+    let events = t.drain().events;
+    assert!(matches!(&events[0], Event::Osc(52, parts, _) if parts == &["c", "?"]));
+    assert_eq!(events[1], Event::answer(DA1.to_vec()));
 }
 
 #[test]

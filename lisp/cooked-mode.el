@@ -1039,7 +1039,8 @@ which it usually is not.  Walk the frame's windows instead."
   (dolist (window (window-list frame 'no-minibuf))
     (with-current-buffer (window-buffer window)
       (when cooked--session
-        (cooked--sync-size)))))
+        (cooked--sync-size)
+        (cooked--sync-frame-size)))))
 
 ;; Added when the first session starts rather than at load time, so requiring the
 ;; package changes nothing about Emacs until you actually use it.  `add-hook' dedupes,

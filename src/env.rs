@@ -380,7 +380,6 @@ symbols! {
     Reset => "reset",
     TitleStack => "title-stack",
     ResizeRequest => "resize-request",
-    FrameSize => "frame-size",
     PromptStart => "prompt-start",
     PromptContinuation => "prompt-continuation",
     PromptEnd => "prompt-end",

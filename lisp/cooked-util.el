@@ -40,8 +40,8 @@
       cooked--sample-mode cooked--screen-text
       cooked--send cooked--send-key cooked--send-line cooked--send-mouse-report
       cooked--send-paste-text cooked--set-attended
-      cooked--set-color-scheme cooked--set-graphics-shown cooked--set-hidden
-      cooked--set-palette
+      cooked--set-color-scheme cooked--set-frame-size cooked--set-graphics-shown
+      cooked--set-hidden cooked--set-palette
       cooked--set-tuning cooked--signal cooked--spawn
       cooked--strip-paste-controls cooked--wire-layout)
     "Every function the native core defines, by name.

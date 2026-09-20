@@ -246,17 +246,35 @@ fn decslpp_asks_for_rows_alone() {
 }
 
 #[test]
-fn xtwinops_reports_not_iconified_and_asks_lisp_for_the_frame() {
-    let mut t = term(2, 10, b"\x1b[11t\x1b[19t\x1b[15t");
+fn xtwinops_reports_the_frame_once_lisp_has_pushed_one() {
+    let mut t = Term::new(2, 10);
+    t.set_frame_size(FrameSize::new(24, 80).with_pixels(PixelSize::new(800, 480)));
+    t.feed(b"\x1b[19t\x1b[15t");
     assert_eq!(
-        t.drain().events,
-        vec![
-            Event::answer(b"\x1b[1t".to_vec()),
-            Event::FrameSize(Unit::Cells),
-            Event::FrameSize(Unit::Pixels),
-        ],
-        "the order is the order asked, since a reply from Lisp rides the same list"
+        replies(t.drain().events),
+        vec!["\x1b[9;24;80t", "\x1b[5;480;800t"]
     );
+}
+
+#[test]
+fn xtwinops_frame_reports_stay_silent_until_lisp_pushes_one() {
+    let mut t = term(2, 10, b"\x1b[19t\x1b[15t");
+    assert!(
+        !t.drain()
+            .events
+            .iter()
+            .any(|e| matches!(e, Event::Reply(_, ReplyKind::Answer))),
+    );
+}
+
+#[test]
+fn xtwinops_15t_stays_silent_without_pixels_even_once_pushed() {
+    // A terminal frame: Lisp pushes rows and columns but no pixel size, and `15t' follows
+    // `14t''s rule rather than claiming zero.
+    let mut t = Term::new(2, 10);
+    t.set_frame_size(FrameSize::new(24, 80));
+    t.feed(b"\x1b[19t\x1b[15t");
+    assert_eq!(replies(t.drain().events), vec!["\x1b[9;24;80t"]);
 }
 
 #[test]

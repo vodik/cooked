@@ -608,13 +608,25 @@ graphics probe, the cell metrics -- into a real `font-info' call that signals
 read as the live frame actually answers it, which in batch is always
 silence, and only the cells half is a controlled table.  `11t' is xterm's
 \"not iconified\", always answered, so it is the terminator
-`cooked-tests--settle' waits for."
+`cooked-tests--settle' waits for.
+
+The child sleeps a beat before it asks anything.  The core answers `19t'
+and `15t' from a size Lisp pushes down at spawn -- see
+`cooked--sync-frame-size' -- and that push and the fork racing it to the
+child's first byte are two different processes with no ordering between
+them: `stty raw -echo; printf ...' with no delay reaches the parser before
+the push often enough to flake, since a query that beats the push finds
+nothing to answer from and, unlike the query Lisp itself used to answer
+one at a time, gets no second chance later.  A real program never asks in
+its very first instant; the sleep says the same thing a test can act on."
   (let ((out (make-temp-file "cooked-19t")))
     (unwind-protect
         (cl-letf (((symbol-function 'frame-text-lines) (lambda (&optional _f) rows))
                   ((symbol-function 'frame-text-cols) (lambda (&optional _f) cols)))
           (cooked-tests--with-session
-              (cooked-tests--reply-to "\\033[19t\\033[15t\\033[11t" out)
+              (list "/bin/sh" "-c"
+                    (format "stty raw -echo; sleep 0.2; printf '\\033[19t\\033[15t\\033[11t'; cat > %s"
+                            out))
             (should (cooked-tests--settle
                      (lambda () (string-suffix-p "\e[1t" (cooked-tests--contents out)))))
             (cooked-tests--contents out)))

@@ -948,10 +948,22 @@ impl State {
                     let (h, w) = (self.screen().height(), self.screen().width());
                     self.csi_reply(format_args!("8;{h};{w}t"));
                 }
-                // The frame, which only Emacs can measure. Lisp answers, and answers
-                // `15t` only where there are pixels, by the same rule as `14t` above.
-                15 => self.push_for_lisp(Event::FrameSize(Unit::Pixels)),
-                19 => self.push_for_lisp(Event::FrameSize(Unit::Cells)),
+                // The frame, which only Emacs can measure -- see `FrameSize`. Silent until
+                // Lisp has pushed one down, and `15t` silent past that until it has pixels
+                // to report, by the same rule `14t` follows above.
+                15 => {
+                    if let Some(FrameSize {
+                        pixels: Some(px), ..
+                    }) = self.frame_size
+                    {
+                        self.csi_reply(format_args!("5;{};{}t", px.h, px.w));
+                    }
+                }
+                19 => {
+                    if let Some(FrameSize { rows, cols, .. }) = self.frame_size {
+                        self.csi_reply(format_args!("9;{rows};{cols}t"));
+                    }
+                }
                 22 => self.events.push(Event::TitleStack(StackOp::Push)),
                 23 => self.events.push(Event::TitleStack(StackOp::Pop)),
                 // A 0 or omitted argument means "leave this dimension", which `arg`'s

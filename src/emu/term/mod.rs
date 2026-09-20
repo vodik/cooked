@@ -215,13 +215,6 @@ pub enum Event {
     /// `cooked-resize-requests` refuses by default. No reply either way, as xterm sends
     /// none with `allowWindowOps` off; the child reads the answer back with `18t`.
     ResizeRequest(Option<u16>, Option<u16>),
-    /// XTWINOPS `19t` (cells) or `15t` (pixels): the size of the *screen*, which in Emacs
-    /// is the frame.
-    ///
-    /// An event rather than a reply because the grid does not know the frame. It knows
-    /// the one window it is laid out for, and that is `18t` and `14t`; the frame
-    /// around it is Emacs' to measure.
-    FrameSize(Unit),
 }
 
 impl Event {
@@ -248,7 +241,6 @@ impl Event {
     fn awaits_answer(&self) -> bool {
         match self {
             Self::Osc(_, parts, _) => parts.iter().any(|part| part.starts_with('?')),
-            Self::FrameSize(_) => true,
             _ => false,
         }
     }
@@ -290,13 +282,6 @@ impl Event {
 pub enum StackOp {
     Push,
     Pop,
-}
-
-/// What a size is counted in, for [`Event::FrameSize`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Unit {
-    Cells,
-    Pixels,
 }
 
 /// What the child asked to hear from the mouse, and how the reports are to be spelled.
@@ -741,6 +726,42 @@ impl std::fmt::Display for ColorScheme {
     }
 }
 
+/// The frame's text area, as Emacs last reported it for `CSI 19t`/`15t`.
+///
+/// Emacs' to know and ours to answer with, as [`CellMetrics`] and [`ColorScheme`] are: the
+/// frame around the window the child is laid out for is not something the grid can measure,
+/// and the pixel size in particular moves with a font Emacs alone tracks. Held rather than
+/// answered once, because the frame can be resized at any time with no query in flight to
+/// notice it; `cooked--sync-frame-size' says this again on `window-size-change-functions'
+/// and once more at spawn, before any frame has resized.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FrameSize {
+    rows: u16,
+    cols: u16,
+    /// `None` on a terminal frame, which has no pixel size to report -- the same reading
+    /// [`CellMetrics`] gives a font that has never been measured.
+    pixels: Option<PixelSize>,
+}
+
+impl FrameSize {
+    /// ROWS by COLS, with no pixel size reported -- what a terminal frame's window is.
+    pub fn new(rows: u16, cols: u16) -> Self {
+        Self {
+            rows,
+            cols,
+            pixels: None,
+        }
+    }
+
+    /// The same size, with PIXELS as the frame's measured text area.
+    pub fn with_pixels(self, pixels: PixelSize) -> Self {
+        Self {
+            pixels: Some(pixels),
+            ..self
+        }
+    }
+}
+
 impl State {
     /// The shown screen's text area in pixels, or `None` before Emacs reports a cell size.
     pub(super) fn text_area(&self) -> Option<PixelSize> {
@@ -789,8 +810,9 @@ impl State {
 
     /// Hand Lisp EVENT, noting whether it is a question Lisp may answer.
     ///
-    /// Only [`Event::Osc`] and [`Event::FrameSize`] come through here, the two that Lisp
-    /// replies to. Every other event is pushed directly.
+    /// Only [`Event::Osc`] comes through here as a question; every other event is pushed
+    /// directly. `19t`/`15t` used to as well, before `CSI 19t`/`15t` moved to answering
+    /// from [`FrameSize`] the way `14t`/`18t` already did.
     pub(super) fn push_for_lisp(&mut self, event: Event) {
         if event.awaits_answer() {
             self.replies.undrained = true;
@@ -1121,6 +1143,16 @@ impl Term {
     pub fn set_color_scheme(&mut self, scheme: ColorScheme) -> Option<Vec<u8>> {
         let changed = self.state.color_scheme.replace(scheme) != Some(scheme);
         (changed && self.state.modes.color_scheme_updates).then(|| color_scheme_report(scheme))
+    }
+
+    /// Tell the emulator how big the frame around the child's window is, so it can answer
+    /// `CSI 19t`/`15t` itself.
+    ///
+    /// Nothing is owed on a change, unlike the colour scheme: a size is not a subscription,
+    /// and a child that wants to know again just asks again. `cooked--sync-frame-size' is
+    /// the one caller, on every frame resize and once at spawn.
+    pub fn set_frame_size(&mut self, size: FrameSize) {
+        self.state.frame_size = Some(size);
     }
 
     /// The bytes a colour sequence's query fields are owed, for Lisp to send.
@@ -1616,6 +1648,13 @@ struct State {
     /// for "unknown". On [`State`] rather than [`Modes`] because the child did not
     /// negotiate it, so a soft reset must not clear it.
     color_scheme: Option<ColorScheme>,
+    /// The frame's text area, for answering `CSI 19t`/`15t`; see [`FrameSize`].
+    ///
+    /// `None` until Emacs reports one, which is answered the way `19t` always has been
+    /// with nothing pushed yet: silence, there being no query event left to carry an
+    /// unanswered probe to Lisp any more. `cooked--start' pushes one before the child can
+    /// run, so a session answers from its very first byte in practice.
+    frame_size: Option<FrameSize>,
     /// Which pictures Emacs has said it can show for this session: none when images are
     /// off or every window on the buffer is on a terminal frame, and otherwise the
     /// formats its build decodes.

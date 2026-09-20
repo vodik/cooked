@@ -978,10 +978,6 @@ fn event_to_lisp<'e>(
                 cols.map(i64::from),
             ]
         ),
-        // (frame-size PIXELS-P)
-        Event::FrameSize(unit) => {
-            list!(env, [sym!(env, "frame-size")?, *unit == emu::Unit::Pixels])
-        }
     }
 }
 

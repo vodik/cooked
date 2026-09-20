@@ -4,9 +4,9 @@
 
 ;; XTWINOPS is `CSI Ps t', a family of requests about the window a terminal
 ;; runs in.  The native core answers everything it can measure itself -- `18t'
-;; and `14t' are the grid -- and hands on the three that are about Emacs' own
-;; windows and frames: pushing and popping the title, asking for a size, and
-;; asking how big the frame is.
+;; and `14t' are the grid, and `19t'/`15t' are the frame, pushed down from
+;; here -- and hands on the two that are actions rather than reports: pushing
+;; and popping the title, and asking for a resize.
 ;;
 ;; It sits on cooked-osc.el, whose title it pushes and pops, and is dispatched
 ;; from the drain pipeline.
@@ -16,6 +16,8 @@
 (require 'cooked-util)
 (require 'cooked-state)
 (require 'cooked-osc)
+
+(cooked--declare-core)
 
 (defconst cooked--title-stack-limit 8
   "How many titles `cooked--title-stack' will hold.
@@ -41,8 +43,12 @@ without them a full-screen program that sets a title leaves it behind on exit."
 ;;
 ;; Two things a child may ask about the window beyond the title stack above: to
 ;; change its size, and how big the frame around it is.  The native core answers
-;; everything it can measure itself -- `18t' and `14t' are the grid -- and passes
-;; these on because the frame and the window layout are Emacs', not the grid's.
+;; both, as it answers `18t' and `14t' from the grid, but neither the layout
+;; window nor the frame is something the grid can measure itself.  A resize is
+;; an action with side effects Lisp alone can decide to take, so it stays an
+;; event; the frame size is a value only Lisp can read, so it is pushed down
+;; below and the core answers `19t'/`15t' from what it was last told, the way
+;; it answers `CSI ? 996 n' from the colour scheme.
 
 (defcustom cooked-resize-requests nil
   "What a child's request to resize the terminal does.
@@ -137,26 +143,28 @@ multiples is truncated toward zero, to one `window-resize' can make exactly."
     (unless (zerop delta)
       (window-resize window delta horizontal nil t))))
 
-(defun cooked--handle-frame-size (pixels)
-  "Answer XTWINOPS `19t', or `15t' when PIXELS: the frame's text area.
+(defun cooked--sync-frame-size ()
+  "Tell this buffer's session how big the frame around it is.
 
-In cells, `CSI 9 ; ROWS ; COLS t'; in pixels, `CSI 5 ; HEIGHT ; WIDTH t'.  The
-frame is the one showing the layout window, or the selected one when the
-buffer is shown nowhere.  Both measure the text area, so the pixel answer is
-the cell answer times a cell, the way `14t' and `18t' agree.
+The core answers `CSI 19t' (cells, `9;ROWS;COLS t') and `15t' (pixels,
+`5;HEIGHT;WIDTH t') from what this last told it, the way it answers `18t' and
+`14t' from the grid: the query is answered where it arrives instead of
+waking Lisp for a value that has not moved.  Called from
+`cooked--frame-size-changed' on every frame resize, and once more at spawn,
+since a child can probe before any resize has happened.
 
-The pixel form is silent on a terminal frame, by the rule `14t' follows: a
-terminal has no pixels, and answering zero would be a claim rather than an
-absence."
-  (let ((frame (if-let* ((window (cooked--layout-window)))
-                   (window-frame window)
-                 (selected-frame))))
-    (cond ((not pixels)
-           (cooked--reply-if-live
-            (cooked--csi "t" 9 (frame-text-lines frame) (frame-text-cols frame))))
-          ((display-graphic-p frame)
-           (cooked--reply-if-live
-            (cooked--csi "t" 5 (frame-text-height frame) (frame-text-width frame)))))))
+The frame is the one showing `cooked--layout-window', or the selected frame
+when the buffer is shown nowhere.  Pixels are left nil on a terminal frame,
+by the rule `14t' already follows: a terminal has no pixels, and pushing
+zero would be a claim rather than an absence."
+  (when-let* ((session (cooked--live-session))
+              (frame (if-let* ((window (cooked--layout-window)))
+                         (window-frame window)
+                       (selected-frame))))
+    (cooked--set-frame-size
+     session (frame-text-lines frame) (frame-text-cols frame)
+     (and (display-graphic-p frame) (frame-text-height frame))
+     (and (display-graphic-p frame) (frame-text-width frame)))))
 
 (provide 'cooked-window-ops)
 ;;; cooked-window-ops.el ends here

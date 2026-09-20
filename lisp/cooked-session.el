@@ -265,6 +265,11 @@ wherever Emacs is, and is not a request to be second-guessed."
     (cooked--sync-color-scheme))
   (cooked--protect-seam 'cooked--sync-palette
     (cooked--sync-palette))
+  ;; Likewise: a child that probes `CSI 19t'/`15t' in its first instant is
+  ;; answered from what Emacs has now, rather than with silence until the
+  ;; buffer's first window resize.
+  (cooked--protect-seam 'cooked--sync-frame-size
+    (cooked--sync-frame-size))
   cooked--session)
 
 (defun cooked--child-environment (&optional extra)

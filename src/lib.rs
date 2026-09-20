@@ -25,8 +25,8 @@ pub(crate) mod session;
 mod wire;
 
 use emu::{
-    Assumed, Button, CellMetrics, ColorScheme, ImageFormat, ImageId, Key, Modifiers, NamedKey,
-    ShownFormats,
+    Assumed, Button, CellMetrics, ColorScheme, FrameSize, ImageFormat, ImageId, Key, Modifiers,
+    NamedKey, PixelSize, ShownFormats,
 };
 use env::{Env, FromLisp, IntoLisp, Result, Runtime, UserPtr, Value, plist, sym};
 use nix::sys::signal::Signal;
@@ -517,6 +517,19 @@ pub unsafe extern "C" fn emacs_module_init(runtime: *mut Runtime) -> std::ffi::c
         /// answers `CSI 14t' from the cell size: the child's query is answered where the
         /// query arrives, rather than by waking Lisp to ask about a theme it already said.
         "cooked--set-color-scheme" 2..=2 => set_color_scheme;
+
+        /// Tell SESSION how big the frame around its window is, so the core can answer
+        /// `CSI 19t'/`15t' itself.
+        ///
+        /// ROWS and COLS are the frame's text area in cells, always known.  PIXEL-HEIGHT
+        /// and PIXEL-WIDTH may be nil or omitted together, which is what a terminal frame
+        /// has to say: `15t' then stays silent, the way `14t' does without a cell size.
+        ///
+        /// Held here so the core answers where the query arrives, the way it answers
+        /// `CSI 14t'/`18t' from the grid: the frame is Emacs' to measure, but the reply's
+        /// spelling is the core's everywhere else.  `cooked--sync-frame-size' is the one
+        /// caller, on every frame resize and once at spawn.
+        "cooked--set-frame-size" 3..=5 => set_frame_size;
 
         /// Tell SESSION the colours Emacs draws with, so the core can answer for them.
         ///
@@ -1287,6 +1300,30 @@ fn set_color_scheme<'e>(env: Env<'e>, args: &[Value<'e>]) -> Result<Value<'e>> {
         .term()
         .set_color_scheme(scheme);
     env.into_lisp(owed.as_deref())
+}
+
+/// See `cooked--set-frame-size'.
+fn set_frame_size<'e>(env: Env<'e>, args: &[Value<'e>]) -> Result<Value<'e>> {
+    let px = |i: usize| -> Result<u32> {
+        args.get(i)
+            .copied()
+            .map(|v| env.from_lisp::<Option<i64>>(v))
+            .transpose()?
+            .flatten()
+            .map_or(Ok(0), |n| Ok(n.clamp(0, i64::from(u32::MAX)) as u32))
+    };
+    let size = FrameSize::new(
+        env.from_lisp::<u16>(args[1])?,
+        env.from_lisp::<u16>(args[2])?,
+    );
+    let size = match (px(3)?, px(4)?) {
+        (0, _) | (_, 0) => size,
+        (height, width) => size.with_pixels(PixelSize::new(width, height)),
+    };
+    env.from_lisp::<&Session>(args[0])?
+        .term()
+        .set_frame_size(size);
+    Ok(env.nil())
 }
 
 /// A list of colours, each `color-values' or nil, as both of `cooked--set-palette''s

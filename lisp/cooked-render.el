@@ -963,7 +963,6 @@ two chances to disagree."
     (`(resize-request ,rows ,cols)
      (cooked--protect-seam 'cooked-resize-requests
        (cooked--handle-resize-request rows cols)))
-    (`(frame-size ,pixels) (cooked--handle-frame-size pixels))
     ;; `CSI 3 J', the tail of what `clear' sends.  Honoured unconditionally: it is
     ;; only reachable by something already holding the terminal, every other terminal
     ;; honours it, and it is precisely what the user typed `clear' to get.  The
