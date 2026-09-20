@@ -431,14 +431,85 @@ face."
                                      'follow-link t
                                      'keymap cooked-link-map))))
 
-(defconst cooked--link-keys "mouse-2, C-c RET: follow link"
-  "How to follow an OSC 8 span, worded like goto-addr's own.")
+(defun cooked-link--event-mouse-p (key)
+  "Whether KEY, a key sequence `where-is-internal' returned, ends in a click."
+  (let ((event (aref key (1- (length key)))))
+    (and (symbolp event) (string-match-p "mouse" (symbol-name event)) t)))
+
+(defun cooked-link--plainest-key (command maps mouse)
+  "The least-modified key sequence for COMMAND in MAPS, mouse or keyboard.
+
+`where-is-internal' hands back every alias bound to COMMAND, and
+`cooked-follow-link' answers to both `mouse-2' and its `S-mouse-2'/`S-mouse-1'
+cousins, and to both `RET' and `S-return' -- see `cooked-link-map's docstring
+for why the shifted ones exist, which is for when the plain one cannot be
+used, not to be the one a hint advertises.  MOUSE non-nil keeps only the
+click events, nil only the rest; of those, `key-description' writes the
+unmodified one shortest, so the shortest is the one returned."
+  (car (seq-sort-by
+        (lambda (key) (length (key-description key)))
+        #'<
+        (seq-filter (lambda (key) (eq (cooked-link--event-mouse-p key) mouse))
+                    (where-is-internal command maps)))))
+
+(defun cooked-link--key-hint (key)
+  "KEY's `key-description', without the angle brackets a lone symbol gets.
+
+`key-description' writes a plain character key as itself (\"RET\",
+\"C-c RET\") and a symbol event bracketed (\"<mouse-2>\"); goto-addr's own
+phrasing, which this hint matches, never brackets."
+  (and key
+       (let ((described (key-description key)))
+         (if (string-match "\\`<\\(.+\\)>\\'" described)
+             (match-string 1 described)
+           described))))
+
+(defun cooked--link-keys (object pos)
+  "The \"mouse-2, ...: follow link\" hint for the link at POS of OBJECT.
+
+Two commands can open a link: `cooked-follow-link', which only answers where
+the text itself carries `cooked-link-map' as its `keymap' property, and
+`cooked-follow-link-at-point', a point-anywhere entry to the same open that a
+mode may bind wherever it likes -- `cooked-mode' binds it to `C-c RET'.  The
+mouse hint always comes from the span's own keymap, since a click needs
+nothing else; the keyboard hint prefers a point-anywhere binding if one is
+active here and falls back to the span's own `RET' when none is, so a link
+carried into a buffer with no such binding -- a compilation buffer, say --
+never advertises a key that would do nothing there.
+
+OBJECT and POS are `help-echo's own idea of where the text is, so the keymap
+consulted is the one actually in force at that position rather than
+`cooked-mode-map' assumed sight unseen: the span's `keymap' text property,
+found with `get-char-property' since OBJECT may be a string
+`current-active-maps' cannot see into, and then OBJECT's buffer's other
+active keymaps."
+  (let* ((buffer (if (bufferp object) object (current-buffer)))
+         (own (get-char-property pos 'keymap object))
+         (own (and (keymapp own) own))
+         (active (and (bufferp object)
+                      (buffer-live-p buffer)
+                      (with-current-buffer buffer
+                        (save-excursion
+                          (goto-char pos)
+                          (current-active-maps t)))))
+         (maps (delq nil (cons own active)))
+         (mouse (and own
+                     (cooked-link--key-hint
+                      (cooked-link--plainest-key #'cooked-follow-link (list own) t))))
+         (keyboard (or (and maps
+                             (cooked-link--key-hint
+                              (cooked-link--plainest-key
+                               #'cooked-follow-link-at-point maps nil)))
+                       (and own
+                            (cooked-link--key-hint
+                             (cooked-link--plainest-key #'cooked-follow-link (list own) nil))))))
+    (format "%s: follow link" (string-join (delq nil (list mouse keyboard)) ", "))))
 
 (defun cooked--link-help-echo (_window object pos)
   "`help-echo' for an OSC 8 span: where following it would actually go.
 
-Called by redisplay with the span's OBJECT -- the buffer, or the string it was
-found in -- and POS, the position within it.
+Called by redisplay with the span's OBJECT -- the buffer, or the string it
+was found in -- and POS, the position within it.
 
 OSC 8 is the one link kind whose text and destination are independent -- the
 child chooses both -- so a span can read like one address and point at another,
@@ -447,12 +518,15 @@ Showing the target is what kitty, VTE and iTerm2 all do about that, and it is
 the whole of the defence: following is the user's own doing, so the thing to
 protect is the decision rather than the act.
 
-A function rather than the string it returns, because the `format' would then
-be on the render path for every link in every damaged row.  Hover is rare;
-drains are not."
-  (if-let* ((uri (get-text-property pos 'cooked-link-uri object)))
-      (format "%s\n%s" uri cooked--link-keys)
-    cooked--link-keys))
+A function rather than a string, because the key hint has to be looked up
+against the keymap actually in force at POS -- see `cooked--link-keys' -- and
+that lookup, like the `format' it used to be, would otherwise sit on the
+render path for every link in every damaged row.  Hover is rare; drains are
+not."
+  (let ((keys (cooked--link-keys object pos)))
+    (if-let* ((uri (get-text-property pos 'cooked-link-uri object)))
+        (format "%s\n%s" uri keys)
+      keys)))
 
 (defun cooked--render-link-spans (start spans)
   "Hang the links SPANS names on text inserted at START.

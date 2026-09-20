@@ -61,6 +61,22 @@ a session long enough to be its own test."
     (should-not (eq (get-text-property 1 'cooked-link-uri)
                     (get-text-property 7 'cooked-link-uri)))))
 
+(ert-deftest cooked-link-help-echo-names-c-c-ret-in-a-cooked-mode-buffer ()
+  "The hint in a `cooked-mode' buffer reads exactly as it always has.
+
+`cooked-follow-link-at-point' is bound on `cooked-mode-map' under `C-c RET',
+reachable from wherever point sits in such a buffer, so that is still what
+the keyboard half of the hint says once it is looked up against the maps
+actually active there rather than assumed outright -- see
+`cooked--link-keys'."
+  (with-temp-buffer
+    (cooked-mode)
+    (insert "see here ok")
+    (cooked--install-links '((1 . "https://example.com/")))
+    (cooked--render-link-spans 1 '((4 8 1 nil)))
+    (should (equal (cooked--link-help-echo nil (current-buffer) 5)
+                   "https://example.com/\nmouse-2, C-c RET: follow link"))))
+
 (ert-deftest cooked-osc-8-survives-being-coloured-mid-link ()
   ;; The regression this whole feature is one line away from: OSC 8 is not an SGR
   ;; attribute, so `ESC[0m' must not close it.  Guarded in Rust as well

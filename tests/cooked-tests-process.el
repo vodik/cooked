@@ -329,6 +329,24 @@ checks it."
           (cooked-follow-link)))
       (should (equal browsed "https://example.com/")))))
 
+(ert-deftest cooked-process-link-help-echo-names-ret-not-c-c-ret ()
+  "The carried span's hint names only the key that reaches it in *this* buffer.
+
+`cooked-link-map' travels with the text and its own `RET' still runs
+`cooked-follow-link' here, same as in a `cooked-mode' buffer -- see
+`cooked-process-follow-link-opens-through-the-shared-path'.  What does not
+travel is `cooked-mode-map': nothing in a `compilation-mode' buffer binds
+`C-c RET' to `cooked-follow-link-at-point', so a hint that named it anyway
+would be advertising a key that does nothing here.  `cooked--link-keys' looks
+the binding up against the keymaps actually active at the span instead of
+assuming `cooked-mode's, which is the fix this guards."
+  (cooked-tests-process--with
+      "printf 'see \\033]8;;https://example.com/\\033\\\\here\\033]8;;\\033\\\\ ok\\n'"
+    (let* ((at (cooked-tests-process--link-at "here"))
+           (echo (funcall (get-text-property at 'help-echo) nil (current-buffer) at)))
+      (should (string-match-p "\\bRET\\b" echo))
+      (should-not (string-match-p "C-c RET" echo)))))
+
 (ert-deftest cooked-process-styled-nil-carries-no-link-properties ()
   "With `cooked-process-styled' nil a link is bare text too, not half a link.
 
