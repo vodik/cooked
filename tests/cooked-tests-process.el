@@ -783,5 +783,45 @@ offers every other consumer -- would cost a grep buffer its highlighting."
        "grep -nH x ." 'grep-mode))
     (should (eq reached 'ordinary))))
 
+(ert-deftest cooked-process-accounts-for-every-key-of-a-drain ()
+  "Every field of a real drain is read here or argued out in writing.
+
+The pump used to pick the fields it wanted out of the plist by hand, and
+nothing failed when it missed one: the re-implemented `:shifts'/`:rows'/`:edits',
+the unanswered colour queries, the links never installed and the spawn-time
+state added twice were all found by a person rather than by a test.  So the
+keys come from a drain the core actually produced -- it sends every one of
+them on every drain, empty or not -- and each has to be handled by the shared
+step, handled by this file, or carry a reason in
+`cooked-process--ignored-drain-keys'.  A field added to the drain in Rust then
+turns a silent gap into a red test here.
+
+The reasons are checked for existing, not for being right; that part is
+review's.  A key named by a table and absent from the drain fails too, since a
+reason for a field the core no longer sends is one nobody can check."
+  (let ((buffer (generate-new-buffer "*cooked-test-consumer*")))
+    (unwind-protect
+        (progn
+          (cooked-process-start "consumer" buffer
+                                '("/bin/sh" "-c" "printf 'one\\ntwo\\n'; sleep 5"))
+          (let* ((host (buffer-local-value 'cooked-process--host buffer))
+                 (update (with-current-buffer host
+                           (cooked--drain cooked-process--session
+                                          cooked-process--rejoin)))
+                 (handled (append cooked--consumed-drain-keys
+                                  cooked-process--drain-keys)))
+            ;; The drain is the real thing and not an empty plist a bug could
+            ;; make look accounted for.
+            (should (plist-member update :scrolled))
+            (should-not (cooked-tests--unaccounted-drain-keys
+                         update handled cooked-process--ignored-drain-keys))
+            (should-not (cooked-tests--stale-drain-keys
+                         update handled cooked-process--ignored-drain-keys))
+            (dolist (entry cooked-process--ignored-drain-keys)
+              (should (keywordp (car entry)))
+              (should (stringp (cdr entry)))
+              (should-not (string-empty-p (cdr entry))))))
+      (kill-buffer buffer))))
+
 (provide 'cooked-tests-process)
 ;;; cooked-tests-process.el ends here

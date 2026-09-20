@@ -337,41 +337,34 @@ file's Commentary for why it cannot be the child's own process."
       ;; undo history of a buffer nobody can visit is a flood's worth of
       ;; retained strings.
       (buffer-disable-undo)
+      ;; The tables `cooked--install-images' fills, made here as `cooked--start'
+      ;; makes them for a session buffer.  Nothing here ever displays a picture --
+      ;; `cooked-process--text' renders with no decorations -- but the shared step
+      ;; installs what a drain carries whatever the consumer does with it, and an
+      ;; image's bytes cross exactly once, so the id has to land in a table rather
+      ;; than in a nil nobody made.
+      (cooked--reset-images)
       (setq cooked-process--proc proc)
       (pcase-let ((`(,rows . ,cols) (cooked-process--size buffer)))
         (setq cooked-process--columns cols)
         (setq cooked-process--wake
               (cooked--make-wake-pipe (format " cooked-process-wake<%s>" name) host
                                       (lambda (_p _s) (cooked-process--pump host))))
-        ;; The colours a build tool asks about before it draws, so the core can answer
-        ;; every colour query itself and a probe costs no drain.  The cursor and the
-        ;; selection are in there too, from the frame: a compilation buffer has neither,
-        ;; and a child that asks is owed an answer rather than a timeout.  Computed here
-        ;; and folded into the plist `cooked--spawn' takes, rather than pushed by a
-        ;; separate `cooked--sync-palette' call after it returns, for the same reason
-        ;; `cooked--start' does it this way: a probe in the child's very first instant
-        ;; would otherwise race the reader thread `cooked--spawn' starts internally.
-        ;; Once, here: this host is not a `cooked-mode' buffer, so `cooked-theme-change-hook'
-        ;; does not run in it and a theme changed mid-build leaves the rest of that build
-        ;; answering in the theme it started under -- which is what the text already
-        ;; above it in the buffer says, and the same bargain `cooked-process--text'
-        ;; strikes with its face cache.
-        (let ((palette-defaults (cooked--protect-seam 'cooked--sync-palette
-                                  (cooked--palette-defaults)))
-              (palette-colors (cooked--protect-seam 'cooked--sync-palette
-                                (cooked--palette-colors))))
-          (setq cooked--pushed-palette (cons palette-defaults palette-colors))
-          (setq cooked-process--session
-                (cooked--spawn argv (cooked-process--environment) rows cols
-                               cooked-process--wake
-                               (and directory
-                                    (expand-file-name (or (cooked--local-name directory) "~")))
-                               (list :palette-defaults palette-defaults
-                                     :palette-colors palette-colors
-                                     :min-redisplay-interval
-                                     (round (* 1000 cooked-min-redisplay-interval))
-                                     :backlog-limit cooked-backlog-limit))))
-        ;; Where `cooked-process--answer' and `cooked--sync-palette' look for the
+        ;; The same builder `cooked--start' spawns through, with no frame: there is no
+        ;; window here to report a pixel size or a graphics type for, and the palette
+        ;; is passed all the same, since the colours a build tool asks about before it
+        ;; draws are a real answer wherever its text ends up.  Pushed once, at the
+        ;; spawn: this host is not a `cooked-mode' buffer, so `cooked-theme-change-hook'
+        ;; does not run in it and a theme changed mid-build leaves the rest of that
+        ;; build answering in the theme it started under -- which is what the text
+        ;; already above it in the buffer says, and the same bargain
+        ;; `cooked-process--text' strikes with its face cache.
+        (setq cooked-process--session
+              (apply #'cooked--spawn
+                     (cooked--spawn-arguments argv (cooked-process--environment)
+                                              rows cols cooked-process--wake
+                                              directory nil)))
+        ;; Where `cooked--route-events' and `cooked--sync-palette' look for the
         ;; session to speak for, as they would in a session buffer.
         (setq cooked--session cooked-process--session)))
     proc))
@@ -556,69 +549,98 @@ of the build twice."
 
 ;;;; The pump
 
-(defun cooked-process--answer (events)
-  "Owe the child what EVENTS, a drain's `:events', ask of its terminal.
+(defconst cooked-process--drain-keys '(:scrolled :head)
+  "The keys of a drain this file reads beyond `cooked--consumed-drain-keys'.
 
-A `reply' is one the core composed alone but held behind a query only Lisp
-answers, so it is passed on in its place.  Every other event is about a buffer
-showing the terminal, and there is none: a title would rename the hidden host,
-OSC 7 would move its `default-directory', and a colour set would remap a face in
-a buffer nobody sees or repaint the cursor of the whole frame.  So they are
-dropped.
+The retired text, which is the whole of what a consumer here is promised, and
+the seam it can end on -- `cooked-process--residue' is the one reader of that,
+and says why the last row of a build needs it.  Everything else the shared step
+answers for, or `cooked-process--ignored-drain-keys' argues out.")
 
-Nothing here answers a query any more, and that is what `cooked--set-palette'
-bought: the colours are the questions a build tool actually asks -- `OSC 11 ; ?'
-for the background before it decides whether to print dark or light -- and the
-core answers every one of them itself, from the palette `cooked-process-start'
-pushed, with no drain in the loop at all.  The clipboard and the pointer shape
-are still not offered to a build, and their queries still go unanswered, as they
-did before any of this.
+(defconst cooked-process--ignored-drain-keys
+  '((:promoted . "Promotion hands rows the buffer already holds to the
+scrollback, and this file never asks for it: the consumer's buffer is not a
+transcript of the grid, and nothing here holds a copy of a row.")
+    (:rows . "A consumer with no copy of the screen has no row to patch.  What
+is still on the grid is read whole, by `cooked--screen-text', and shown as an
+overlay; see `cooked-process--tail-text'.")
+    (:edits . "As `:rows': there is no held row for an edit to replace part
+of.")
+    (:shifts . "As `:rows': there is no held row for a shift to move.")
+    (:height . "The grid's shape is this file's own, from `cooked-process-rows'
+and `cooked-process--columns', and nothing here is laid out against it.")
+    (:width . "As `:height'.")
+    (:used . "As `:height'.  `cooked--screen-text' leaves the unused rows out
+for us.")
+    (:cursor . "There is no cursor to place: the text lands wherever the
+consumer's `process-mark' is, which is the consumer's business.")
+    (:reverse . "DECSCNM remaps the faces of a screen, and a compilation buffer
+is not one; its text keeps the colours the child chose.")
+    (:reverse-toggles . "As `:reverse'.")
+    (:marks . "An OSC 133 mark anchors into a transcript this file does not
+own, and no consumer here asks where the prompts were.")
+    (:alt . "Which screen the rows came off, and the retired text is the same
+text either way: the alternate screen contributes no scrollback (`State::resize'
+in src/emu/term/state.rs), so anything in `:scrolled' while it is up came off
+the primary and is history.  A live session reads this to decide where the
+screen region starts and whether to pin it, and there is no region here.")
+    (:app-cursor . "A key encoding, for sending keys.  Nothing here sends any:
+the consumer's process object is the stand-in shell, and what reaches the child
+goes through `cooked-process-send-string' as bytes the caller composed.")
+    (:keys . "As `:app-cursor'.")
+    (:kitty-flags . "As `:app-cursor'.")
+    (:modify-other-keys . "As `:app-cursor'.")
+    (:withheld . "Only a drain asked to leave the screen out withholds it, and
+`cooked-process--pump' never asks: there is no window to be hidden from."))
+  "Why the pump leaves each remaining key of a drain alone.
 
-The caller says `cooked--ready' afterwards, and must: until then the core
-keeps every later reply behind any query that did reach a drain, so DA1 after
-`OSC 52 ; c ; ?' would wait for as long as the child lived."
-  (cooked--batching-replies cooked--session
-    (dolist (event events)
-      (pcase event
-        (`(reply . ,bytes) (cooked--queue-reply cooked--session bytes))))))
+Not an inventory of the drain -- the `cooked--drain' docstring in src/lib.rs is
+that -- but the argument that each key this file does not read is one it is
+right not to read.  Four defects in two days came of picking fields out of the
+drain by hand and never being told about the ones that were missed, so a key
+added to the drain and to neither table fails
+`cooked-process-accounts-for-every-key-of-a-drain'.")
 
 (defun cooked-process--pump (host)
   "Drain HOST's session and pass what retired to the consumer.
 
+`cooked--consume-drain' is what makes this a consumer of a drain rather than a
+second reading of one.  It installs the resources before the retired text is
+rendered -- a link a row names by id has to resolve before
+`cooked-process--text' reads it off that text -- adopts the levels that
+describe the child rather than a screen, which is how a build that reaches a
+`getpass' is noticed here at all, and answers the replies the core is holding.
+
+No event handler is supplied, and that is the one choice this consumer makes: a
+title would rename the hidden host, OSC 7 would move its `default-directory',
+and a colour set would remap a face in a buffer nobody sees.  A reply is not an
+event in that sense, and declining is not offered for it: the child is blocked
+on the answer whether or not anyone is looking at a terminal.
+
+What is left here is the two things only this consumer does: hand the retired
+text to the filter, and show what is still on the grid below it.
+
 Errors are reported rather than swallowed: this runs from a process filter,
 where Emacs discards them, and the symptom would be a compilation buffer that
-simply stopped filling.
-
-`:links' is installed before `scrolled' is rendered, as
-`cooked--apply-resources' installs it before a live session's own render: a
-link a row names by id has to resolve before `cooked-process--text' reads it
-off the text.
-
-The drain is followed by `cooked--ready' however it went, as
-`cooked--drain-and-apply' follows its own, because that is what tells the core
-the drain's queries have been answered."
+simply stopped filling.  The readiness is owed however it went, and not once
+the exit has reaped the session, which kills it and the host with it."
   (when (and host (buffer-live-p host))
     (with-current-buffer host
       (when-let* ((session cooked-process--session))
-        (unwind-protect
-            (condition-case err
-                (let* ((update (cooked--drain session cooked-process--rejoin))
-                       (scrolled (plist-get update :scrolled))
-                       (exit (plist-get update :exit)))
-                  (cooked-process--answer (plist-get update :events))
-                  (cooked--install-links (plist-get update :links))
-                  (cooked--install-styles (plist-get update :styles))
-                  (when scrolled
-                    (cooked-process--emit (cooked-process--text scrolled)))
-                  (if exit
-                      (cooked-process--finish host exit)
-                    (cooked-process--refresh-tail host)))
-              (error (message "cooked-process: %S" err)))
-          ;; Not once the exit has reaped the session, which kills it and the
-          ;; host with it.
-          (when (and (buffer-live-p host)
-                     (buffer-local-value 'cooked-process--session host))
-            (cooked--ready session)))))))
+        (cooked--owing-readiness
+            (and (buffer-live-p host)
+                 (buffer-local-value 'cooked-process--session host))
+          (condition-case err
+              (let ((update (cooked--drain session cooked-process--rejoin)))
+                (cooked--consume-drain
+                 update
+                 (lambda ()
+                   (when-let* ((scrolled (plist-get update :scrolled)))
+                     (cooked-process--emit (cooked-process--text scrolled)))))
+                (if cooked--exit
+                    (cooked-process--finish host cooked--exit)
+                  (cooked-process--refresh-tail host)))
+            (error (message "cooked-process: %S" err))))))))
 
 ;;;; Exit
 
@@ -648,10 +670,16 @@ screen is the reading that does not depend on that."
           (cols cooked-process--columns))
       (cooked--resize session 1 cols)
       (let* ((update (cooked--drain session cooked-process--rejoin))
-             (scrolled (progn
-                         (cooked--install-links (plist-get update :links))
-                         (cooked--install-styles (plist-get update :styles))
-                         (cooked-process--text (plist-get update :scrolled))))
+             ;; Through the shared step for the same reason the pump is, and it
+             ;; is the last drain of the build: the resources this text names go
+             ;; in before it is rendered, and a reply the child is still waiting
+             ;; for is owed to it even now, `cooked--kill' being what ends the
+             ;; wait otherwise.
+             (scrolled (cooked--owing-readiness cooked-process--session
+                         (cooked--consume-drain
+                          update
+                          (lambda ()
+                            (cooked-process--text (plist-get update :scrolled))))))
              (head (plist-get update :head))
              ;; The grid is one row tall by now, so this is that row and nothing
              ;; else, newlines and all: there is no second row for it to reach.
@@ -715,6 +743,12 @@ anything in Lisp -- no keymap or hook was ever installed for a headless
 session -- but the reader thread, the pty, the wake pipe and the stand-in."
   (when (and host (buffer-live-p host))
     (with-current-buffer host
+      ;; A build that reached a `getpass' is a build the shared step put into
+      ;; secret mode, and the prompt for it is a timer or a minibuffer read
+      ;; against a child that is going away.  `cooked--cancel-secret' is what
+      ;; makes the answer unsendable rather than sent to whatever runs next; a
+      ;; session that never asked has nothing pending and this costs nothing.
+      (cooked--cancel-secret)
       (when cooked-process--session
         (ignore-errors (cooked--kill cooked-process--session))
         (setq cooked-process--session nil

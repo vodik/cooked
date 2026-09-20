@@ -141,6 +141,49 @@ and lifting the pending input would land in the undo history.
 permanently buffer-local: the binding is recorded against this buffer and restored into
 it, rather than into whichever buffer happens to be current when it unwinds.
 
+### What every consumer owes, and what only a terminal does
+
+`cooked--apply` is not the only consumer of a drain. `cooked--apply-withheld` takes one
+for a buffer no window shows, and `cooked-process--pump` takes one for a compilation
+buffer that is not a terminal at all. Three steps of the order above are theirs too,
+and are theirs for reasons that have nothing to do with a screen: the resources have to
+be installed before the text that names them by id is rendered whoever renders it; the
+levels that describe the *child* rather than the grid — `:mode`, `:foreground`,
+`:exit` — mean the same thing to a consumer with no window, which is how a build
+reaching `getpass` is noticed at all; and the child is blocked on the replies in
+`:events` whether or not anyone is looking.
+
+`cooked--consume-drain` is those three with the consumer's own render between them, and
+`cooked--consumed-drain-keys` names what it answers for. It takes the consumer's two
+real choices as arguments — what to do with the text, and an event handler or nil —
+rather than a row of flags: `cooked--apply-withheld` renders the scrollback and handles
+every event, the pump emits the retired text and declines all of them but the replies.
+A reply is never the handler's to decline, which is why `cooked--route-events` answers
+those itself and `cooked--handle-event` no longer has an arm for them.
+
+`cooked--apply` discharges the same three obligations through the same three
+functions — `cooked--apply-resources`, `cooked--adopt-levels` at the foot of
+`cooked--apply-levels`, `cooked--route-events` inside `cooked--apply-events` — rather
+than through `cooked--consume-drain` itself, and that is deliberate. Its render is not
+one step between two others but five interleaved with them: the viewport, the
+scrollback, the seam, the shifts and the rows, with the grid's own levels adopted in
+the middle and the region shaped after. Folding that into a callback would buy one
+shared call at the price of the `let*` this section is about.
+
+What keeps a consumer honest instead is a guard test per consumer. It takes the keys of
+a *real* drain — the core sends every one of them on every drain, empty or not — and
+fails unless each is handled or carries a written reason in that consumer's table
+(`cooked-process--ignored-drain-keys`, `cooked--withheld-ignored-drain-keys`). A field
+added to the drain in Rust then fails a test rather than being quietly dropped by the
+consumer that did not hear about it, which is how four defects in two days reached the
+headless path.
+
+`cooked--owing-readiness` is the other half of what a consumer owes: `cooked--ready` in
+the cleanup of an `unwind-protect`, once per drain, in all three of
+`cooked--drain-and-apply`, `cooked-process--pump` and `cooked-process--residue`. Until
+it runs the core holds every reply composed after a query that reached a drain, and the
+wake byte that paces `cooked-min-redisplay-interval` is still in flight.
+
 ### Why point needs three different rescues
 
 - **`editing`** is an *offset* into the pending input, not a position. The input is taken

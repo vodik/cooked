@@ -430,6 +430,37 @@ no echo anybody is waiting on, and the frame they cause can wait its turn."
   (when-let* ((session (cooked--live-session)))
     (cooked--send session bytes)))
 
+;;;; Draining
+
+(defmacro cooked--owing-readiness (session &rest body)
+  "Run BODY, then tell SESSION's core that its drain has been dealt with.
+
+Every consumer of `cooked--drain' owes the core exactly this, and owes it
+however the consuming went, which is why it is a bracket rather than a line at
+the end of each one.  Two things wait on it.  The core holds every reply
+composed after a query that reached a drain until Lisp says it has answered
+that query, so a `DA1' sent after an `OSC 52 ; c ; ?' would wait for as long as
+the child lived; and one wake byte is in flight from the drain until this runs,
+so `cooked-min-redisplay-interval' paces the applying -- where the milliseconds
+are -- rather than the taking of a delta, which costs nothing.
+
+In the cleanup for the stronger of those two reasons: a consumer that signals
+part-way must still re-arm, or the core waits on a readiness never declared and
+the buffer stops repainting until the reader thread's own tick notices --
+and the way back from a half-drawn screen, `cooked-refresh', drains too.
+
+SESSION is a form, and it is evaluated in the cleanup rather than at entry
+because BODY may be the very thing that ends the session: a child's exit is
+reported in the drain BODY is consuming, and the consumer that acts on it
+reaps the session and, for `cooked-process--pump', the buffer holding it.  Nil
+there means there is no longer anyone to tell, and nothing is told."
+  (declare (indent 1) (debug (form body)))
+  (let ((owed (make-symbol "owed")))
+    `(unwind-protect
+         (progn ,@body)
+       (when-let* ((,owed ,session))
+         (cooked--ready ,owed)))))
+
 ;;;; Replies
 
 (defvar cooked--reply-batch nil

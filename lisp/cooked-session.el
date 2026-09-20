@@ -163,6 +163,71 @@ every redisplay -- held back by that much."
     (make-pipe-process :name name :buffer buffer :noquery t
                        :sentinel #'ignore :filter filter)))
 
+(defun cooked--spawn-arguments (argv environment rows cols wake directory &optional frame)
+  "The whole argument list for `cooked--spawn', built once for every caller.
+
+ARGV, ENVIRONMENT, ROWS, COLS, WAKE and DIRECTORY are what `cooked--spawn'
+takes before its INITIAL-STATE plist, and DIRECTORY is expanded here, a remote
+name being refused by `cooked--local-name' as `cooked--start' describes.
+
+The plist is the part worth having one builder for.  Everything in it is state
+the emulator would otherwise be told through a separate call *after* the spawn,
+which used to race the reader thread `cooked--spawn' starts internally: a child
+that probes `OSC 11 ; ?', `CSI ? 996 n' or `CSI 19 t' in its very first instant
+could read the reply before the push arrived and get silence for the rest of
+its life, there being no query left once the core has already answered nothing.
+Folded in here, the core has all of it before the child can be read from.  Each
+value comes from exactly the function its later push uses, so there is one
+source for each regardless of which way it reaches the core.
+
+Each is wrapped in `cooked--protect-seam' because the session is about to exist
+whether or not any of them succeeds, and a failure costs a courtesy answer to a
+query most children never send rather than the terminal itself.  The seam is
+real rather than theoretical: `cooked--default-color' guards against
+`color-values' returning nil, which is not the same as it signalling, and it
+does signal on a frame that claims to be graphical without a window system
+behind it.  A seam that fires answers nil, which a plist key reads exactly as
+if it had been left out.
+
+FRAME is the frame the session is going to be shown on, and nil for a headless
+one -- `cooked-process-start's hidden host, which has no window and no cursor.
+The three keys that describe a frame are then left out and the core answers
+those queries with silence, which is the honest answer for a compilation buffer
+asked how many pixels tall its terminal is.  The palette is not one of them: a
+build tool asks `OSC 11 ; ?' before it decides whether to print dark or light,
+and the colours Emacs would paint with are a real answer to that wherever the
+text ends up.
+
+`cooked--pushed-palette' is set here rather than left for the first theme or
+window change to discover, since this is what `cooked--sync-palette' would
+have pushed, in every way that matters to its own comparison;
+`cooked--graphics-shown' likewise, for a session with a frame.  Both are
+buffer-local and are set in the buffer that holds the session."
+  (let ((palette-defaults (cooked--protect-seam 'cooked--sync-palette
+                            (cooked--palette-defaults)))
+        (palette-colors (cooked--protect-seam 'cooked--sync-palette
+                          (cooked--palette-colors))))
+    (setq cooked--pushed-palette (cons palette-defaults palette-colors))
+    (when frame
+      ;; Told at the spawn rather than after it, with the frame the buffer is
+      ;; about to appear on: a child can probe before the spawn returns, and the
+      ;; core answers a probe from what it was spawned with.  See
+      ;; `cooked--graphics-answer'.
+      (setq cooked--graphics-shown (cooked--graphics-answer frame)))
+    (list argv environment rows cols wake
+          (when directory
+            (expand-file-name (or (cooked--local-name directory) "~")))
+          `(,@(when frame
+                (list :graphics cooked--graphics-shown
+                      :color-scheme (cooked--protect-seam 'cooked--sync-color-scheme
+                                      (cooked--color-scheme))
+                      :frame-size (cooked--protect-seam 'cooked--sync-frame-size
+                                    (cooked--frame-size-values frame))))
+            :palette-defaults ,palette-defaults
+            :palette-colors ,palette-colors
+            :min-redisplay-interval ,(round (* 1000 cooked-min-redisplay-interval))
+            :backlog-limit ,cooked-backlog-limit))))
+
 (defun cooked--start (argv &optional directory extra-env)
   "Spawn ARGV in the current buffer, optionally in DIRECTORY.
 EXTRA-ENV is an alist prepended to the child\\='s environment.
@@ -239,52 +304,16 @@ wherever Emacs is, and is not a request to be second-guessed."
   (set-marker-insertion-type (process-mark cooked--wake) nil)
   (cooked--sync-query-flag)
   (cooked--set-input-mark nil)
-  ;; Told at the spawn rather than after it, with the frame the buffer is about to
-  ;; appear on: a child can probe before this function returns, and the core answers
-  ;; a probe from what it was spawned with.  See `cooked--graphics-answer'.
-  (setq cooked--graphics-shown (cooked--graphics-answer (selected-frame)))
-  ;; The colour scheme, palette and frame size go the same way graphics already did:
-  ;; folded into the plist `cooked--spawn' applies to the emulator before the child can
-  ;; be read from, rather than pushed by three separate calls after `cooked--spawn'
-  ;; already returned.  Those calls used to race the reader thread `cooked--spawn'
-  ;; starts internally -- a child that probes `OSC 11 ; ?', `CSI ? 996 n' or `CSI 19t' in
-  ;; its very first instant could read the reply before any of the three arrived, and get
-  ;; silence for the rest of its life, there being no query event left once the core has
-  ;; already answered nothing.  Each value here comes from exactly the function its later
-  ;; push uses -- `cooked--color-scheme', `cooked--palette-defaults'/`cooked--palette-colors'
-  ;; and `cooked--frame-size-values' -- so there is one source for each regardless of
-  ;; whether it reaches the core at spawn or on the hook that pushes it again.
-  ;;
-  ;; Each is wrapped in `cooked--protect-seam' for the reason the three calls this
-  ;; replaces were: the session is about to exist whether or not any of these succeed,
-  ;; and the only thing a failure here costs is a courtesy answer to a query most
-  ;; children never send, not the terminal itself.  The seam is real rather than
-  ;; theoretical -- `cooked--default-color' guards against `color-values' returning nil,
-  ;; which is not the same as it signalling, and it does signal on a frame that claims to
-  ;; be graphical without a window system behind it.  A seam that fires answers nil,
-  ;; which a plist key reads exactly as if it had been left out.
-  (let ((palette-defaults (cooked--protect-seam 'cooked--sync-palette
-                            (cooked--palette-defaults)))
-        (palette-colors (cooked--protect-seam 'cooked--sync-palette
-                          (cooked--palette-colors))))
-    ;; Set now rather than left for the first theme or window change to discover: this
-    ;; is what `cooked--sync-palette' just pushed, in every way that matters to its own
-    ;; comparison against `cooked--pushed-palette'.
-    (setq cooked--pushed-palette (cons palette-defaults palette-colors))
-    (setq cooked--session
-          (cooked--spawn
-           argv (cooked--child-environment extra-env) cooked--rows cooked--cols cooked--wake
-           (when directory
-             (expand-file-name (or (cooked--local-name directory) "~")))
-           (list :graphics cooked--graphics-shown
-                 :color-scheme (cooked--protect-seam 'cooked--sync-color-scheme
-                                (cooked--color-scheme))
-                 :palette-defaults palette-defaults
-                 :palette-colors palette-colors
-                 :frame-size (cooked--protect-seam 'cooked--sync-frame-size
-                              (cooked--frame-size-values (selected-frame)))
-                 :min-redisplay-interval (round (* 1000 cooked-min-redisplay-interval))
-                 :backlog-limit cooked-backlog-limit))))
+  ;; The graphics answer, the colour scheme, the palette and the frame size are all
+  ;; folded into the plist `cooked--spawn' applies before the child can be read from,
+  ;; rather than pushed after it returns; `cooked--spawn-arguments' is where that
+  ;; plist is built, for this caller and for `cooked-process-start' both, and says
+  ;; why the spawn is the only safe moment for any of it.
+  (setq cooked--session
+        (apply #'cooked--spawn
+               (cooked--spawn-arguments argv (cooked--child-environment extra-env)
+                                        cooked--rows cooked--cols cooked--wake
+                                        directory (selected-frame))))
   cooked--session)
 
 (defun cooked--child-environment (&optional extra)

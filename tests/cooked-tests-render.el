@@ -5091,3 +5091,31 @@ is exactly the theme this is about."
     (should (cooked--ascii-fixed-pitch-p (selected-window)))
     (setq wide t)
     (should-not (cooked--ascii-fixed-pitch-p (selected-window)))))
+
+(ert-deftest cooked-a-withheld-drain-leaves-no-key-unaccounted-for ()
+  "`cooked--apply-withheld' reads a field of a drain or says why it does not.
+
+The third consumer of a drain, and the one with no window to show what it
+skipped: everything it leaves unread is a decision about a buffer nobody is
+looking at, which is exactly the kind of decision that rots quietly.  So the
+keys come from a real withheld drain, and each has to be handled by
+`cooked--consume-drain', handled here, or carry its reason in
+`cooked--withheld-ignored-drain-keys'.
+
+A table entry naming a key the core no longer sends fails too: a reason nobody
+can check is worse than no reason."
+  (cooked-tests--with-session '("/bin/sh" "-c" "printf 'hello\\n'; sleep 5")
+    (should (cooked-tests--settle
+             (lambda () (string-match-p "hello" (cooked-tests--text)))))
+    (cooked-tests--hide-buffer)
+    (let* ((update (cooked--drain cooked--session cooked-rejoin-wrapped-lines t))
+           (handled (append cooked--consumed-drain-keys cooked--withheld-drain-keys)))
+      (should (plist-member update :withheld))
+      (should-not (cooked-tests--unaccounted-drain-keys
+                   update handled cooked--withheld-ignored-drain-keys))
+      (should-not (cooked-tests--stale-drain-keys
+                   update handled cooked--withheld-ignored-drain-keys))
+      (dolist (entry cooked--withheld-ignored-drain-keys)
+        (should (keywordp (car entry)))
+        (should (stringp (cdr entry)))
+        (should-not (string-empty-p (cdr entry)))))))

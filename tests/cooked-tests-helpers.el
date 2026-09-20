@@ -1147,5 +1147,30 @@ and the connection are gone afterwards."
              (tramp-cleanup-connection (tramp-dissect-file-name ,directory) t t))
            (delete-directory ,local t))))))
 
+(defun cooked-tests--unaccounted-drain-keys (update handled ignored)
+  "The keys of UPDATE that HANDLED does not list and IGNORED does not excuse.
+
+UPDATE is a plist a real `cooked--drain' returned, which is what makes this
+guard worth anything: the core sends every key on every drain whether or not
+there is anything in it, so a key added in Rust reaches the test without
+anyone editing the test.  HANDLED is a list of keys the consumer reads and
+IGNORED an alist of (KEY . WHY), WHY being the argument for not reading it.
+
+A consumer that neither reads a key nor writes down why it does not is the
+shape four defects in two days came out of; see
+`cooked-process--ignored-drain-keys'."
+  (cl-loop for (key _value) on update by #'cddr
+           unless (or (memq key handled) (assq key ignored))
+           collect key))
+
+(defun cooked-tests--stale-drain-keys (update handled ignored)
+  "The keys HANDLED or IGNORED name that UPDATE, a real drain, does not carry.
+
+The other half of `cooked-tests--unaccounted-drain-keys': a table that still
+excuses a key the core stopped sending is a reason nobody can check any more."
+  (let ((keys (cl-loop for (key _value) on update by #'cddr collect key)))
+    (cl-remove-if (lambda (key) (memq key keys))
+                  (append handled (mapcar #'car ignored)))))
+
 (provide 'cooked-tests-helpers)
 ;;; cooked-tests-helpers.el ends here

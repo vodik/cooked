@@ -146,62 +146,49 @@ again is safe."
     ;; and does not depend on their good behaviour.
     (let ((buffer (current-buffer))
           (applied nil))
-      (unwind-protect
-          (progn
-            (setq cooked--draining t
-                  cooked--drain-pending nil)
-            (let ((update (cooked--drain cooked--session cooked-rejoin-wrapped-lines hidden t)))
-              (if (plist-get update :withheld)
-                  (cooked--apply-withheld update)
-                (cooked--apply update)))
-            ;; Bounded in practice: the pending flag is set by a freeze lifting,
-            ;; and a freeze that has lifted does not lift again.
-            (while (and cooked--drain-pending cooked--session)
-              (setq cooked--drain-pending nil)
-              (cooked--apply (cooked--drain cooked--session cooked-rejoin-wrapped-lines nil t)))
-            (setq applied t))
-        (when (buffer-live-p buffer)
-          (with-current-buffer buffer
-            (setq cooked--draining nil
-                  cooked--drain-pending nil)
-            ;; A drain that did not finish applying has told the core Emacs holds
-            ;; rows it never inserted, and the core leaves a row out of later
-            ;; drains when its cells match that copy.  So a child repainting the
-            ;; same frame would never mend the screen.  `cooked--on-wake' follows
-            ;; a failure with `cooked-refresh', which clears the copy itself, but
-            ;; not under `cooked-debug', and not for any other caller; this is the
-            ;; one place every unfinished apply passes.
-            (unless applied
-              (cooked--forget-sent-rows))
-            ;; The far end of the core's backpressure: one wake byte is in flight
-            ;; from the drain that brought us here until this says the drain has
-            ;; been applied, so `cooked-min-redisplay-interval' paces applying --
-            ;; which is where the milliseconds are -- rather than the taking of a
-            ;; delta, which costs nothing.  Once, at the very end: the loop above
-            ;; may have drained several times, and it is the last apply that the
-            ;; interval is measured from.  Not after redisplay, which runs once the
-            ;; process filter this is called from has returned: the window covers
-            ;; the Lisp work, and the interval is what leaves the redraw its room.
-            ;;
-            ;; In the cleanup rather than the body, and for a stronger reason than
-            ;; tidiness: an apply that signals must still re-arm, or the core waits
-            ;; on a readiness that is never declared and the buffer stops repainting
-            ;; until the reader thread's own tick notices -- and `cooked-refresh',
-            ;; which is the way back from a half-drawn screen, drains too.  Inside
-            ;; the `with-current-buffer' for the same reason as the flags: it is
-            ;; this buffer's session that owes the answer, whatever buffer a callee
-            ;; has left current.  Guarded because the session can be gone by now,
-            ;; killed by something the apply ran.
-            (when cooked--session
-              (cooked--ready cooked--session))
-            ;; Also in the cleanup, though `cooked--apply' ends with it: the drain
-            ;; has assertions in it (`cooked--check-seam', `cooked--guard-row-width')
-            ;; and a signal out of one leaves the screen half-rewritten with the
-            ;; input line moved and the anchor still naming its old position.
-            ;; Idempotent on the ordinary path, the anchor already matching by then
-            ;; -- and inside the `with-current-buffer' for the same reason as the
-            ;; flags: it is this buffer's anchor it exists to check.
-            (cooked--check-undo-anchor)))))))
+      ;; The readiness is owed once, at the very end: the loop below may have
+      ;; drained several times, and it is the last apply that
+      ;; `cooked-min-redisplay-interval' is measured from.  Read out of BUFFER
+      ;; rather than from whatever buffer a callee has left current, for the same
+      ;; reason as the flags below, and nil once something the apply ran has killed
+      ;; the session.  See `cooked--owing-readiness'.
+      (cooked--owing-readiness (and (buffer-live-p buffer)
+                                    (buffer-local-value 'cooked--session buffer))
+        (unwind-protect
+            (progn
+              (setq cooked--draining t
+                    cooked--drain-pending nil)
+              (let ((update (cooked--drain cooked--session cooked-rejoin-wrapped-lines hidden t)))
+                (if (plist-get update :withheld)
+                    (cooked--apply-withheld update)
+                  (cooked--apply update)))
+              ;; Bounded in practice: the pending flag is set by a freeze lifting,
+              ;; and a freeze that has lifted does not lift again.
+              (while (and cooked--drain-pending cooked--session)
+                (setq cooked--drain-pending nil)
+                (cooked--apply (cooked--drain cooked--session cooked-rejoin-wrapped-lines nil t)))
+              (setq applied t))
+          (when (buffer-live-p buffer)
+            (with-current-buffer buffer
+              (setq cooked--draining nil
+                    cooked--drain-pending nil)
+              ;; A drain that did not finish applying has told the core Emacs holds
+              ;; rows it never inserted, and the core leaves a row out of later
+              ;; drains when its cells match that copy.  So a child repainting the
+              ;; same frame would never mend the screen.  `cooked--on-wake' follows
+              ;; a failure with `cooked-refresh', which clears the copy itself, but
+              ;; not under `cooked-debug', and not for any other caller; this is the
+              ;; one place every unfinished apply passes.
+              (unless applied
+                (cooked--forget-sent-rows))
+              ;; Also in a cleanup, though `cooked--apply' ends with it: the drain
+              ;; has assertions in it (`cooked--check-seam', `cooked--guard-row-width')
+              ;; and a signal out of one leaves the screen half-rewritten with the
+              ;; input line moved and the anchor still naming its old position.
+              ;; Idempotent on the ordinary path, the anchor already matching by then
+              ;; -- and inside the `with-current-buffer' for the same reason as the
+              ;; flags: it is this buffer's anchor it exists to check.
+              (cooked--check-undo-anchor))))))))
 
 (defvar cooked-inhibit-redraw-functions nil
   "Abnormal hook asked whether a buffer's drain should wait.
@@ -304,51 +291,164 @@ whole drain that runs once it returns."
              (not (cooked--screen-kept-still-p)))
     (cooked--drain-and-repair nil)))
 
+;;;; What every consumer of a drain owes the core
+
+(defconst cooked--consumed-drain-keys
+  '(:images :links :styles :mode :foreground :exit :events)
+  "The keys of a drain `cooked--consume-drain' answers for by itself.
+
+Every consumer gets these whatever else it does with the update, which is what
+the shared step is for: the three resources the rendered text refers to by id,
+the three levels that describe the child rather than the screen, and the
+events, replies included.  A consumer's own guard test names these as handled
+and has to account for the rest; see `cooked-process--ignored-drain-keys'.")
+
+(defun cooked--consume-drain (update render &optional handler)
+  "Give UPDATE what any consumer of a drain owes the core, RENDER in the middle.
+
+The three obligations in `cooked--consumed-drain-keys', in the one order the
+drain's docstring in src/lib.rs allows: the resources go in first, because
+`:scrolled' and `:rows' name an image, a link and a rendition by ids only
+`:images', `:links' and `:styles' can resolve; then the consumer's own text,
+whatever text means to it; then the levels and the events, which are about the
+child and are answered after its output has landed.
+
+RENDER is called with no arguments between the halves and its value is passed
+on to HANDLER, this drain's scrollback having been where every consumer that
+has one puts it -- `cooked--apply-scrollback' answers where, and an OSC 133
+mark carried in the same drain anchors into it.  Its value is returned.
+
+HANDLER is called with each event and that value, or nil to decline them.
+Declining is not silence: the replies are owed to a child that is blocked
+waiting for them whether or not anyone is looking at the terminal, so they are
+answered here rather than through HANDLER.  Everything else an event says is
+about a buffer showing the terminal -- a bell, a title, a progress report --
+and a consumer with no such buffer is right to want none of it.
+
+The caller owes `cooked--ready' afterwards, which is what says the queries in
+this drain have been answered; `cooked--owing-readiness' is the bracket for
+it."
+  (cooked--apply-resources update)
+  (let ((batch-start (funcall render)))
+    (cooked--adopt-levels update)
+    (cooked--route-events update handler batch-start)
+    batch-start))
+
+(defun cooked--adopt-levels (update)
+  "Adopt the levels of UPDATE that are about the child and not about the screen.
+
+The tty's mode, so a password prompt is noticed; what holds the foreground, so
+the program's name and its key protocol are re-derived; and the child's exit,
+so whoever is waiting for it can see it in `cooked--exit'.  All three mean the
+same thing to a consumer with no screen as to one with a window, which is why
+they are the levels the shared step adopts and `cooked--apply-levels' adopts
+the rest of on top of them.
+
+The exit first, so that the refresh either of the other two can provoke already
+reads the state of a child that has gone."
+  (setq cooked--exit (plist-get update :exit))
+  (cooked--set-mode (plist-get update :mode))
+  (cooked--set-foreground (plist-get update :foreground)))
+
+(defun cooked--route-events (update handler batch-start)
+  "Hand UPDATE's events to HANDLER, answering the replies whatever it does.
+
+BATCH-START is passed to HANDLER with each event; see `cooked--consume-drain',
+which is where both come from and which explains why a reply is not HANDLER's
+to decline.
+
+Batched, so a drain that asks for the whole palette is answered in one write
+rather than one per entry.  See `cooked--batching-replies'."
+  (cooked--batching-replies cooked--session
+    (dolist (event (plist-get update :events))
+      (pcase event
+        (`(reply . ,bytes) (cooked--reply-if-live bytes))
+        (_ (when handler (funcall handler event batch-start)))))))
+
+(defconst cooked--withheld-drain-keys
+  '(:scrolled :head :alt :marks :withheld)
+  "The keys `cooked--apply-withheld' handles beyond `cooked--consumed-drain-keys'.
+
+The scrollback and the seam it leaves, the alternate screen the seam is split
+against, the marks that scrolled away with the text, and the flag that chose
+this path in `cooked--drain-and-apply'.")
+
+(defconst cooked--withheld-ignored-drain-keys
+  '((:promoted . "A hidden drain promotes nothing: the rows the buffer already
+holds are the screen's, and the screen is what this drain left out.")
+    (:rows . "The screen was left out, and the core keeps the damage for the
+next whole drain.")
+    (:edits . "As `:rows': there is nothing to patch in rows nobody rewrote.")
+    (:shifts . "As `:rows': the rows a shift would move are not being touched.")
+    (:height . "The grid's shape describes a screen this drain did not report;
+`cooked--grid' keeps what the last whole drain gave it, bar the head.")
+    (:width . "As `:height'.")
+    (:used . "As `:height'.")
+    (:cursor . "The cursor is placed by the render, and there was none.")
+    (:reverse . "DECSCNM remaps the faces of a screen this drain left alone.")
+    (:reverse-toggles . "As `:reverse'.")
+    (:app-cursor . "A key encoding, for a buffer that can take a keystroke;
+one with no window cannot, and the whole drain that shows it catches it up.")
+    (:keys . "As `:app-cursor'.")
+    (:kitty-flags . "As `:app-cursor'.  See
+`cooked-showing-a-hidden-buffer-catches-up-its-kitty-flags-first'.")
+    (:modify-other-keys . "As `:app-cursor'."))
+  "Why `cooked--apply-withheld' leaves each remaining key of a drain alone.
+
+Not an inventory of the drain -- the core's docstring is that -- but the
+argument that each key it does not read is one it is right not to read.  A key
+added to the drain and to neither table fails
+`cooked-a-withheld-drain-leaves-no-key-unaccounted-for', which is the point of
+writing the reasons down.")
+
 (defun cooked--apply-withheld (update)
   "Apply UPDATE, a drain that left the screen out, to a buffer no window shows.
 
-Only what has to happen whether or not anyone can see it: the scrollback is
-appended, the marks that scrolled away with it are moved there, the tty mode is
-adopted, so a password prompt is still noticed, and the events are handled, so
-bells, titles, progress and notifications still arrive.  The rows below
-`cooked--screen-start' are left as they are, and so is everything shaped by
-them: the guard, the region's height, the padding, the input line, the window.
-The core has kept the damage, and the next whole drain repaints what changed.
+Only what has to happen whether or not anyone can see it.
+`cooked--consume-drain' pays the core what every consumer owes it -- the
+resources, the levels that describe the child, the events, so bells, titles,
+progress and notifications still arrive -- and the scrollback is appended
+between the halves of it, with the marks that scrolled away moved there.  The
+rows below `cooked--screen-start' are left as they are, and so is everything
+shaped by them: the guard, the region's height, the padding, the input line,
+the window.  The core has kept the damage, and the next whole drain repaints
+what changed.
+`cooked--withheld-ignored-drain-keys' is the argument for each key left unread.
 
 Appending is an insertion above the stale rows and nothing more, which leaves
 the one thing the whole drain reads off them before it repaints: whether point
 was on the screen.  Point and `cooked--point' are kept where they were relative
 to the screen's start, so a buffer left at its cursor still follows the cursor
 when it is shown, however much scrollback went in above it meanwhile."
-  (cooked--apply-resources update)
   (let* ((screen (cooked--screen-start-position))
          (on-screen (and screen (>= (point) screen) (- (point) screen)))
          (recorded (and screen cooked--point (>= cooked--point screen)
                         (- cooked--point screen))))
-    (let* ((inhibit-read-only t)
-           (buffer-undo-list t)
-           ;; Lifted over the insertion as `cooked--apply' lifts it.  An empty
-           ;; input line at the top of the screen has its end marker advancing and
-           ;; its start not, so text inserted there would land inside it.
-           (pending (cooked--take-pending-input))
-           (batch-start (when-let* ((scrolled (plist-get update :scrolled)))
-                          (cooked--render-scrolled scrolled))))
-      (cooked--restore-pending-input pending)
-      (when batch-start (setq cooked--pin-screen-top nil))
-      ;; The seam is scrollback's business, so it is settled here as a whole drain
-      ;; settles it.  With `cooked-rejoin-wrapped-lines' off, a wrapped row sent now
-      ;; ends its line, and the core's carry has to be told before a resize under a
-      ;; hidden buffer rewraps against it: `日本語' at 5 columns, its first row
-      ;; scrolled away and the screen then widened to 9, sent `語' to scrollback as
-      ;; though it had been cut from that row's line.  The head is the drain's own,
-      ;; the screen's `cooked--grid' being otherwise left as it was.
-      (setf (cooked-grid-head cooked--grid) (plist-get update :head))
-      (cooked--split-seam (and batch-start (plist-get update :alt)))
-      (cooked--relocate-marks (plist-get update :marks) batch-start)
-      (cooked--set-mode (plist-get update :mode))
-      (cooked--batching-replies cooked--session
-        (dolist (event (plist-get update :events))
-          (cooked--handle-event event batch-start))))
+    (cooked--with-child-edit
+      (cooked--consume-drain
+       update
+       (lambda ()
+         (let* (;; Lifted over the insertion as `cooked--apply' lifts it.  An empty
+                ;; input line at the top of the screen has its end marker advancing
+                ;; and its start not, so text inserted there would land inside it.
+                (pending (cooked--take-pending-input))
+                (batch-start (when-let* ((scrolled (plist-get update :scrolled)))
+                               (cooked--render-scrolled scrolled))))
+           (cooked--restore-pending-input pending)
+           (when batch-start (setq cooked--pin-screen-top nil))
+           ;; The seam is scrollback's business, so it is settled here as a whole
+           ;; drain settles it.  With `cooked-rejoin-wrapped-lines' off, a wrapped
+           ;; row sent now ends its line, and the core's carry has to be told
+           ;; before a resize under a hidden buffer rewraps against it: `日本語' at
+           ;; 5 columns, its first row scrolled away and the screen then widened to
+           ;; 9, sent `語' to scrollback as though it had been cut from that row's
+           ;; line.  The head is the drain's own, the screen's `cooked--grid' being
+           ;; otherwise left as it was.
+           (setf (cooked-grid-head cooked--grid) (plist-get update :head))
+           (cooked--split-seam (and batch-start (plist-get update :alt)))
+           (cooked--relocate-marks (plist-get update :marks) batch-start)
+           batch-start))
+       #'cooked--handle-event))
     ;; Whether or not a claim is still holding the screen back: this drain is
     ;; the one that left it out, and what it owes outlives the claim.
     (setq cooked--screen-owed t)
@@ -548,7 +648,14 @@ at now, before the drain; see the `reflow' field."
 
 (defun cooked--apply-levels (update cursor)
   "Adopt UPDATE's levels: the state as of this drain, for redisplay to read.
-CURSOR is UPDATE's cursor, already decoded by `cooked--apply'."
+CURSOR is UPDATE's cursor, already decoded by `cooked--apply'.
+
+The levels a screen is what makes readable -- where the cursor is, how the grid
+is shaped, which key encoding the child asked for, whether the screen is the
+alternate one or reversed -- and then, through `cooked--adopt-levels', the three
+that mean the same to a consumer with no screen at all.  Those three last, so
+the refresh `cooked--set-mode' and `cooked--set-foreground' provoke derives the
+keymap from a grid and a key encoding this drain has already put in place."
   (setq cooked--cursor cursor
         ;; Before `cooked--fit-screen', which is shaped by it.
         cooked--grid (cooked--grid-make :height (plist-get update :height)
@@ -557,13 +664,11 @@ CURSOR is UPDATE's cursor, already decoded by `cooked--apply'."
                                         :head (plist-get update :head))
         cooked--keys (plist-get update :keys)
         cooked--kitty-flags (or (plist-get update :kitty-flags) 0)
-        cooked--modify-other-keys (or (plist-get update :modify-other-keys) 0)
-        cooked--exit (plist-get update :exit))
+        cooked--modify-other-keys (or (plist-get update :modify-other-keys) 0))
   (cooked--set-alt (plist-get update :alt))
   (cooked--set-reverse-screen (plist-get update :reverse)
                               (plist-get update :reverse-toggles))
-  (cooked--set-mode (plist-get update :mode))
-  (cooked--set-foreground (plist-get update :foreground)))
+  (cooked--adopt-levels update))
 
 (defun cooked--set-mode (mode)
   "Adopt MODE, switching keymaps and handling secret prompts on a change."
@@ -812,11 +917,7 @@ at, and `cooked-row-rendered-functions' is documented against that order too."
   ;; A drain that both resizes and carries a fresh mark should end with the
   ;; fresh mark's own anchor.
   (cooked--relocate-marks (plist-get update :marks) batch-start)
-  ;; Batched, so a drain that asks for the whole palette is answered in one
-  ;; write rather than one per entry.  See `cooked--batching-replies'.
-  (cooked--batching-replies cooked--session
-    (dolist (event (plist-get update :events))
-      (cooked--handle-event event batch-start)))
+  (cooked--route-events update #'cooked--handle-event batch-start)
   (cooked--notify-rows-rendered rendered)
   ;; After the render, so the cursor is where this drain put it: a row the URL
   ;; guess declined while the cursor sat on it has to be asked for again once
@@ -968,7 +1069,12 @@ marks need to place their anchors; see `cooked--anchor-position'.
 
 Events are occurrences only.  State the redisplay depends on rides the drain's
 own fields instead — `:alt' and the rest — so that nothing arrives twice with
-two chances to disagree."
+two chances to disagree.
+
+Every event here is about a buffer showing the terminal, which is why this is
+the handler a consumer without one declines to supply.  A reply is not, and
+never reaches here: `cooked--route-events' answers those itself, for every
+consumer, the child being blocked on them either way."
   (pcase event
     ;; Handed on rather than rung: whether a bell is a noise, a mark on the
     ;; buffer or nothing depends on whether anyone can see it, which is the
@@ -976,7 +1082,6 @@ two chances to disagree."
     (`(bell) (cooked--protect-seam 'cooked-bell-function
                (funcall cooked-bell-function)))
     (`(osc ,code ,bell . ,parts) (cooked--handle-osc code bell parts))
-    (`(reply . ,bytes) (cooked--reply-if-live bytes))
     (`(title-stack ,push) (cooked--handle-title-stack push))
     ;; Guarded, because it moves windows the drain does not own: a layout that
     ;; refuses the resize must not cost this drain the replies queued after it.
