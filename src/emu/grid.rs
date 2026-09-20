@@ -17,6 +17,23 @@ use std::ops::RangeInclusive;
 use super::cell::Cell;
 use super::screen::Direction;
 
+/// One row of a grid: its cells and whatever its owner hangs off a row.
+///
+/// A name for the pair [`Grid::row`] hands back, so that a caller reads `row.cells` and
+/// `row.meta` rather than destructuring a tuple whose halves are told apart by position.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct GridRow<'a, M> {
+    pub(crate) cells: &'a [Cell],
+    pub(crate) meta: &'a M,
+}
+
+/// One row of a grid, to write to; the twin of [`GridRow`].
+#[derive(Debug)]
+pub(crate) struct GridRowMut<'a, M> {
+    pub(crate) cells: &'a mut [Cell],
+    pub(crate) meta: &'a mut M,
+}
+
 /// Cells and per-row metadata, addressed by screen row; see the module comment.
 #[derive(Debug, Clone, Default)]
 pub(crate) struct Grid<M> {
@@ -36,6 +53,17 @@ impl<M: Default> Grid<M> {
         let mut grid = Self::default();
         grid.reset(rows, cols);
         grid
+    }
+
+    /// Take the shape of a ROWS by COLS grid, keeping what is here if it already has it.
+    ///
+    /// The shape is the question and the reset is the answer, so both are here rather than
+    /// at a caller that asks and then acts: the copy of what Emacs shows reshapes itself
+    /// this way on every drain, and a drain that did not reshape must keep the rows.
+    pub(crate) fn ensure(&mut self, rows: usize, cols: usize) {
+        if self.height() != rows || self.width() != cols {
+            self.reset(rows, cols);
+        }
     }
 
     /// Lay the grid out again as ROWS by COLS, keeping nothing.
@@ -64,9 +92,9 @@ impl<M> Grid<M> {
         fresh: impl Fn() -> M,
     ) {
         for index in range {
-            if let Some((cells, meta)) = self.row_mut(index) {
-                Cell::fill(cells, blank);
-                *meta = fresh();
+            if let Some(row) = self.row_mut(index) {
+                Cell::fill(row.cells, blank);
+                *row.meta = fresh();
             }
         }
     }
@@ -90,20 +118,23 @@ impl<M> Grid<M> {
     }
 
     /// Screen row INDEX's cells and metadata.
-    pub(crate) fn row(&self, index: usize) -> Option<(&[Cell], &M)> {
+    pub(crate) fn row(&self, index: usize) -> Option<GridRow<'_, M>> {
         let slot = self.slot(index)?;
         let start = slot * self.cols;
-        Some((&self.cells[start..start + self.cols], &self.meta[slot]))
+        Some(GridRow {
+            cells: &self.cells[start..start + self.cols],
+            meta: &self.meta[slot],
+        })
     }
 
     /// Screen row INDEX's cells and metadata, to write to.
-    pub(crate) fn row_mut(&mut self, index: usize) -> Option<(&mut [Cell], &mut M)> {
+    pub(crate) fn row_mut(&mut self, index: usize) -> Option<GridRowMut<'_, M>> {
         let slot = self.slot(index)?;
         let start = slot * self.cols;
-        Some((
-            &mut self.cells[start..start + self.cols],
-            &mut self.meta[slot],
-        ))
+        Some(GridRowMut {
+            cells: &mut self.cells[start..start + self.cols],
+            meta: &mut self.meta[slot],
+        })
     }
 
     /// Screen row INDEX's metadata alone, for a caller with nothing to say about cells.
@@ -157,28 +188,29 @@ impl<M> Grid<M> {
         }
     }
 
-    /// Take every row, top to bottom, as its cells and metadata, leaving the grid empty.
+    /// Every row, top to bottom, as its own cells and metadata, consuming the grid.
     ///
     /// For a resize, which lays the rows out again at the new width and stores them back
-    /// with [`Grid::store_rows`].
-    pub(crate) fn take_rows(&mut self) -> Vec<(Vec<Cell>, M)>
+    /// with [`Grid::store_rows`]. Consuming rather than emptying in place: the layout a
+    /// resize walks away from is not a grid anyone should still be holding, and taking it
+    /// by value says so without leaving a `cols` behind that no row is that wide.
+    pub(crate) fn into_rows(self) -> impl Iterator<Item = (Vec<Cell>, M)>
     where
         M: Default,
     {
-        let cols = self.cols;
-        let order = std::mem::take(&mut self.order);
-        let cells = std::mem::take(&mut self.cells);
-        let mut meta = std::mem::take(&mut self.meta);
-        order
-            .into_iter()
-            .map(|slot| {
-                let slot = slot as usize;
-                (
-                    cells[slot * cols..(slot + 1) * cols].to_vec(),
-                    std::mem::take(&mut meta[slot]),
-                )
-            })
-            .collect()
+        let Self {
+            cells,
+            mut meta,
+            order,
+            cols,
+        } = self;
+        order.into_iter().map(move |slot| {
+            let slot = slot as usize;
+            (
+                cells[slot * cols..(slot + 1) * cols].to_vec(),
+                std::mem::take(&mut meta[slot]),
+            )
+        })
     }
 
     /// Lay ROWS out as the grid, each COLS wide, in screen order.

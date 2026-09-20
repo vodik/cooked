@@ -740,9 +740,7 @@ impl State {
         cursor: Cursor,
     ) -> Vec<DamagedRow> {
         let (height, width) = (self.screen().height(), self.screen().width());
-        if !self.front.fits(height, width) {
-            self.front.reset(height, width);
-        }
+        self.front.ensure(height, width);
         if let Some(promotion) = promoted {
             self.front.shift(promotion);
         }

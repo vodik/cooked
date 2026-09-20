@@ -574,13 +574,13 @@ impl Screen {
     }
 
     pub fn row(&self, index: usize) -> Option<RowRef<'_>> {
-        let (cells, meta) = self.grid.row(index)?;
-        Some(RowRef::from_slices(cells, meta))
+        let row = self.grid.row(index)?;
+        Some(RowRef::from_slices(row.cells, row.meta))
     }
 
     fn row_mut(&mut self, index: usize) -> Option<RowMut<'_>> {
-        let (cells, meta) = self.grid.row_mut(index)?;
-        Some(RowMut::from_slices(cells, meta))
+        let row = self.grid.row_mut(index)?;
+        Some(RowMut::from_slices(row.cells, row.meta))
     }
 
     pub fn rows(&self) -> impl Iterator<Item = RowRef<'_>> {
@@ -590,9 +590,8 @@ impl Screen {
     /// Every row, top to bottom, as owned rows, leaving the grid empty -- for a resize,
     /// which lays the rows out again and stores them back with [`Screen::store_rows`].
     fn take_rows(&mut self) -> Vec<Row> {
-        self.grid
-            .take_rows()
-            .into_iter()
+        std::mem::take(&mut self.grid)
+            .into_rows()
             .map(|(cells, meta)| Row::from_meta(cells, meta))
             .collect()
     }

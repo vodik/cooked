@@ -82,15 +82,14 @@ pub(super) struct Front {
 }
 
 impl Front {
-    /// Whether this copy has the shape of a ROWS by COLS screen.
-    pub(super) fn fits(&self, rows: usize, cols: usize) -> bool {
-        self.grid.height() == rows && self.grid.width() == cols
-    }
-
-    /// Take the shape of a ROWS by COLS screen, knowing nothing about any of it.
-    pub(super) fn reset(&mut self, rows: usize, cols: usize) {
-        self.grid.reset(rows, cols);
-        self.unpromote(0);
+    /// Take the shape of a ROWS by COLS screen, knowing nothing about any of it unless it
+    /// already had that shape, where every row is kept.
+    ///
+    /// The promotion needs nothing here even when the shape changed and every row went
+    /// with it: this is only ever reached from a drain, which has already taken the
+    /// promotion for the delta it is building, so there is no prefix left to cut short.
+    pub(super) fn ensure(&mut self, rows: usize, cols: usize) {
+        self.grid.ensure(rows, cols);
     }
 
     /// Stop claiming to know the rows from FIRST down.
@@ -280,9 +279,10 @@ impl Front {
     /// Whether ROW, rendered with the cursor at CURSOR, is what Emacs already shows at
     /// INDEX.
     pub(super) fn matches(&self, index: usize, row: RowRef<'_>, cursor: Option<u16>) -> bool {
-        let Some((cells, known)) = self.grid.row(index) else {
+        let Some(row_shown) = self.grid.row(index) else {
             return false;
         };
+        let (cells, known) = (row_shown.cells, row_shown.meta);
         // The cursor question last: it walks the row looking for a glyph run around the
         // cursor, and a row whose cells changed has already answered no. A line just
         // scrolled into a region holds blanks in the copy, so asking it first walked
@@ -324,7 +324,8 @@ impl Front {
         cursor: Option<u16>,
         seam: bool,
     ) -> Option<Span> {
-        let (old, known) = self.grid.row(index)?;
+        let old_row = self.grid.row(index)?;
+        let (old, known) = (old_row.cells, old_row.meta);
         let cols = self.grid.width();
         if !known.known || seam || row.len() != cols {
             return None;
@@ -462,7 +463,8 @@ impl Front {
 
     /// Row INDEX's cells and record in the copy, which every caller has already found.
     fn row(&self, index: usize) -> (&[Cell], &Known) {
-        self.grid.row(index).expect("a row the copy has")
+        let row = self.grid.row(index).expect("a row the copy has");
+        (row.cells, row.meta)
     }
 
     /// Row INDEX's record in the copy, to write to; likewise.
@@ -473,9 +475,10 @@ impl Front {
     /// Note that Emacs now shows ROW at INDEX, rendered with the cursor at CURSOR.
     pub(super) fn record(&mut self, index: usize, row: RowRef<'_>, cursor: Option<u16>) {
         let cols = self.grid.width();
-        let (Some((cells, known)), true) = (self.grid.row_mut(index), row.len() == cols) else {
+        let (Some(front), true) = (self.grid.row_mut(index), row.len() == cols) else {
             return;
         };
+        let (cells, known) = (front.cells, front.meta);
         cells.copy_from_slice(row.cells());
         known.known = true;
         known.trimmed = false;
