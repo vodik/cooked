@@ -860,7 +860,17 @@ cooked-mode.el puts `cooked--refresh-keymap' on it.")
 
 (defun cooked--request-refresh ()
   "Have this buffer's keymap and input mode derived again.
-See `cooked--refresh-hook'."
+
+Also drops `cooked--foreground-name', the cache behind
+`cooked--foreground-program'.  Every reason to refresh is a reason the
+foreground process might have changed what it answers to `process-attributes'
+without changing its pid -- a shell's `exec' into the program it just read a
+command line for is the ordinary case, and it leaves the pid exactly as it was
+before and after.  A cache that only watches the pid would go on believing the
+shell's name through that, and never learn otherwise: nothing else invalidates
+it, and nothing else calls `cooked--request-refresh' either.  See
+`cooked--refresh-hook'."
+  (setq cooked--foreground-name nil)
   (run-hooks 'cooked--refresh-hook))
 
 (defcustom cooked-rejoin-wrapped-lines t
@@ -956,7 +966,11 @@ the reader and the narrowing all arrived together."
 
 (defvar-local cooked--foreground-name nil
   "Cached (PID . NAME) for the child's foreground process group.
-`process-attributes' is not free, and the pid is what says whether it is stale.")
+
+`process-attributes' is not free, so this is read again only when the pid
+changes or `cooked--request-refresh' drops it -- a pid alone is not enough to
+answer for a program's name, since `exec' can change what a still-live pid
+answers to `process-attributes' without changing the pid itself.")
 
 (defun cooked--foreground-program ()
   "Name of the program in the child's foreground process group, or nil.

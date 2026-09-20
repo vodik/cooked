@@ -468,7 +468,19 @@ being typed will be read by.
 `sleep' rather than a full-screen program on purpose.  It leaves the tty
 canonical, so cooked reads it as `edit' -- correctly, it is a line being edited
 -- and that is exactly the case the state word alone cannot distinguish from a
-shell prompt."
+shell prompt.
+
+`cooked--foreground-label' is only ever refreshed from an event -- see its own
+docstring -- and the `C' mark that starts a command is emitted by zsh's
+`preexec', which runs *before* the shell forks and hands the tty to the new
+job.  So the refresh that event triggers can land either side of the tty's
+foreground process group actually becoming `sleep''s: racing `tcgetpgrp'
+against the fork is exactly the flaw, and waiting for another mark to arrive
+does not resolve it, because `sleep' prints nothing and sends none.  So this
+polls `cooked--update-foreground-label' directly rather than trusting that one
+event's worth of refresh -- the condition being waited for is the tty's actual
+foreground process group, not a proxy for it that can go stale before the
+condition is even true."
   :tags '(zsh)
   (skip-unless (executable-find "zsh"))
   (cooked-tests--with-zsh
@@ -482,8 +494,10 @@ shell prompt."
     (goto-char cooked--input-end)
     (insert "sleep 20")
     (cooked-send-input)
-    (should (cooked-tests--settle (lambda () cooked--foreground-label)))
-    (cooked--refresh-keymap)
+    (should (cooked-tests--settle
+             (lambda ()
+               (cooked--update-foreground-label)
+               cooked--foreground-label)))
     (should (equal cooked--foreground-label "sleep"))
     (should (string-search "sleep" (cooked--mode-line)))))
 
@@ -4111,6 +4125,43 @@ now answers it once, on the same events that rebuild the override map, and
                       (apply applies args))))
           (dotimes (_ 5) (should (eq (cooked--assumed-key-protocol) 'kitty)))
           (should (= calls 0)))))))
+
+(ert-deftest cooked-foreground-program-notices-an-exec-that-keeps-the-pid ()
+  "`cooked--foreground-name' used to cache `(PID . NAME)' and trust NAME for as
+long as PID did not change -- but a live pid can answer a different `comm'
+later: `exec' replaces a process' program without giving it a new pid, so a
+launcher script that is asked what it is running before it `exec's into the
+real program answers with the launcher's name, and a cache keyed on the pid
+alone has no reason ever to ask again.
+
+This is deterministic where the sibling test named below is flaky, because that
+test infers a moment before the `exec' from output racing the child's own
+progress, while this one holds the child at a `read' until told to proceed.
+There the second, correct answer arrives on the mode change `stty raw' makes
+once the negotiation script gets around to it; here it is asked for directly,
+since nothing in this reduced script changes any state
+`cooked--request-refresh' is already wired to.  See
+`cooked-key-protocol-override-yields-to-a-real-negotiation'."
+  (cooked-tests--with-session '("/bin/sh" "-c" "read _ && exec cat")
+    ;; Still the shell: ask now, before anything hands the foreground to `cat',
+    ;; so a caching bug has something wrong to remember.
+    (should (cooked-tests--settle
+             (lambda () (equal (cooked--foreground-program) "sh"))))
+    (cooked--send-to-child "go\n")
+    ;; Wait on the real state, read straight from the OS rather than through
+    ;; the cache under test, so this does not just wait for the bug's own
+    ;; answer to stop changing.
+    (should (cooked-tests--settle
+             (lambda ()
+               (equal (alist-get 'comm
+                                  (process-attributes
+                                   (cooked--foreground-pid cooked--session)))
+                      "cat"))))
+    ;; The event a real session would have gotten from `cat' changing the tty's
+    ;; mode, a mark arriving, or the alternate screen moving -- any of the
+    ;; transitions `cooked--request-refresh' exists for.
+    (cooked--request-refresh)
+    (should (equal (cooked--foreground-program) "cat"))))
 
 (ert-deftest cooked-key-protocol-override-yields-to-a-real-negotiation ()
   "A guess about what a program probably wants is never trusted over what it
