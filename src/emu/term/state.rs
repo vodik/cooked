@@ -362,6 +362,18 @@ impl State {
     /// Emacs' own text is not marked, and that is the point of the design rather than an
     /// omission: `cooked--render-link-spans' resolves an id to its URI as the text is
     /// inserted, so scrollback holds destinations and no id outlives the grids.
+    ///
+    /// `pending_scrollback` *is* marked, and it earns its place: `pending_links` only
+    /// covers a link from the drain it is opened in to the drain that announces it, and
+    /// `front` only covers a row from the drain that shows it onward. A link opened with
+    /// nothing written under it yet is announced -- and dropped from `pending_links` --
+    /// on the very next drain, whether or not anything was ever printed with it; if the
+    /// child prints under it only after that drain, and the row scrolls off before a
+    /// later one, the row reaches `pending_scrollback` having *never* been part of
+    /// `front` at all, and `pending_links` has already forgotten it. See
+    /// `a_link_only_ever_seen_in_scrollback_survives_a_collection_pressed_by_a_new_one`
+    /// in `term::tests::collect` for exactly that sequence, constructed by hand: with
+    /// this mark removed it reuses the id for a different destination.
     pub(super) fn collect_links(&mut self) {
         let Self {
             screens,

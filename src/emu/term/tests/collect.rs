@@ -120,3 +120,69 @@ fn a_hyperlink_flood_keeps_the_table_within_its_bound() {
         t.links_held()
     );
 }
+
+/// The sequence `State::collect_links`' `pending_scrollback` mark exists for.
+///
+/// `pending_links` only covers a link between the drain that opens it and the drain
+/// that announces it, and `front` only covers a row from the drain that first shows it
+/// onward -- neither covers a row that is *never* part of any drain before it scrolls
+/// off. That is reachable: open the link with nothing printed under it yet, drain (which
+/// announces the link -- it needed nothing written to become non-fresh -- while the
+/// still-blank row makes no difference for `front` to pick up), then print under the
+/// still-open pen link and scroll the row off before draining again. The row reaches
+/// `pending_scrollback` having never been part of any drain that could have put it in
+/// `front`, and its link left `pending_links` on the drain before it existed.
+///
+/// A link limit of one makes the second destination collect before it is interned. If
+/// `pending_scrollback` were not marked, the collection would find nothing live, free
+/// the first id, and -- being the only entry on a limit-of-one free list -- hand it
+/// straight back out to the second destination.
+#[test]
+fn a_link_only_ever_seen_in_scrollback_survives_a_collection_pressed_by_a_new_one() {
+    let mut t = Term::with_id_limits(2, 20, 4096, 1);
+
+    // The link is opened, and nothing is printed under it before this drain: the row is
+    // still blank, so `front` picks up nothing new, but the link is no longer fresh --
+    // `pending_links` will not mark it again after this.
+    t.feed(b"\x1b]8;;https://first.example/\x1b\\");
+    let first = t.drain();
+    let first_id = first
+        .links
+        .iter()
+        .find(|(_, uri)| uri == "https://first.example/")
+        .map(|(id, _)| *id)
+        .expect("announced on this drain, even though nothing is printed under it yet");
+
+    // Now "here" is printed under the pen's still-open link (it carries across the
+    // drain, the way it carries across a newline) and the row scrolls off -- two rows
+    // down on a two-row grid -- before anything is drained again. `front` never saw this
+    // row; `pending_links` forgot the link a drain ago.
+    t.feed(b"here\x1b]8;;\x1b\\\r\n\r\n");
+
+    // The second destination presses a collection before it is interned.
+    t.feed(b"\x1b]8;;https://second.example/\x1b\\there\x1b]8;;\x1b\\");
+
+    let second = t.drain();
+    let second_id = second
+        .links
+        .iter()
+        .find(|(_, uri)| uri == "https://second.example/")
+        .map(|(id, _)| *id)
+        .expect("the second destination is announced once interned");
+    assert_ne!(
+        first_id, second_id,
+        "the row in pending_scrollback still names first_id, so the collection the \
+         second destination pressed must not have freed it"
+    );
+
+    let scrolled_link = second
+        .scrolled
+        .first()
+        .and_then(|row| row.runs.iter().find(|r| r.text == "here"))
+        .and_then(|run| run.link)
+        .expect("the archived row still carries its link");
+    assert_eq!(
+        scrolled_link, first_id,
+        "the row that scrolled off is exactly the one that was drained linked"
+    );
+}
