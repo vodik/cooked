@@ -437,6 +437,29 @@ layout window to move."
            (cooked--sync-size)
            ,@body)))))
 
+(ert-deftest cooked-a-chatty-title-does-not-walk-the-uniquifying-suffix ()
+  "A second session whose name is already taken keeps the <N> it was given.
+
+The name a template renders is not unique on its own, so two sessions in one
+directory share it and the later one carries a <2>.  Every title the child
+sets re-renders that same shared name, which differs from the buffer's own
+<2>, so the rename runs -- and it must land back on <2> rather than counting
+upwards once per tick, which is what the user sees in the buffer list."
+  (let ((cooked-buffer-name-auto-update t)
+        (cooked-buffer-name "*cooked: %p*"))
+    (with-temp-buffer
+      (cooked-mode)
+      (rename-buffer (cooked--format-buffer-name
+                      (abbreviate-file-name default-directory) "" ""))
+      (with-temp-buffer
+        (cooked-mode)
+        (rename-buffer (cooked--buffer-name))
+        (let ((taken (buffer-name)))
+          (should (string-suffix-p "<2>" taken))
+          (dotimes (i 5)
+            (cooked--set-title (format "tick %d" i))
+            (should (equal (buffer-name) taken))))))))
+
 (ert-deftest cooked-a-resize-request-resizes-the-window-once ()
   "`resize -s ROWS 0' under `window': the window moves, the child is told once.
 

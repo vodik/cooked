@@ -194,7 +194,11 @@ column is not the user's choice about buffer names."
                  cooked-title
                  (or cooked--host ""))))
       (unless (equal name (buffer-name))
-        (rename-buffer (generate-new-buffer-name name))))))
+        ;; `rename-buffer' with UNIQUE, not `generate-new-buffer-name': the
+        ;; latter counts this very buffer as an occupant, so a session already
+        ;; holding the name it is being renamed to gets a fresh <N> on every
+        ;; title update, and a chatty child walks the suffix upwards forever.
+        (rename-buffer name t)))))
 
 ;;;; OSC 9, 99 and 777 — notifications
 
