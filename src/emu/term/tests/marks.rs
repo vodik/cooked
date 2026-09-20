@@ -717,3 +717,62 @@ fn marks_on_the_alternate_screen_leave_the_modes_alone() {
     assert!(!mode_set(&t, 1002));
     assert!(!mode_set(&t, 2048));
 }
+
+/// REAL: found by the review3 split-brain probe (`cooked--clear-to-prompt` vs
+/// `cooked--prompt-start`; see FABEL.org, task "Check: two trackers of where the prompt
+/// is, and two statements of \"hidden\"").
+///
+/// `State::prompt_start` is an absolute row snapshot taken when `133;A` is parsed. It is
+/// corrected in two places only: [`State::remove_rows`] slides it down when rows above it
+/// are explicitly deleted, and [`State::archive`] leaves it alone but advances
+/// `evicted_total`, which is what the row is read relative to. A rewrap goes through
+/// neither: [`Screen::reflow`] rebuilds the live grid from the logical lines, and
+/// [`State::resize`] archives only the rows that overflowed off the top. A rewrap that
+/// changes how many rows the content *above* the prompt takes -- without evicting enough
+/// to compensate -- moves the prompt to a different live row while `prompt_start` and
+/// `evicted_total` both stand still, so `clear_to_prompt` computes the row from a mapping
+/// that no longer holds.
+///
+/// Lisp's own copy does not have this problem: `cooked--prompt-start` is a buffer marker
+/// keyed on the mark's id, and `State::take_marks`/`Delta::marks` report where that id's
+/// cell actually ended up after every rewrap (see `a_rewrap_reports_where_each_mark_moved_to`
+/// above) -- a completely different mechanism from the one `clear_to_prompt` reads. So a
+/// rewrap is exactly the case the ticket asked to construct: the two trackers name
+/// different rows.
+///
+/// Six rows at ten columns: two ten-character padding lines, then `133;A` and `PROMPT` on
+/// row 2 -- three rows of content, so `Screen::reflow`'s `used()` bound takes exactly
+/// these three logical lines into the rewrap. At five columns each line needs two rows,
+/// six in total, so the grid holds them all with nothing evicted: `evicted_total` never
+/// moves, and the divergence is not hidden behind the "no live prompt" fallback
+/// `clear_to_prompt` has for an evicted one (see `a_mark_evicted_by_a_rewrap_is_reported_in_the_batch`).
+#[test]
+#[ignore = "REAL: State::prompt_start is not corrected by a non-evicting rewrap -- \
+            see FABEL.org task \"Check: two trackers of where the prompt is...\""]
+fn a_non_evicting_rewrap_leaves_prompt_start_naming_the_wrong_row() {
+    let mut t = term(6, 10, b"0123456789\r\nabcdefghij\r\n\x1b]133;A\x07PROMPT");
+    t.drain();
+    assert_eq!(text(&t, 2), "PROMPT", "the prompt sits at grid row 2 before the resize");
+
+    // Narrower still holds the three logical lines exactly: two rows apiece, six in
+    // total, so nothing is evicted and `evicted_total` does not move.
+    t.resize(6, 5);
+    t.drain();
+    assert_eq!(
+        text(&t, 4) + &text(&t, 5),
+        "PROMPT",
+        "the prompt is really on rows 4 and 5 now, pushed down by the rewrapped padding"
+    );
+
+    let kept = t.clear_to_prompt();
+    assert_eq!(
+        kept, 4,
+        "clear_to_prompt should remove exactly the four rows above the real prompt"
+    );
+    assert_eq!(
+        text(&t, 0) + &text(&t, 1),
+        "PROMPT",
+        "the prompt should now be the top two rows of the grid"
+    );
+}
+

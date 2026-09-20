@@ -111,3 +111,36 @@ fn a_hidden_buffer_is_woken_only_for_events_and_a_filling_backlog() {
     assert!(!t.feed_hidden(b"\r\n\r\n\r\n\r\n", 10));
     assert!(t.feed_hidden(b"\r\n\r\n", 10));
 }
+
+/// NOT REAL: same probe as `a_non_evicting_rewrap_leaves_prompt_start_naming_the_wrong_row`
+/// (see marks.rs), question 3 -- whether a key can be wrongly forwarded or withheld
+/// between a program pushing kitty flags and the next drain.
+///
+/// A push (`CSI > flags u`) or a pop mutates the kitty stack directly and queues no
+/// [`Event`], so it neither sets [`Term::woken`]'s hidden branch (which only answers to
+/// an event or a filling backlog) nor forces [`Term::drain_hidden`] to go whole (which
+/// only happens for an [`Event::needs_text`]). So a session genuinely hidden -- no window
+/// anywhere, `Session::hidden` true, wakes suppressed at the notifier -- can hold a kitty
+/// flags change indefinitely without Emacs finding out.
+///
+/// That is safe rather than a bug: nothing can type a key into a buffer with no window,
+/// and `cooked--sync-before-redisplay` forces a whole drain, which is what actually
+/// refreshes Lisp's `cooked--kitty-flags` copy, before the window is redrawn -- see
+/// `cooked-showing-a-hidden-buffer-catches-it-up-before-it-is-drawn` in
+/// tests/cooked-tests-session.el. This test pins the Rust half of that story: the flags
+/// really do go unreported while hidden, so the Lisp-side catch-up is load-bearing and
+/// not merely defensive.
+#[test]
+fn a_kitty_flags_push_neither_wakes_a_hidden_session_nor_forces_a_whole_drain() {
+    let mut t = term(3, 10, b"");
+    t.drain();
+    assert!(
+        !t.feed_hidden(b"\x1b[>1u", 10),
+        "a kitty flags push queues no event and should not wake a hidden session"
+    );
+    assert_eq!(t.kitty_flags().bits(), 1);
+    assert!(
+        t.drain_hidden().withheld,
+        "with no event needing the screen's text, the drain should still be withheld"
+    );
+}
