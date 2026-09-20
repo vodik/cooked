@@ -131,7 +131,7 @@ command that writes to a child was offered as though one were listening."
   "The other half of the same claim, and the one no fixture can fake: a real
 shell at a real prompt, where every one of these is exactly what the menu
 should be offering."
-  :tags '(zsh)
+  :tags '(zsh pty)
   (skip-unless (executable-find "zsh"))
   (cooked-tests--with-zsh
     (dolist (name '("Send Input" "Insert Newline" "Previous Input"

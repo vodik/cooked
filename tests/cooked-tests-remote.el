@@ -58,6 +58,7 @@ jump's login shell, and `exec' so that nothing waits on jump."
 So is a host holding TRAMP punctuation, which is how a%7Csudo arrives from a
 hostile OSC 7 report.  The refusal is a message and nil, and the session then
 starts on this machine."
+  :tags '(pty)
   (dolist (case '(("/ssh:box.example|sudo:box.example:/etc/" . "sudo")
                   ("/ssh:a%7Cb:/" . "a%7Cb")))
     (let ((messages nil))
@@ -212,7 +213,7 @@ host has no entry of its own; and the variables ssh does not forward exported.
 `default-directory' stays the TRAMP name, and the OSC 7 the spawn sends reports
 the far host by its own name, far-host-1, which is kept as that connection's
 name rather than turned into a prefix of its own."
-  :tags '(infocmp)
+  :tags '(infocmp pty)
   (skip-unless (and (executable-find "infocmp") (equal (cooked--terminfo) cooked-term-name)))
   (cooked-tests--with-fake-ssh (log far)
     (let* ((name (concat "/ssh:jump.invalid|ssh:me@box.invalid#2222:" far))
@@ -242,6 +243,7 @@ name rather than turned into a prefix of its own."
 The public entry point goes through `cooked--start-session', so a program named
 by its argv, (\"sh\" \"-c\" SCRIPT) here, is started on the far host in the
 directory rather than refused or run locally."
+  :tags '(pty)
   (skip-unless (equal (cooked--terminfo) cooked-term-name))
   (cooked-tests--with-fake-ssh (log far)
     (require 'tramp)
@@ -263,6 +265,7 @@ directory rather than refused or run locally."
 
 That is a host whose ncurses is older than 6.1, where the inline entry would
 leave TERM naming nothing, and TERMINFO is unset again so it does not linger."
+  :tags '(pty)
   (skip-unless (equal (cooked--terminfo) cooked-term-name))
   (cooked-tests--with-fake-ssh (_log far :infocmp fail)
     (let ((buffer (cooked-tests--start-remote
@@ -280,7 +283,7 @@ leave TERM naming nothing, and TERMINFO is unset again so it does not linger."
 fish reads backslash quoting as sh does, which is the assumption
 `cooked--remote-invocation' makes, and it does not read a quoted newline as sh
 does, which is why the script is joined with semicolons."
-  :tags '(fish)
+  :tags '(fish pty)
   (skip-unless (executable-find "fish"))
   (cooked-tests--with-fake-ssh (_log far :login (executable-find "fish"))
     (let ((buffer (cooked-tests--start-remote

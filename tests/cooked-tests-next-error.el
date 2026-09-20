@@ -35,6 +35,7 @@ output to genuinely scroll off the live screen and settle into protected
 scrollback takes either a full screen of *further* output or real wall-clock
 time (`cooked--render-scrolled' only protects a row once it is actually
 evicted from the grid), neither of which this is about testing."
+  :tags '(pty)
   (let ((one (cooked-tests-next-error--file-with-lines 5))
         (two (cooked-tests-next-error--file-with-lines 10)))
     (unwind-protect
@@ -84,7 +85,7 @@ evicted from the grid), neither of which this is about testing."
 target -- the region compiled.el itself assumes it can parse start..end of.
 `cooked-next-error-function' refuses instead, the same way
 `compilation-next-error-function' does when there is nothing to move to."
-  :tags '(zsh)
+  :tags '(zsh pty)
   (skip-unless (executable-find "zsh"))
   (cooked-tests--with-zsh
     (cooked--replace-input "sleep 5")
@@ -99,7 +100,7 @@ target -- the region compiled.el itself assumes it can parse start..end of.
 still rewrite the row it sits in.  `cooked-next-error-function' clamps the
 parse to the scrollback prefix rather than trusting the live tail, so a
 command whose whole output is still live offers nothing to find yet."
-  :tags '(zsh)
+  :tags '(zsh pty)
   (skip-unless (executable-find "zsh"))
   (let ((file (make-temp-file "cooked-next-error-live")))
     (unwind-protect
@@ -126,7 +127,7 @@ command whose whole output is still live offers nothing to find yet."
 The file name is padded so that `FILE:1' fills the row exactly and `2:3:
 error' starts the next.  Left split, the second row parses as an error in a
 file with no name, and visiting it asks where that file is."
-  :tags '(zsh)
+  :tags '(zsh pty)
   (skip-unless (executable-find "zsh"))
   (let ((dir (make-temp-file "cooked-next-error-wrap" t)))
     (unwind-protect

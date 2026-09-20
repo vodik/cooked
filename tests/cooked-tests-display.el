@@ -492,6 +492,7 @@ window showing the buffer, not the frame, which is the only way this hook is
 ever called in a session.  `display-graphic-p' signals on a window rather than
 coercing it, so the case that has to work is the one the code was never asked
 about."
+  :tags '(pty)
   (with-temp-buffer
     (cooked-mode)
     (cooked-tests--display-buffer)
@@ -544,6 +545,7 @@ went unnoticed until a user read `*Messages*'.
 
 A real tty frame, because that is where redisplay runs in batch and where
 `display-graphic-p' has a real answer to give."
+  :tags '(pty)
   (cooked-tests--with-tty-frame
     (with-temp-buffer
       (cooked-mode)
@@ -592,6 +594,7 @@ leave a shell behind per jump.
 
 The failure is the directory being gone, and it is said out loud rather than
 papered over by starting a shell somewhere else."
+  :tags '(pty)
   (cooked-tests--with-session (list "/bin/sh")
     (should (cooked-tests--settle (lambda () (cooked--live-p cooked--session))))
     (let ((record (cooked--bookmark-record))
@@ -613,6 +616,7 @@ running build missed the shell already standing there whenever a file landed
 between its two looks, and the consult test asking about /tmp failed under the
 load of other programs using /tmp.  Here the directory's time moves after every
 look, which is that race made to happen each time."
+  :tags '(pty)
   (let ((directory (file-name-as-directory (make-temp-file "cooked-busy" t)))
         (looks 0))
     (unwind-protect
@@ -645,6 +649,7 @@ So this asserts the absence, and reads the saved file back with `read' rather
 than searching it for a string -- the suite has buffers with cooked in their
 file names, and the claim is about a buffer being restored in `cooked-mode'
 and not about the letters."
+  :tags '(pty)
   (cooked-tests--with-session (list "/bin/sh")
     (should (cooked-tests--settle (lambda () (cooked--live-p cooked--session))))
     (should-not desktop-save-buffer)

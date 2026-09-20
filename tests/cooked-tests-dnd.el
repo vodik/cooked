@@ -191,6 +191,7 @@ the argument is (TYPE OPERATIONS . OBJECTS), with TYPE `file' for Finder files,
 `url' for a URL and nil for text, and the bare symbol `lambda' while the drag
 is only moving.  The old handler looped over the argument as a list of names,
 so the symbol `file' went to `shell-quote-argument' and signalled."
+  :tags '(pty)
   (cooked-tests--with-dnd-session
     (should (eq (key-binding [mode-line drag-n-drop]) #'cooked-dnd-drop))
     (cooked-dnd-drop (cooked-tests--drop-event
@@ -225,6 +226,7 @@ so the symbol `file' went to `shell-quote-argument' and signalled."
 Those are the three shapes `w32-drag-n-drop' in term/w32-win.el tells apart,
 and w32term.c builds from WM_EMACS_DROP and WM_EMACS_DRAGOVER.  The old handler
 took `car' of the string and signalled."
+  :tags '(pty)
   (cooked-tests--with-dnd-session
     (cooked-dnd-drop (cooked-tests--drop-event 'header-line "some text"))
     (should (equal pasted '("some text")))
@@ -243,6 +245,7 @@ and hand them to `dnd-handle-multiple-urls' in the drop window, which reads
 that buffer's `dnd-protocol-alist'.  Neither port file loads on this machine,
 so the test starts at that shared last step.  With the plain event unbound in
 `cooked-dnd-map', the global handler is the one that runs."
+  :tags '(pty)
   (cooked-tests--with-dnd-session
     (should-not (eq (key-binding [drag-n-drop]) #'cooked-dnd-drop))
     (let ((file (make-temp-file "cooked-dnd")))
@@ -258,6 +261,7 @@ so the test starts at that shared last step.  With the plain event unbound in
 
 Pasting it to the child instead typed it underneath the line Emacs shows, and
 RET then submitted both."
+  :tags '(pty)
   (cooked-tests--with-session '("/bin/sh" "-c" "printf '$ '; cat")
     (should (cooked-tests--settle
              (lambda () (and (cooked--input-state-p) (cooked--input-start-position)))))
@@ -273,6 +277,7 @@ RET then submitted both."
 
 (ert-deftest cooked-dnd-opens-the-file-once-the-child-has-exited ()
   "With no child to type to, a drop visits the file as it would elsewhere."
+  :tags '(pty)
   (cooked-tests--with-session '("/bin/sh" "-c" "exit 0")
     (should (cooked-tests--settle (lambda () (not (cooked--live-session)))))
     (cooked-dnd-setup)
@@ -293,6 +298,7 @@ RET then submitted both."
 `temporary-file-directory', which is always local, so a remote shell was handed
 a /tmp path that did not exist on its host.  The function of that name answers
 for `default-directory', and the write goes through the TRAMP handler."
+  :tags '(pty)
   (cooked-tests--with-mock-tramp remote
     ;; The option is left at its default, which is the thing under test.
     (let ((default-directory remote)

@@ -88,6 +88,7 @@ and a child told `TERM=dumb' emits no escape sequences at all however wide
 its terminal is.
 
 So the assertion is the geometry and the name, not the tty."
+  :tags '(pty)
   (let ((cooked-process-rows 8)
         (cooked-process-columns 120))
     (cooked-tests-process--with
@@ -111,6 +112,7 @@ The cursor is asked for beside the background, and it is the interesting one: a
 compilation buffer has no cursor of its own, so the answer is the frame's --
 `cooked-process-start' pushes it with the rest, and a build tool that asks is
 answered rather than left waiting out its timeout."
+  :tags '(pty)
   (cooked-tests-process--with
       (concat "stty -icanon -echo min 0 time 10; "
               "printf '\\033]11;?\\033\\\\\\033]12;?\\033\\\\\\033[c'; cat | tr '\\033' E; "
@@ -128,6 +130,7 @@ answered rather than left waiting out its timeout."
 The point being that the emulator is not a filter with opinions: two hundred
 ordinary lines are the same two hundred lines a pipe would have delivered, and
 anything else here would be a regression in the only case that is common."
+  :tags '(pty)
   (let ((command "for i in $(seq 1 200); do echo \"line $i of plain output\"; done"))
     (let ((piped (let ((compilation-ask-about-save nil)
                        (compilation-in-progress nil)
@@ -149,6 +152,7 @@ Emacs gets this case right already -- `comint-carriage-motion' runs from
 which is worth having precisely because it is the common shape.  Where the two
 part company is `cooked-process-overwrites-rather-than-deleting-on-return':
 comint deletes to the start of the line and a terminal overwrites."
+  :tags '(pty)
   (cooked-tests-process--with
       "for i in 1 2 3; do printf 'Building [%s]\\r' $i; done; printf '\\ndone\\n'"
     (should (equal (cooked-tests-process--body) "Building [3]\ndone"))))
@@ -162,6 +166,7 @@ right approximation for a meter, which reprints its whole line every time, and
 the wrong one whenever the second write is shorter than the first: the tail of
 the earlier text is still on the screen of any real terminal, and comint has
 thrown it away.  Measured on the stock path, the line below arrives as `XYZ'."
+  :tags '(pty)
   (cooked-tests-process--with "printf 'abcdefghij\\rXYZ\\n'"
     (should (equal (cooked-tests-process--body) "XYZdefghij"))))
 
@@ -177,6 +182,7 @@ is holding it.
 The erase here is issued after the cursor has been moved back over the stale
 tail, which is how a program that reprints a shorter line keeps the screen
 honest -- and is what cargo does before each real log line."
+  :tags '(pty)
   (cooked-tests-process--with "printf 'stale tail here\\rshort\\033[K\\n'"
     (should (equal (cooked-tests-process--body) "short"))))
 
@@ -186,6 +192,7 @@ honest -- and is what cargo does before each real log line."
 The two halves of one claim, and this is the half a `compilation-mode' regexp
 depends on: whatever the child said about colour, what a regexp scans is
 `error: red' and not an escape sequence with `error' somewhere inside it."
+  :tags '(pty)
   (cooked-tests-process--with "printf '\\033[31merror\\033[0m: red\\n'"
     (should (equal (cooked-tests-process--body) "error: red"))))
 
@@ -214,6 +221,7 @@ The point of the pty, half of it anyway: cargo prints a green `Compiling' and
 a red `error' only when `isatty' says yes, so a file that arranges to be told
 them and then drops them would have paid for the terminal and kept the
 receipt."
+  :tags '(pty)
   (cooked-tests-process--with
       "printf '\\033[1;31merror\\033[0m\\033[1m: mismatched types\\033[0m\\n'"
     (should (equal (cooked-tests-process--body) "error: mismatched types"))
@@ -234,6 +242,7 @@ receipt."
 row 0 separately, so it is a second path to the consumer's filter and the one a
 short build takes for *all* of its output.  A styled line that never scrolled
 is what tells the two apart."
+  :tags '(pty)
   (let ((cooked-process-rows 8))
     (cooked-tests-process--with "printf '\\033[32mok\\033[0m\\n'"
       (should (equal (cooked-tests-process--body) "ok"))
@@ -247,6 +256,7 @@ is what tells the two apart."
 where nothing ever scrolls and the flush at exit is the only path to the
 consumer.  It is also where that flush's shrink to a single row changes no
 dimension at all, so it is worth one test of its own."
+  :tags '(pty)
   (let ((cooked-process-rows 1))
     (cooked-tests-process--with "printf 'the only line'"
       (should (equal (cooked-tests-process--body) "the only line")))))
@@ -258,6 +268,7 @@ The tail is read from the core as one block in the shape `:scrolled' arrives in,
 so it carries the child's renditions exactly as retired text does.  Asserted
 because `equal' on strings ignores text properties: every other assertion about
 the tail here would hold just as well for a tail that had lost its colours."
+  :tags '(pty)
   (cooked-tests-process--while
       "printf '\\033[32mBuilding [==>]\\033[0m\\r'; sleep 30"
     (should (cooked-tests--settle
@@ -274,6 +285,7 @@ the tail here would hold just as well for a tail that had lost its colours."
 Asserted because the option is the escape hatch for a consumer that would
 rather own the `face' property itself, and an escape hatch nothing tests is a
 claim rather than a feature."
+  :tags '(pty)
   (let ((cooked-process-styled nil))
     (cooked-tests-process--with "printf '\\033[31merror\\033[0m: red\\n'"
       (should (equal (cooked-tests-process--body) "error: red"))
@@ -297,6 +309,7 @@ the rest is what `cooked-link--propertize' already puts on a span in a
 `cooked-mode' buffer: the destination as `cooked-link-uri', the highlight, the
 keymap that answers `RET' and `mouse-2', and a `help-echo' that reads it
 straight off the text rather than off any state of the buffer it landed in."
+  :tags '(pty)
   (cooked-tests-process--with
       "printf 'see \\033]8;;https://example.com/\\033\\\\here\\033]8;;\\033\\\\ ok\\n'"
     (should (equal (cooked-tests-process--body) "see here ok"))
@@ -319,6 +332,7 @@ the same one, reached because the keymap travelled with the text.  The opener
 itself is mocked rather than actually browsed, the same way
 `cooked-a-link-follows-when-no-layer-claims-the-input' in cooked-tests-link.el
 checks it."
+  :tags '(pty)
   (cooked-tests-process--with
       "printf 'go \\033]8;;https://example.com/\\033\\\\there\\033]8;;\\033\\\\\\n'"
     (goto-char (cooked-tests-process--link-at "there"))
@@ -353,6 +367,7 @@ assuming `cooked-mode's, which is the fix this guards."
 The switch is documented as turning off colour; this is the check that it
 turns off the whole rendering path `cooked-process--text' takes, links
 included, rather than leaving a `keymap' and no visible affordance behind."
+  :tags '(pty)
   (let ((cooked-process-styled nil))
     (cooked-tests-process--with
         "printf 'see \\033]8;;https://example.com/\\033\\\\here\\033]8;;\\033\\\\ ok\\n'"
@@ -374,6 +389,7 @@ included, rather than leaving a `keymap' and no visible affordance behind."
 location loses the tug of war on purpose: the destination survives, because
 `cooked-link-uri' is not a property compilation-mode knows to touch, but
 `RET' there jumps to the error rather than opening the link."
+  :tags '(pty)
   (let ((file (make-temp-file "cooked-process-link-error" nil ".c")))
     (with-temp-file file (dotimes (_ 20) (insert "\n")))
     (unwind-protect
@@ -400,6 +416,7 @@ location loses the tug of war on purpose: the destination survives, because
 becomes: point cannot land inside an `after-string', only before or after it,
 so a `RET' bound there could never be reached, and this file would rather show
 no link than one only `mouse-2' can follow.  See `cooked-process--text'."
+  :tags '(pty)
   (cooked-tests-process--while
       "printf '\\033]8;;https://example.com/\\033\\\\link\\033]8;;\\033\\\\'; sleep 30"
     (should (cooked-tests--settle
@@ -417,6 +434,7 @@ no link than one only `mouse-2' can follow.  See `cooked-process--text'."
 This is the case a pty makes worse before it makes it better.  Giving the
 child a terminal is what makes it wrap at all; rejoining is what stops that
 from putting a newline through the middle of `error:'."
+  :tags '(pty)
   (let ((cooked-process-columns 40))
     (cooked-tests-process--with
         "printf 'src/main.rs:12:5: error: a message far wider than the terminal is\\n'; exit 1"
@@ -430,6 +448,7 @@ Retirement is scrolling, so a child printing fewer lines than
 `cooked-process-rows' retires nothing at all while it runs.  The flush at exit
 is the whole of what makes that case work, and a build's error summary is
 exactly the text it covers."
+  :tags '(pty)
   (let ((cooked-process-rows 8))
     (cooked-tests-process--with "echo one; echo two"
       (should (equal (cooked-tests-process--body) "one\ntwo")))))
@@ -442,6 +461,7 @@ by hand.  This one is a `compilation-mode' buffer throughout, and the error
 reaches `compilation-filter' as text: `compilation-start' arms the jump and the
 parse takes it.  Both ways an error arrives are checked, a line that scrolled
 off the grid while the child ran and a line only the flush at exit hands over."
+  :tags '(pty)
   (let ((file (make-temp-file "cooked-process-jump" nil ".c"))
         (compilation-auto-jump-to-first-error t))
     (with-temp-file file (dotimes (_ 20) (insert "\n")))
@@ -494,6 +514,7 @@ The case retirement cannot serve and never will: cargo rewrites one row with a
 carriage return and erases it before every real log line, so at the instant
 that row scrolls it is blank.  The bar exists only on the live grid, which is
 why there is something here that reads it from there."
+  :tags '(pty)
   (cooked-tests-process--while
       "printf 'Building [   ]\\r'; printf 'Building [==>]\\r'; sleep 30"
     (should (string-match-p "Building \\[==>\\]" (or (cooked-tests-process--tail) "")))))
@@ -503,6 +524,7 @@ why there is something here that reads it from there."
 
 The core sends the changed character alone, as an edit of the row it last sent,
 and the tail's copy of the row has to take the edit at the right offset."
+  :tags '(pty)
   (cooked-tests-process--while
       "printf 'working | done'; sleep 0.3; printf '\\033[9G/'; sleep 30"
     (should (cooked-tests--settle
@@ -515,6 +537,7 @@ and the tail's copy of the row has to take the edit at the right offset."
 The rows keep their text as they rise, and the blank row the scroll opens at
 the bottom is not sent either; left unmoved, the tail would show every row one
 line out of date and the last one twice."
+  :tags '(pty)
   (let ((cooked-process-rows 3))
     (cooked-tests-process--while
         "printf 'a\\nb\\nc'; sleep 0.3; printf '\\nd'; sleep 30"
@@ -528,6 +551,7 @@ line out of date and the last one twice."
 The whole reason it is allowed to exist in a foreign consumer's buffer: a
 `compilation-mode' regexp scanning for a diagnostic must not match a frame of
 a progress bar, and `next-error' must not be able to land in one."
+  :tags '(pty)
   (cooked-tests-process--while
       "printf 'src/main.rs:1:1: error: half-drawn\\r'; sleep 30"
     (should (cooked-tests-process--tail))
@@ -542,6 +566,7 @@ zero and a newline of the tail's own is a blank line sitting between the
 output and the bar -- for the length of the build, the tail being replaced
 rather than moved.  Nine rows against a grid of eight, so something has
 certainly retired by the time the tail is read."
+  :tags '(pty)
   (let ((cooked-process-rows 8))
     (cooked-tests-process--while
         "for i in $(seq 1 9); do echo \"line $i\"; done; printf 'Building [==>]\\r'; sleep 30"
@@ -566,6 +591,7 @@ continuation is still live.  Asserted unconditionally for that reason.  Guarding
 the assertion on the state having been reached is what the first version of this
 test did, and it passed against a line that wrapped only once and so never ended
 mid-line at all."
+  :tags '(pty)
   (let ((cooked-process-columns 40)
         (cooked-process-rows 2)
         (wide (concat (make-string 40 ?a) (make-string 40 ?b) (make-string 5 ?c))))
@@ -580,12 +606,14 @@ mid-line at all."
 Ordering, and the failure it rules out is a build ending with its last
 screenful shown twice -- once as the overlay's last frame and once as the
 residue the flush retires."
+  :tags '(pty)
   (cooked-tests-process--with "echo one; echo two"
     (should-not (cooked-tests-process--tail))
     (should (equal (cooked-tests-process--body) "one\ntwo"))))
 
 (ert-deftest cooked-process-tail-can-be-turned-off ()
   "With `cooked-process-live-tail' nil the buffer is only retired text."
+  :tags '(pty)
   (let ((cooked-process-live-tail nil))
     (cooked-tests-process--while
         "printf 'Building [==>]\\r'; sleep 30"
@@ -593,6 +621,7 @@ residue the flush retires."
 
 (ert-deftest cooked-process-reports-the-exit-code ()
   "The status is the child's, not a stand-in process's idea of one."
+  :tags '(pty)
   (cooked-tests-process--with "exit 3"
     (should (string-match-p "abnormally with code 3" (buffer-string)))))
 
@@ -608,6 +637,7 @@ the symbol reaches it only through a subr trampoline, and with
 sentinel reads `run' and ignores the exit.  Batch Emacs 31 with trampolines off
 left such a build annotated \"started\" and never finished, and
 `compilation-in-progress' holding a process that was already gone."
+  :tags '(pty)
   (let* ((status (symbol-function 'process-status))
          (code (symbol-function 'process-exit-status))
          (seen nil)
@@ -627,6 +657,7 @@ The stand-in is a shell reading a line, so a consumer that wrote to the object
 it was handed -- comint does, and nothing stops anyone else -- could otherwise
 make it leave with a status the child never had.  It answers to one line and
 drops every other."
+  :tags '(pty)
   (let ((cooked-process-mode nil)
         (compilation-ask-about-save nil)
         (compilation-in-progress nil)
@@ -649,6 +680,7 @@ drops every other."
 It deletes the process it is handed, and a deletion runs the sentinel again --
 so the naive arrangement annotates the buffer twice and the second annotation,
 being the pipe's own fictional exit, always says the build succeeded."
+  :tags '(pty)
   (cooked-tests-process--with "exit 1"
     (should (equal 1 (cl-count-if (lambda (line) (string-prefix-p "Compilation exited" line))
                                   (split-string (buffer-string) "\n"))))
@@ -660,6 +692,7 @@ being the pipe's own fictional exit, always says the build succeeded."
 
 Spelled out rather than written through the macro, which waits for the child
 to finish first -- and this child is chosen not to."
+  :tags '(pty)
   (let ((cooked-process-mode nil)
         (compilation-ask-about-save nil)
         (compilation-in-progress nil)
@@ -689,6 +722,7 @@ to finish first -- and this child is chosen not to."
 Nothing in Lisp needs evicting -- a headless session installs no keymap and no
 hook -- but the reader thread, the two pipes and the hidden host buffer all
 outlive the buffer unless something reaps them."
+  :tags '(pty)
   (let ((cooked-process-mode nil)
         (compilation-ask-about-save nil)
         (compilation-in-progress nil)

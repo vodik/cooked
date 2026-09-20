@@ -73,6 +73,20 @@
 ;; That is worth having because skipping is silent: on a machine without zsh,
 ;; fifty-odd tests skip and the run still says it passed.  Selecting them out
 ;; deliberately makes the absence a decision rather than a surprise.
+;;
+;; Two more tags are not dependencies and carry no `skip-unless': `pty' and
+;; `stress'.  `pty' marks a test whose outcome depends on a real child's
+;; behaviour or timing -- it spawned one through `cooked-tests--with-session' or
+;; a fixture built on it, and then waited on what that child actually sent back,
+;; rather than only needing a live session object to feed synthetic bytes into.
+;; That distinction is what makes it worth a tag at all: a test that starts a
+;; `sleep 5' child and asserts on `cooked--feed' output never touches real
+;; scheduling, so a busy machine cannot make it flaky, while a test that settles
+;; on what a real shell or a real `cat' actually echoed can.  `stress' marks a
+;; test that loops many times to hunt a race rather than to assert a single
+;; outcome -- `cooked-spawn-initial-state-beats-the-childs-first-probe', at two
+;; hundred spawns, is the one today.  `make lisp-test-quick' excludes both, along
+;; with `tmux'; `make lisp-test-stress' runs only the second.
 
 ;;; Code:
 
@@ -114,17 +128,25 @@
 ;; defined.  The cost is the load, which is a fraction of a second; the benefit
 ;; is that a per-file target cannot go stale as fixtures move between files.
 
-(defun cooked-tests-run-file (file)
+(defun cooked-tests-run-file (file &optional selector)
   "Run the tests defined in FILE and exit with their status.
 Truenames on both sides, because ERT stores the path the file was loaded from
 and a caller naming the same file through a symlink or a relative path is
-naming the same tests."
+naming the same tests.
+
+SELECTOR narrows the file's tests further, exactly as the top-level SELECTOR
+`make lisp-test' takes would; the default `t' keeps every test FILE defines.
+This is how `lisp-test-quick' gets the same per-file parallel split as
+`lisp-test-parallel': the tag exclusion and the file filter are both plain
+ERT selectors, and `and' combines them without either target's Makefile
+recipe needing to know the other exists."
   (let ((wanted (file-truename file)))
     (ert-run-tests-batch-and-exit
-     `(satisfies
-       ,(lambda (test)
-          (let ((defined-in (ert-test-file-name test)))
-            (and defined-in (equal (file-truename defined-in) wanted))))))))
+     `(and ,(or selector t)
+           (satisfies
+            ,(lambda (test)
+               (let ((defined-in (ert-test-file-name test)))
+                 (and defined-in (equal (file-truename defined-in) wanted)))))))))
 
 ;; The one test that is about the harness rather than about cooked.  It lives
 ;; here, beside the runner, because that is what it is part of; there is no
@@ -157,6 +179,7 @@ A pushed event answers the event readers and is let through, but it does not
 answer `read-from-minibuffer', which in batch reads stdin whatever is queued.
 A refusal raised from a timer only prints, so it is recorded as well, and the
 session fixtures fail the test that left one behind."
+  :tags '(pty)
   (let ((cooked-tests--refused-reads nil))
     (let ((unread-command-events (list ?a ?\r)))
       (should-error (read-from-minibuffer "Name: ") :type 'cooked-tests-terminal-read))
@@ -184,6 +207,7 @@ correct, and three did: `cooked-tests--run-until-dead',
 `cooked-tests--pump-wakes' and `cooked-tests--split-settle'.  Each is given
 a tenth of a second that nothing will cut short under a scale of four, and has
 to take at least four tenths."
+  :tags '(pty)
   (let ((cooked-tests-timeout-scale 4))
     (dolist (wait (list (lambda () (cooked-tests--settle #'ignore 0.1))
                         (lambda () (cooked-tests--pump 0.1))

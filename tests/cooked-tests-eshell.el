@@ -21,6 +21,7 @@
 prompt opens a cooked buffer named after the program, in the selected window,
 running that program with the arguments eshell parsed.  With the mode off it is
 `term-mode' again."
+  :tags '(pty)
   (let* ((directory (make-temp-file "cooked-tests-eshell" t))
          (eshell-directory-name directory)
          (eshell-history-file-name nil)

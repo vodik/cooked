@@ -45,6 +45,7 @@ Nothing here is observable in batch, where nothing is drawn, which is how the
 original defect got through: every character had a correct `display' property
 and only the display engine merged them.  Reading the width off the spec is what
 makes the merge visible from batch at all."
+  :tags '(pty)
   (cooked-tests--with-session
       ;; Four of the same character in a row, which is what a border is.
       '("/bin/sh" "-c" "printf '\\342\\224\\200\\342\\224\\200\\342\\224\\200\\342\\224\\200\\n'")
@@ -77,6 +78,7 @@ the wire, not one, because `Deco::packed' counts consecutive cells of one shape.
 So each span gets a bitmap of its own width and the letter keeps its cell.  A
 single count taken from the row rather than from the run would have drawn the
 first glyph over the text beside it."
+  :tags '(pty)
   (cooked-tests--with-session
       ;; ──x── : two runs of two, with a plain character between them.
       '("/bin/sh" "-c" "printf '\\342\\224\\200\\342\\224\\200x\\342\\224\\200\\342\\224\\200\\n'")
@@ -96,6 +98,7 @@ first glyph over the text beside it."
                     (get-text-property (1+ start) 'display)))))))
 
 (ert-deftest cooked-box-drawing-gets-a-display-property ()
+  :tags '(pty)
   (cooked-tests--with-session
       '("/bin/sh" "-c" "printf '\\342\\224\\214\\342\\224\\200\\342\\224\\220\\n'") ; ┌─┐
     (cooked-tests--cell)
@@ -103,6 +106,7 @@ first glyph over the text beside it."
              (lambda () (get-text-property (point-min) 'display))))))
 
 (ert-deftest cooked-box-drawing-images-disabled-falls-back-to-plain-text ()
+  :tags '(pty)
   (let ((cooked-box-drawing-images nil))
     (cooked-tests--with-session
         '("/bin/sh" "-c" "printf '\\342\\224\\214\\342\\224\\200\\342\\224\\220\\n'") ; ┌─┐
@@ -126,6 +130,7 @@ rather than the same one restated: sharing the record is safe because nothing in
 it is cell-specific, while sharing the value is safe only because the image
 under it was built COUNT cells wide.  See
 `cooked-adjacent-box-glyphs-share-only-a-run-wide-image'."
+  :tags '(pty)
   (cooked-tests--with-session
       ;; Four of the same character in a row, which is what a border is.
       '("/bin/sh" "-c" "printf '\\342\\224\\200\\342\\224\\200\\342\\224\\200\\342\\224\\200\\n'")
@@ -209,6 +214,7 @@ would make both rows here identical.  A letter is also what keeps the fixture
 off `cooked--glyph-claims-next-cell-p', which looks for a space; a fixture
 using one would be exercising the claim path as well and measuring two things at
 once."
+  :tags '(pty)
   (let* ((narrow (cooked-tests--deco-lookups
                   ;; Two records: a horizontal, a letter, a horizontal.
                   '("/bin/sh" "-c"
@@ -262,6 +268,7 @@ the deep row cost four times the intervals of the shallow one.
 The fixture is `tree''s own indent byte for byte, NO-BREAK SPACEs included: tree
 2.3.2 writes `│   ', and a rule admitting only U+0020 would split every row
 at the first two cells and reach none of this."
+  :tags '(pty)
   (cooked-tests--with-session
       ;; Depth 2 then depth 6, of `│   ' repeated and `└── name'.
       '("/bin/sh" "-c"
@@ -307,6 +314,7 @@ the row short.  See `cooked-adjacent-box-glyphs-share-only-a-run-wide-image'.
 The blanks are still blanks in the buffer -- nothing is deleted and nothing is
 substituted -- which is what keeps a yank, a search and `cooked--check-seam'
 seeing the text the child sent."
+  :tags '(pty)
   (cooked-tests--with-session
       ;; `│ │ ├──': seven cells, three of them blank, one run.
       '("/bin/sh" "-c"
@@ -337,6 +345,7 @@ the last glyph into text that has nothing to draw.
 `leading_and_trailing_blanks_stay_out_of_the_run' is the same claim made in Rust
 against a wrapped row, where the padding is not trimmed before the runs are
 built and so actually reaches the rule."
+  :tags '(pty)
   (cooked-tests--with-session
       ;; Two glyphs with a gap, then a space the row ends on.
       '("/bin/sh" "-c" "printf '\\342\\224\\200 \\342\\224\\200 x\\n'")
@@ -368,6 +377,7 @@ The fixture writes the row and then addresses the cursor back into the middle of
 it with CUP, which is what a full-screen program does and what no amount of
 plain output would produce.  Without the cut before the cell the whole indent is
 one interval, and without the cut after it the cursor's segment is four cells."
+  :tags '(pty)
   (cooked-tests--with-session
       ;; `│ │ ├──', then CUP to row 1 column 4 -- the second blank, mid-run.
       '("/bin/sh" "-c"
@@ -408,6 +418,7 @@ prompt, in canonical mode with no OSC 133 to say a command is running,
 is on the child's cell: `cat' run after a program that left the cursor hidden
 is that case.  The core cannot see that decision, which also turns on the input
 mode, so the cut stays wherever the cursor is."
+  :tags '(pty)
   (cooked-tests--with-session
       ;; `│ │ ├──' with the cursor hidden, then CUP to the second blank, and a
       ;; child reading in canonical mode.
@@ -434,6 +445,7 @@ from the first row's start, so on the middle row the cursor's cell was looked
 for nine characters too far along and the row was never cut: the cursor drew
 as a box around the whole field.  The origin a block is handed is only for an
 edit, which replaces part of one row."
+  :tags '(pty)
   (cooked-tests--with-session
       ;; `┌────┐', `│    │', `└────┘', then CUP into the field's second blank.
       '("/bin/sh" "-c"
@@ -458,6 +470,7 @@ character of the row.  Adding the column to the row's start put point on `X', so
 every CJK or emoji program drew its cursor one cell right per wide character
 before it.  The core counts the characters for Lisp, by the rule its own row
 edits are measured by."
+  :tags '(pty)
   (cooked-tests--with-session
       '("/bin/sh" "-c" "printf '\\346\\227\\245\\346\\234\\254X\\033[1;3H'; sleep 5")
     (should (cooked-tests--settle
@@ -472,6 +485,7 @@ edits are measured by."
 `日│ │ ├──' with the cursor on `├', column 6 and the sixth character: counted
 as a column, the cuts fell one character late, and the box around the cursor was
 drawn around the first `─' instead of the corner."
+  :tags '(pty)
   (cooked-tests--with-session
       '("/bin/sh" "-c"
         "printf '\\346\\227\\245\\342\\224\\202 \\342\\224\\202 \\342\\224\\234\\342\\224\\200\\342\\224\\200\\033[1;7H'; sleep 5")
@@ -498,6 +512,7 @@ the rows the cursor was on and is on, and resends the run.
 The second half is the same from a wide character's column into the run, where
 the core's cell and Lisp's character have to agree on which run the cursor is
 in: `日 ┌──┐' with the cursor moved onto the first `─' is cut around it."
+  :tags '(pty)
   (cooked-tests--with-session
       '("/bin/sh" "-c"
         "printf '\\342\\224\\214\\342\\224\\200\\342\\224\\200\\342\\224\\220\\033[1;2H'; sleep 0.5; printf '\\033[3;1H'; sleep 5")
@@ -554,6 +569,7 @@ per-channel mix would say #808080."
 No bitmap and no dither: the stretch is painted in the face's background, and
 `cooked--apply-shade' has made that background the blend.  The foreground is
 the same colour, so the character stays invisible wherever no stretch is drawn."
+  :tags '(pty)
   (cooked-tests--with-session
       `("/bin/sh" "-c"
         ,(concat "printf '" cooked-tests--white-on-black
@@ -576,6 +592,7 @@ which is what `cooked--face-color' is for.  The theme is moved underneath to
 check both halves at once: the blend follows through the inherit chain, and
 `cooked--reblend-shades' puts the new one on the text, in the scrollback as
 well as on the screen."
+  :tags '(pty)
   (cooked-tests--with-session
       '("/bin/sh" "-c"
         ;; Half-shade in ANSI red on an RGB black, so only one end is indexed.
@@ -593,6 +610,7 @@ well as on the screen."
 (ert-deftest cooked-the-blank-between-shades-draws-nothing ()
   "`░ ░' puts no `display' on the blank the wire absorbed between the shades.
 It would be a picture of the background the space already shows."
+  :tags '(pty)
   (cooked-tests--with-session
       '("/bin/sh" "-c" "printf '\\342\\226\\221 \\342\\226\\221\\n'")
     (cooked-tests--cell 9 20)
@@ -606,6 +624,7 @@ It would be a picture of the background the space already shows."
 
 (ert-deftest cooked-a-shade-blends-the-colours-its-cell-shows ()
   "Reverse video blends the exchanged pair, and concealment blends to nothing."
+  :tags '(pty)
   (cooked-tests--with-session
       `("/bin/sh" "-c"
         ,(concat "printf '" cooked-tests--white-on-black
@@ -622,6 +641,7 @@ It would be a picture of the background the space already shows."
   "A shade concealed on the default colours takes the colour it hides in.
 Its face names no colour for the blend to read, only one it inherits, so the
 blend has to know which: the background, or once reversed the foreground."
+  :tags '(pty)
   (cooked-tests--with-session
       '("/bin/sh" "-c"
         "printf '\\033[8m\\342\\226\\223\\033[7m\\342\\226\\223\\033[0m\\n'")
@@ -639,6 +659,7 @@ blend has to know which: the background, or once reversed the foreground."
 (ert-deftest cooked-a-shade-follows-the-default-colours ()
   "An OSC 11 set blends an already drawn shade in the default colours again.
 The text beside it follows the remapped `default' live, so the shade must too."
+  :tags '(pty)
   (cooked-tests--with-session
       '("/bin/sh" "-c" "printf '\\342\\226\\222\\n'; sleep 5")
     (cooked-tests--cell 9 20)
@@ -654,6 +675,7 @@ The text beside it follows the remapped `default' live, so the shade must too."
 
 (ert-deftest cooked-shades-and-lines-split-into-image-stretch-image ()
   "`─▒─' is an image, a stretch and an image, each exactly its cells wide."
+  :tags '(pty)
   (cooked-tests--with-session
       '("/bin/sh" "-c"
         "printf '\\342\\224\\200\\342\\226\\222\\342\\224\\200\\n'")
@@ -670,6 +692,7 @@ The text beside it follows the remapped `default' live, so the shade must too."
 (ert-deftest cooked-the-cursor-splits-a-shade-stretch ()
   "The cursor rule holds for a stretch as it does for an image; see
 `cooked-the-cursors-cell-is-a-glyph-segment-of-its-own'."
+  :tags '(pty)
   (cooked-tests--with-session
       '("/bin/sh" "-c"
         "printf '\\342\\226\\222\\342\\226\\222\\342\\226\\222\\342\\226\\222\\033[1;3H'")
@@ -703,6 +726,7 @@ Glyphs and not an image placement, and the difference is the point: an image
 record carries the cell's own row and column within the picture, so no two
 cells of one placement can share it.  A glyph record carries nothing
 cell-specific at all."
+  :tags '(pty)
   (cooked-tests--with-session
       '("/bin/sh" "-c" "printf '\\342\\224\\200\\342\\224\\200\\342\\224\\200\\n'") ; ───
     (cooked-tests--cell)
@@ -741,6 +765,7 @@ cell-specific at all."
                      (* 3 12))))))
 
 (ert-deftest cooked-box-drawing-rescales-on-zoom ()
+  :tags '(pty)
   (cooked-tests--with-session
       '("/bin/sh" "-c" "printf '\\342\\224\\214\\342\\224\\200\\342\\224\\220\\n'") ; ┌─┐
     (cooked-tests--cell)
@@ -771,6 +796,7 @@ cell-specific at all."
 ;; nothing renders.  Asserted on the spec rather than via `image-size' because that
 ;; needs a graphic display and this suite runs in batch.
 (ert-deftest cooked-box-drawing-image-spec-is-a-valid-inline-xbm ()
+  :tags '(pty)
   (cooked-tests--with-session
       '("/bin/sh" "-c" "printf '\\342\\224\\214\\342\\224\\200\\342\\224\\220\\n'") ; ┌─┐
     (cooked-tests--cell)
@@ -801,6 +827,7 @@ cell-specific at all."
 ;; Asserted on the spec because it is the whole of the mechanism: what is under test
 ;; is the *absence* of two properties, which no rendering test in batch could see.
 (ert-deftest cooked-box-drawing-takes-its-colors-from-the-face ()
+  :tags '(pty)
   (cooked-tests--with-session
       ;; A red-on-blue border, so a spec that colours itself has something to say.
       '("/bin/sh" "-c" "printf '\\033[31;44m\\342\\224\\214\\342\\224\\200\\033[0m\\n'") ; ┌─
@@ -822,6 +849,7 @@ cell-specific at all."
 ;; of the spec they are out of the cache key too, so a border that changes colour
 ;; part way along still rasterizes once.
 (ert-deftest cooked-box-drawing-shares-one-spec-across-renditions ()
+  :tags '(pty)
   (cooked-tests--with-session
       '("/bin/sh" "-c" "printf '\\033[31m\\342\\224\\200\\033[44m\\342\\224\\200\\033[0m\\n'") ; ──
     (cooked-tests--cell)
@@ -840,6 +868,7 @@ cell-specific at all."
 ;; same advice rather than with solaire, since what matters is the shape of the
 ;; interference and not who wrote it.
 (ert-deftest cooked-box-drawing-resists-advice-that-colors-every-image ()
+  :tags '(pty)
   (advice-add 'create-image :filter-return #'cooked-tests--stamp-background)
   (unwind-protect
       (cooked-tests--with-session
@@ -932,6 +961,7 @@ pattern and cell size, so swapping the default font for one of the same height
 with a lower baseline kept every border at the old placement, rows drawn
 afterwards included.  The swap moves the layout stamp, which now empties both
 caches as it has every row sent again."
+  :tags '(pty)
   (cooked-tests--with-session
       '("/bin/sh" "-c" "printf '\\342\\224\\214\\342\\224\\200\\342\\224\\220'; sleep 5")
     ;; In no window, so the cell is this one rather than the batch frame's; the
@@ -948,6 +978,7 @@ caches as it has every row sent again."
         (should (cooked-tests--settle (lambda () (eql (funcall placed) 60))))))))
 
 (ert-deftest cooked-box-drawing-images-opt-out-of-auto-scaling ()
+  :tags '(pty)
   (cooked-tests--with-session
       '("/bin/sh" "-c" "printf '\\342\\224\\214\\342\\224\\200\\342\\224\\220\\n'") ; ┌─┐
     (cooked-tests--cell)
@@ -962,6 +993,7 @@ caches as it has every row sent again."
 ;; still reach the glyphs above the restriction, or they stay at the old pixel size
 ;; and only reveal it — mismatched against their neighbours — once the pin lifts.
 (ert-deftest cooked-box-drawing-rescales-above-the-alt-screen-pin ()
+  :tags '(pty)
   (cooked-tests--with-session
       '("/bin/sh" "-c" "printf '\\342\\224\\214\\342\\224\\200\\342\\224\\220\\n'") ; ┌─┐
     (cooked-tests--cell)
@@ -992,6 +1024,7 @@ caches as it has every row sent again."
 ;; scrolls off the top of the screen and round-trips through `scrolled_rows', the
 ;; flood path that used to flatten glyphs to plain styled text for cost reasons.
 (ert-deftest cooked-box-drawing-survives-scrolling-into-history ()
+  :tags '(pty)
   (cooked-tests--with-session
       (list "/bin/sh" "-c"
             (concat "printf '\\342\\224\\214\\342\\224\\200\\342\\224\\220\\n'" ; ┌─┐
@@ -1012,6 +1045,7 @@ caches as it has every row sent again."
 ;; nothing else here would notice the two drifting apart.  ┄ is U+2504, whose only
 ;; difference from a solid ─ is the dash count — exactly what used to be dropped.
 (ert-deftest cooked-box-dash-descriptors-survive-the-round-trip ()
+  :tags '(pty)
   (cooked-tests--with-session
       '("/bin/sh" "-c" "printf '\\342\\224\\204\\n'") ; ┄
     (should (cooked-tests--settle

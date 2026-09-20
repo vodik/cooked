@@ -89,7 +89,8 @@ ASSET     := cooked-$(VERSION)-$(DIST_ARCH)-$(DIST_OS).tar.gz
 # both.  Both print `<digest>  <file>', which is what the `cut' below reads.
 SHA256 := $(shell command -v sha256sum >/dev/null 2>&1 && echo sha256sum || echo 'shasum -a 256')
 
-.PHONY: all test rust-test lisp-test lisp-test-parallel lint checkdoc citations escapes \
+.PHONY: all test rust-test lisp-test lisp-test-quick lisp-test-parallel lisp-test-stress \
+        lint checkdoc citations escapes \
         compile bench bench-quick clean module terminfo \
         dist dist-checksums dist-digests fuzz
 
@@ -177,6 +178,23 @@ lisp-test: module
 	$(BATCH) $(EVIL_LOAD_PATH) -l ert -l cooked-tests.el \
 	  --eval '(ert-run-tests-batch-and-exit (quote $(SELECTOR)))'
 
+# What a real child's behaviour or timing depends on (`pty`), what loops to hunt
+# a race (`stress`), and what needs tmux on PATH -- the three things that make a
+# run untrustworthy on a loaded machine or slow while iterating.  `lisp-test' and
+# `lisp-test-parallel' are unchanged and still run everything the suite has, so
+# nothing loses coverage by default; this selector only carves out a fast subset
+# for the inner loop.  `lisp-test-stress' below runs the third kind alone.
+QUICK_SELECTOR := (not (or (tag pty) (tag stress) (tag tmux)))
+
+# The stress-tagged tests alone: loops built to hunt a race by running many
+# times rather than by asserting a single outcome, `cooked-spawn-initial-state-
+# beats-the-childs-first-probe' (200 spawns) being the one today.  Not part of
+# `lisp-test' or `lisp-test-parallel' by exclusion -- they are, since neither
+# excludes `stress' -- this is only the convenient way to run just them.
+lisp-test-stress: module
+	$(BATCH) $(EVIL_LOAD_PATH) -l ert -l cooked-tests.el \
+	  --eval '(ert-run-tests-batch-and-exit (quote (tag stress)))'
+
 # The same tests, one Emacs per file, so that `make -j8 lisp-test-parallel' uses
 # the cores this machine has.  The serial run is about eighty seconds and most
 # of it is spent waiting on children rather than computing, which is the shape
@@ -218,9 +236,27 @@ TEST_SHARED := tests/cooked-tests.el tests/cooked-tests-helpers.el tests/cooked-
 
 lisp-test-parallel: $(TEST_STAMPS)
 
+# The quick target gets the same per-file split, in its own stamp directory --
+# the selector differs from `lisp-test-parallel''s (none), so a stamp made by
+# one run says nothing about whether the other would still pass, and sharing a
+# directory would let either one satisfy the other's prerequisite by mistake.
+# `cooked-tests-run-file' takes the selector as a second argument for exactly
+# this: the file filter and the tag exclusion are both plain ERT selectors, and
+# `and'-ing them together needed no change to how a stamp's recipe is shaped.
+TEST_QUICK_STAMPS := $(patsubst tests/%.el,target/test-stamps-quick/%.stamp,$(TEST_FILES))
+
+lisp-test-quick: $(TEST_QUICK_STAMPS)
+
+target/test-stamps-quick/%.stamp: tests/%.el $(TEST_SHARED) $(wildcard lisp/*.el) $(MODULE)
+	@mkdir -p $(@D)
+	@$(BATCH) $(EVIL_LOAD_PATH) -l ert -l cooked-tests.el \
+	  --eval '(cooked-tests-run-file "$<" (quote $(QUICK_SELECTOR)))'
+	@touch $@
+
 # The one test file that loads something outside `tests/': the graphical bench
 # scripts' prelude, whose compile step and load guard it runs end to end.
 target/test-stamps/cooked-tests-bench.stamp: scripts/bench-prelude.el
+target/test-stamps-quick/cooked-tests-bench.stamp: scripts/bench-prelude.el
 
 $(MODULE): module ;
 

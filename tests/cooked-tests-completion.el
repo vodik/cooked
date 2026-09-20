@@ -20,6 +20,7 @@
 (require 'cooked-shell-completion)
 
 (ert-deftest cooked-completion-offers-programs-then-files ()
+  :tags '(pty)
   (cooked-tests--with-session '("/bin/sh" "-c" "printf 'ready$ '; exec cat")
     (should (cooked-tests--settle
              (lambda () (and (string-match-p "ready" (cooked-tests--text))
@@ -139,6 +140,7 @@ exactly what makes it useless to the code under test."
 
 (ert-deftest cooked-completion-drops-a-reply-to-a-request-it-did-not-make ()
   "A completer slower than the timeout answers eventually; by then it is stale."
+  :tags '(pty)
   (cooked-tests--with-session '("/bin/cat")
     (should (cooked-tests--settle #'cooked--input-start-position))
     ;; Through a real announcement, so the shell is reply-capable: setting the nonce
@@ -166,6 +168,7 @@ exactly what makes it useless to the code under test."
 (ert-deftest cooked-completion-asks-nobody-without-an-announcement ()
   "The trigger is only a keystroke: to a shell with no widget bound to it, the
 request is a line of input.  Nothing is sent until the shell says it is listening."
+  :tags '(pty)
   (cooked-tests--with-session '("/bin/cat")
     (should (cooked-tests--settle #'cooked--input-start-position))
     (should-not (cooked-line-completion-nonce (cooked--line)))
@@ -190,6 +193,7 @@ The announcement is therefore replayed *after* the command starts, which is the
 only way to reach that guard now: an announcement made before it is cleared by
 it, and the request then stops for the missing nonce without ever asking the
 question this test is named for."
+  :tags '(pty)
   (cooked-tests--with-session '("/bin/cat")
     (should (cooked-tests--settle #'cooked--input-start-position))
     (cooked--handle-semantic '(command-start nil (screen 0 . 0)) nil)
@@ -207,7 +211,7 @@ question this test is named for."
 (ert-deftest cooked-completion-comes-from-zsh-itself ()
   "The whole exchange against a real shell: zsh's own completion system, run in
 the shell you are typing at, over a line it has never seen."
-  :tags '(zsh)
+  :tags '(zsh pty)
   (skip-unless (executable-find "zsh"))
   (cooked-tests--with-fake-zdotdir
       '((".zshrc" . "autoload -Uz compinit\ncompinit -u -d $ZDOTDIR/zcompdump\nPS1='%% '\n"))
@@ -269,7 +273,7 @@ Neither candidate begins with the text it replaces.  Before the `cooked-shell'
 style they were both filtered out again between the shell and the popup, which
 reached the user as a popup that came back empty and as candidates that could
 not be accepted."
-  :tags '(zsh)
+  :tags '(zsh pty)
   (skip-unless (executable-find "zsh"))
   (cooked-tests--with-fake-zdotdir
       '((".zshrc" . "autoload -Uz compinit\ncompinit -u -d $ZDOTDIR/zcompdump\n\
@@ -324,7 +328,7 @@ length against the wrong anchor: a span reaching PREFIX characters back from
 wherever the drain left point, which is why the report described it as
 sometimes the next chunk and sometimes the whole prompt.  Here there is a word
 after the cursor to make the difference visible."
-  :tags '(zsh)
+  :tags '(zsh pty)
   (skip-unless (executable-find "zsh"))
   (cooked-tests--with-fake-zdotdir
       '((".zshrc" . "autoload -Uz compinit\ncompinit -u -d $ZDOTDIR/zcompdump\nPS1='%% '\n"))
@@ -361,7 +365,7 @@ parser, one protocol, and a shell that announces for itself.
 The spec here is registered by the test rather than borrowed from
 bash-completion, which is not installed everywhere and would make this a test of
 somebody else's package."
-  :tags '(base64 bash)
+  :tags '(base64 bash pty)
   (skip-unless (executable-find "bash"))
   (skip-unless (executable-find "base64"))
   (let ((buffer (generate-new-buffer "*cooked-bash-complete*"))
@@ -426,7 +430,7 @@ first line.
 
 The reply here can only be right if both are: `mytool' is on the second line and
 its spec is the only thing in this shell that answers `alpha'."
-  :tags '(base64 bash)
+  :tags '(base64 bash pty)
   (skip-unless (executable-find "bash"))
   (skip-unless (executable-find "base64"))
   (let ((buffer (generate-new-buffer "*cooked-bash-multiline*"))
@@ -477,7 +481,7 @@ everywhere and would make this a test of somebody else's package.  It behaves th
 way upstream's does in the three ways that matter: it registers per command only
 when asked, it returns 124 either way, and it records every call so that a second
 request can be shown *not* to reach it."
-  :tags '(base64 bash)
+  :tags '(base64 bash pty)
   (skip-unless (executable-find "bash"))
   (skip-unless (executable-find "base64"))
   (let ((buffer (generate-new-buffer "*cooked-bash-lazy*"))
@@ -559,7 +563,7 @@ writes.
 `git checkout ma' is the case the review drove by hand, and it is the one that
 cannot be answered by anything but the shell: `main' is a branch, not a file, and
 the description comes back with it."
-  :tags '(base64 fish git)
+  :tags '(base64 fish git pty)
   (skip-unless (executable-find "fish"))
   (skip-unless (executable-find "base64"))
   (skip-unless (executable-find "git"))
@@ -602,6 +606,7 @@ The *announcement* is not: `cooked--policy' reads it as a license to own the
 input line, and a session that never loads this file needs that reading as much
 as one that does -- so the nonce is kept regardless of who is listening for
 replies."
+  :tags '(pty)
   (cooked-tests--with-session '("/bin/cat")
     (should (cooked-tests--settle #'cooked--input-start-position))
     (let ((cooked-osc-completion-functions nil)
@@ -629,6 +634,7 @@ A shell without it announces anyway and says so in the last field, so it keeps
 its editable line and merely has nothing to offer `completion-at-point'.
 Snippets predating the field could only announce when they could also reply, so
 their silence reads as capable."
+  :tags '(pty)
   (cooked-tests--with-session '("/bin/cat")
     (should (cooked-tests--settle #'cooked--input-start-position))
     (cooked--osc-emacs '("CH;2;1234;1"))
@@ -652,6 +658,7 @@ The announcement is a claim about the line being read now.  Once a command
 starts, whatever it spawns -- a remote shell, a nested `zsh -f', a REPL --
 announces for itself or does not announce at all; inheriting the old nonce would
 hand a bare remote prompt a license nothing on that host ever issued."
+  :tags '(pty)
   (cooked-tests--with-session '("/bin/cat")
     (should (cooked-tests--settle #'cooked--input-start-position))
     (cooked--osc-emacs '("CH;2;1234;1"))
@@ -667,6 +674,7 @@ A delegated line, a continuation prompt, a submission waiting for its mark and a
 announcement are all claims about the line just typed.  `command-start' drops the
 record whole, so a field added later is cleared there by construction; this
 fills every slot first so a record that kept one would fail here."
+  :tags '(pty)
   (cooked-tests--with-session '("/bin/cat")
     (should (cooked-tests--settle #'cooked--input-start-position))
     (let ((record (cooked--line)))
@@ -712,7 +720,7 @@ line it draws is the one the capture put in BUFFER -- so a second copy of the
 command appeared exactly where the completion would have gone, and restoring
 BUFFER did not take it back.  `git commit -am <TAB>' is the everyday case: the
 flags have already said everything, so `_git' offers nothing and explains why."
-  :tags '(git zsh)
+  :tags '(git zsh pty)
   (skip-unless (executable-find "zsh"))
   (skip-unless (executable-find "git"))
   (cooked-tests--with-fake-zdotdir
@@ -753,7 +761,7 @@ straight from the shell's own corrected screen.  Asserted through the argument
 `cooked--on-wake' passes rather than by watching for a flicker, a race being a
 poor thing to assert on: every wake taken while the request was outstanding has
 to have been a withheld one."
-  :tags '(git zsh)
+  :tags '(git zsh pty)
   (skip-unless (executable-find "zsh"))
   (skip-unless (executable-find "git"))
   (cooked-tests--with-fake-zdotdir
@@ -810,6 +818,7 @@ Both halves are here.  The screen does not gain the copy while the claim
 stands, and a reader calling `cooked--sync' meanwhile is answered from the same
 pre-request rows -- then the release drains whole and the copy appears, because
 refusing the debt defers it rather than dropping it."
+  :tags '(pty)
   (cooked-tests--with-tty-frame
     (cooked-tests--with-session
         ;; Echo off and stdin never read, so nothing the request writes comes
@@ -869,6 +878,7 @@ A `completion' claim left standing -- see `cooked--screen-held-by' -- is a
 terminal that never repaints again, which is a far worse outcome than the
 flicker it was taken to prevent, so it is released on the way out however the
 exchange ends."
+  :tags '(pty)
   (cooked-tests--with-session '("/bin/cat")
     (should (cooked-tests--settle #'cooked--input-start-position))
     (cl-letf (((symbol-function 'accept-process-output)
@@ -1002,6 +1012,7 @@ only when the shell had none -- which is what `shell' already does."
 
 (ert-deftest cooked-completion-is-a-normal-capf ()
   "So corfu, cape and friends work without knowing about cooked."
+  :tags '(pty)
   (cooked-tests--with-session '("/bin/cat")
     (should (cooked-tests--settle #'cooked--input-start-position))
     (should (memq #'cooked-completion-at-point completion-at-point-functions))
@@ -1009,6 +1020,7 @@ only when the shell had none -- which is what `shell' already does."
 
 (ert-deftest cooked-completion-declines-outside-the-input-line ()
   "Raw-mode programs get their own TAB; we must not complete over them."
+  :tags '(pty)
   (cooked-tests--with-session '("/bin/sh" "-c" "stty -icanon -echo; sleep 5")
     (should (cooked-tests--settle (lambda () (eq cooked--mode 'raw))))
     (should-not (cooked-completion-at-point))))

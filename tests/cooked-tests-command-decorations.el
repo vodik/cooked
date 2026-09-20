@@ -117,7 +117,7 @@ The overlay carries `evaporate t' and rides on real characters, so
 damages every live row at once, while `cooked-command-finished-functions' fires
 exactly once per command.  A command whose prompt is still on the live screen
 would lose its marker the first time the window changed width."
-  :tags '(zsh)
+  :tags '(zsh pty)
   (skip-unless (executable-find "zsh"))
   (cl-letf (((symbol-function 'display-graphic-p) (lambda (&rest _) t))
             ((symbol-function 'color-values) #'tty-color-values))
@@ -189,7 +189,7 @@ have been rendered.  A decoration painted from inside the render therefore
 painted the row below its own prompt, and since the correction that followed
 moved the marker and not the paint, every marker on a full screen ended up
 wearing its neighbour's colour."
-  :tags '(zsh)
+  :tags '(zsh pty)
   (skip-unless (executable-find "zsh"))
   (cl-letf (((symbol-function 'display-graphic-p) (lambda (&rest _) t))
             ((symbol-function 'color-values) #'tty-color-values))
@@ -208,7 +208,7 @@ deletes it, so an `evaporate t' overlay on it dies with the text -- while the
 scrollback copy that now owns the prompt is never rendered again and would be
 decorated by nothing.  The re-arm therefore asks about commands rather than
 about the row it was called for, and reaches the ones that have just settled."
-  :tags '(zsh)
+  :tags '(zsh pty)
   (skip-unless (executable-find "zsh"))
   (cl-letf (((symbol-function 'display-graphic-p) (lambda (&rest _) t))
             ((symbol-function 'color-values) #'tty-color-values))
@@ -234,7 +234,7 @@ about the row it was called for, and reaches the ones that have just settled."
 at, so a marker left up would ride in the fringe beside its frame claiming to be
 about a command.  It comes back on its own when the program leaves: restoring the
 primary marks every row damaged, and the re-arm repaints from that."
-  :tags '(zsh)
+  :tags '(zsh pty)
   (skip-unless (executable-find "zsh"))
   (cl-letf (((symbol-function 'display-graphic-p) (lambda (&rest _) t))
             ((symbol-function 'color-values) #'tty-color-values))
@@ -278,7 +278,7 @@ them, and `cooked-previous-command' stepped over the prompts.
 
 All three ways in are covered: 1049 saves the cursor too, while 47 and 1047
 only switch screens, and all of them go through the same switch in the core."
-  :tags '(zsh)
+  :tags '(zsh pty)
   (skip-unless (executable-find "zsh"))
   (dolist (mode '(1049 47 1047))
     (ert-info ((format "mode %d" mode))
@@ -357,7 +357,7 @@ it painted last."
 one comes down as the finished one goes up, at the `D' mark rather than at the
 next render.  One marker on that row throughout, and the colour changes under
 it."
-  :tags '(zsh)
+  :tags '(zsh pty)
   (skip-unless (executable-find "zsh"))
   (cl-letf (((symbol-function 'display-graphic-p) (lambda (&rest _) t))
             ((symbol-function 'color-values) #'tty-color-values))

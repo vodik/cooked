@@ -17,6 +17,7 @@
 (require 'notifications nil t)
 
 (ert-deftest cooked-osc-133-drives-the-input-state ()
+  :tags '(pty)
   (cooked-tests--with-session
       '("/bin/sh" "-c" "stty -icanon -echo; printf '\\033]133;A\\007$ \\033]133;B\\007'; sleep 5")
     ;; Raw mode would normally mean pass-through; the shell's mark overrides it.
@@ -27,6 +28,7 @@
 
 (ert-deftest cooked-osc-handlers-are-extensible-without-rust ()
   "The point of the passthrough: a new sequence is a few lines of Lisp."
+  :tags '(pty)
   (cooked-tests--with-session '("/bin/sh" "-c" "printf '\\033]12345;hello;there\\007'; sleep 5")
     (let* ((seen nil)
            (cooked-osc-handlers (cons (cons 12345 (lambda (parts) (setq seen parts)))
@@ -35,6 +37,7 @@
       (should (equal seen '("hello" "there"))))))
 
 (ert-deftest cooked-osc-title-reaches-the-mode-line ()
+  :tags '(pty)
   (cooked-tests--with-session '("/bin/sh" "-c" "printf '\\033]2;my-title\\007'; sleep 5")
     (should (cooked-tests--settle (lambda () (equal cooked-title "my-title"))))
     (should (string-match-p "my-title" (cooked--mode-line)))))
@@ -136,6 +139,7 @@ case, so a timer left behind cannot reach the real desktop."
 A desktop notification is a synchronous D-Bus call, and inside the drain a slow
 server would hold up the child's output.  The stub records the session's
 `cooked--draining' when it is called."
+  :tags '(pty)
   (let ((cooked-allow-notifications t)
         (session nil)
         (during nil))
@@ -262,6 +266,7 @@ a path on the desktop, which is the mistake testing for `4' alone would make."
 Visible in the selected frame, which is the case that rings at all.  The second
 half is what tells a rate limit from a latch: once the interval has passed the
 next bell rings again."
+  :tags '(pty)
   (let ((rings 0)
         (cooked--bell-last nil))
     (cl-letf (((symbol-function 'ding) (lambda (&rest _) (cl-incf rings))))
@@ -284,6 +289,7 @@ Cleared through the window hook rather than by setting the variable back,
 because the wiring is the part that can rot.  Batch runs no redisplay, so the
 hook is run here where redisplay would run it on showing the buffer: its global
 value, which is what reaches a buffer that was displayed nowhere."
+  :tags '(pty)
   (let ((rings 0)
         (cooked--bell-last nil))
     (cl-letf (((symbol-function 'ding) (lambda (&rest _) (cl-incf rings))))
@@ -361,6 +367,7 @@ after the reset is raised afresh is the Rust test
   "`reset' is what a user types at a terminal a program left purple under a
 stale title.  RIS takes off the OSC 10 and 11 remaps and the OSC 12 cursor
 colour, and forgets the title and the titles pushed under it."
+  :tags '(pty)
   (let ((go (make-temp-name (expand-file-name "cooked-reset-go" temporary-file-directory)))
         (cooked-allow-color-set t))
     (unwind-protect
@@ -385,6 +392,7 @@ while [ ! -e %s ]; do sleep 0.05; done; printf '\\033c'; sleep 5" go))
 
 (ert-deftest cooked-title-stack-restores-on-pop ()
   "XTWINOPS 22/23, which `smcup'/`rmcup' send around the alternate screen."
+  :tags '(pty)
   (cooked-tests--with-session
    '("/bin/sh" "-c"
      "printf '\\033]2;shell\\007\\033[22;0;0t\\033]2;vim\\007'; sleep 5")
@@ -441,6 +449,7 @@ no redisplay to run it.
 Once, twice over: noticing the change a second time, as the configuration hook
 and the size hook both do in a live frame, resizes nothing more, and a second
 identical request finds the window already where it asked and moves nothing."
+  :tags '(pty)
   (let ((cooked-resize-requests 'window)
         (moves 0) (resizes 0))
     (cooked-tests--with-resize-request
@@ -476,6 +485,7 @@ identical request finds the window already where it asked and moves nothing."
 
 (ert-deftest cooked-a-resize-request-is-refused-by-default ()
   "Nothing moves, and nothing answers: the child's `18t' tells it the truth."
+  :tags '(pty)
   (should-not (default-value 'cooked-resize-requests))
   (let ((out (make-temp-file "cooked-resize-refused")))
     (unwind-protect
@@ -643,6 +653,7 @@ numbers and not some value the plumbing happened to already hold. Whichever
 end of the pipeline forms these bytes -- Lisp reading the query at the
 moment it arrives, or the core answering from a size Lisp already pushed
 down -- the table says what the wire must carry either way."
+  :tags '(pty)
   (dolist (case '((24 . 80) (6 . 132)))
     (let* ((rows (car case)) (cols (cdr case))
            (pixels (if (display-graphic-p)
@@ -650,6 +661,35 @@ down -- the table says what the wire must carry either way."
                      "")))
       (should (equal (cooked-tests--frame-size-report rows cols)
                       (concat (format "\e[9;%d;%dt" rows cols) pixels "\e[1t"))))))
+
+(defun cooked-tests--spawn-beats-first-probe-once ()
+  "One run of the race `cooked-spawn-initial-state-beats-the-childs-first-probe'
+and its 5-spawn sibling both hunt: spawn a child that asks OSC 11, `CSI ? 996 n'
+and `CSI 19 t' with no delay of its own, and check that `cooked--start' folded
+every answer into the spawn before the probe could out-race it."
+  (let ((out (make-temp-file "cooked-first-probe")))
+    (unwind-protect
+        (cooked-tests--with-session
+            (list "/bin/sh" "-c"
+                  (format
+                   "stty raw -echo; printf '\\033]11;?\\007\\033[?996n\\033[19t\\033[11t'; cat > %s"
+                   out))
+          (should (cooked-tests--settle
+                   (lambda () (string-suffix-p "\e[1t" (cooked-tests--contents out)))))
+          (let ((reply (cooked-tests--contents out)))
+            (should (string-match-p
+                     "\\`\033\\]11;rgb:[0-9a-f]\\{4\\}/[0-9a-f]\\{4\\}/[0-9a-f]\\{4\\}\007"
+                     reply))
+            (should (string-match-p "\033\\[\\?997;[12]n" reply))
+            (should (string-match-p "\033\\[9;[0-9]+;[0-9]+t" reply))))
+      (delete-file out))))
+
+(ert-deftest cooked-spawn-initial-state-beats-the-childs-first-probe-a-few-times ()
+  "The default-run sample of the race the stress-tagged sibling below runs 200
+times: five spawns, so the default suite still exercises this race on every
+run rather than only when someone remembers to ask for `stress'."
+  :tags '(pty)
+  (dotimes (_ 5) (cooked-tests--spawn-beats-first-probe-once)))
 
 (ert-deftest cooked-spawn-initial-state-beats-the-childs-first-probe ()
   "OSC 11, `CSI ? 996 n' and `CSI 19 t' are all answered from what
@@ -666,26 +706,14 @@ raises no event for Lisp to answer later, the same silence `19t' has always
 answered with before a session's first resize.  r3-winops measured a
 frame-size probe alone losing that race about one run in three.  This is not
 a sampled rate: it is what \"win the race a hundred times running\" being a
-`should' rather than a message means."
-  (dotimes (_ 200)
-    (let ((out (make-temp-file "cooked-first-probe")))
-      (unwind-protect
-          (cooked-tests--with-session
-              (list "/bin/sh" "-c"
-                    (format
-                     "stty raw -echo; printf '\\033]11;?\\007\\033[?996n\\033[19t\\033[11t'; cat > %s"
-                     out))
-            (should (cooked-tests--settle
-                     (lambda () (string-suffix-p "\e[1t" (cooked-tests--contents out)))))
-            (let ((reply (cooked-tests--contents out)))
-              (should (string-match-p
-                       "\\`\033\\]11;rgb:[0-9a-f]\\{4\\}/[0-9a-f]\\{4\\}/[0-9a-f]\\{4\\}\007"
-                       reply))
-              (should (string-match-p "\033\\[\\?997;[12]n" reply))
-              (should (string-match-p "\033\\[9;[0-9]+;[0-9]+t" reply))))
-        (delete-file out)))))
+`should' rather than a message means.  The five-spawn sibling above runs the
+same check in the default suite; this longer run is what `make lisp-test-stress'
+is for."
+  :tags '(pty stress)
+  (dotimes (_ 200) (cooked-tests--spawn-beats-first-probe-once)))
 
 (ert-deftest cooked-osc-handler-errors-do-not-break-redisplay ()
+  :tags '(pty)
   (cooked-tests--with-session '("/bin/sh" "-c" "printf '\\033]2;boom\\007'; printf 'after\\n'; sleep 5")
     ;; `cooked-debug' back off against the fixture's binding: this is a test of
     ;; the containment in `cooked--handle-osc', and under debug that containment
@@ -710,6 +738,7 @@ request arrived."
 (ert-deftest cooked-osc-51-is-closed-until-opted-in ()
   "The command channel is the one place terminal output becomes action, so it
 must do nothing at all until the user has loaded `cooked-osc-eval' on purpose."
+  :tags '(pty)
   (cooked-tests--with-session '("/bin/sh" "-c" "sleep 5")
     (let ((cooked-osc-eval-functions nil)
           (visited nil))
@@ -720,6 +749,7 @@ must do nothing at all until the user has loaded `cooked-osc-eval' on purpose."
 
 (ert-deftest cooked-osc-51-runs-the-fixed-verbs ()
   "The closed set, each reached the way the emulator delivers it: split on `;'."
+  :tags '(pty)
   (cooked-tests--with-session '("/bin/sh" "-c" "sleep 5")
     (let ((visited nil) (other nil) (dir nil) (cleared nil))
       (cl-letf (((symbol-function 'find-file) (lambda (f) (setq visited f)))
@@ -739,6 +769,7 @@ must do nothing at all until the user has loaded `cooked-osc-eval' on purpose."
 (ert-deftest cooked-osc-51-takes-its-argument-verbatim ()
   "Every fixed verb takes exactly one argument, so there is nothing to quote and
 a path may contain the separator and the quote character alike."
+  :tags '(pty)
   (cooked-tests--with-session '("/bin/sh" "-c" "sleep 5")
     (let ((visited nil))
       (cl-letf (((symbol-function 'find-file) (lambda (f) (setq visited f))))
@@ -751,6 +782,7 @@ a path may contain the separator and the quote character alike."
 (ert-deftest cooked-osc-51-declines-a-protocol-version-it-does-not-speak ()
   "Version before verb, so a newer shell snippet is declined rather than
 half-understood by an older Emacs."
+  :tags '(pty)
   (cooked-tests--with-session '("/bin/sh" "-c" "sleep 5")
     (let ((visited nil))
       (cl-letf (((symbol-function 'find-file) (lambda (f) (setq visited f))))
@@ -761,6 +793,7 @@ half-understood by an older Emacs."
 (ert-deftest cooked-osc-51-ignores-a-verb-it-does-not-have ()
   "An unknown verb is refused with a message rather than signalled: this runs from
 a timer the drain queued, where an error is a backtrace nobody asked for."
+  :tags '(pty)
   (cooked-tests--with-session '("/bin/sh" "-c" "sleep 5")
     (let ((visited nil))
       (cl-letf (((symbol-function 'find-file) (lambda (f) (setq visited f))))
@@ -789,6 +822,7 @@ out to a host of their choosing."
 
 (ert-deftest cooked-osc-51-refuses-a-remote-name-through-the-whole-channel ()
   "End to end, in the shape a hostile file would send it."
+  :tags '(pty)
   (cooked-tests--with-session '("/bin/sh" "-c" "sleep 5")
     (let ((visited nil))
       (cl-letf (((symbol-function 'find-file) (lambda (f) (setq visited f))))
@@ -1085,6 +1119,7 @@ prompt whose line the shell kept, the far end of an `ssh', a `no-input-mark'
 session -- where the record used to carry nothing at all.  Percent-encoded
 because kitty's older `cmdline=' spelling holds `printf %q' output, which
 only the shell that wrote it can undo."
+  :tags '(pty)
   (cooked-tests--with-session
       (cooked-tests--marks
        (concat "\\033]133;A\\007$ \\033]133;B\\007"
@@ -1100,6 +1135,7 @@ only the shell that wrote it can undo."
 courtesy.  So one that is too long, or decodes to nothing, or is spelled in
 kitty's ambiguous `cmdline=', leaves the mark standing and the record's
 input merely empty -- never the mark dropped."
+  :tags '(pty)
   (cooked-tests--with-session
       (cooked-tests--marks
        (concat "\\033]133;A\\007$ \\033]133;B\\007"
@@ -1129,6 +1165,7 @@ verbs need no entry, so deny-by-default costs nothing here."
 
 (ert-deftest cooked-osc-51-escape-hatch-refuses-what-is-not-allowlisted ()
   "Output from a hostile host reaches here, and may not intern a name."
+  :tags '(pty)
   (cooked-tests--with-session '("/bin/sh" "-c" "sleep 5")
     (let ((cooked-eval-commands '(("noted" . ignore)))
           (danger nil))
@@ -1146,6 +1183,7 @@ verbs need no entry, so deny-by-default costs nothing here."
 
 (ert-deftest cooked-osc-51-escape-hatch-runs-what-is-allowlisted ()
   "The one verb that still takes many arguments, so the one that still quotes."
+  :tags '(pty)
   (cooked-tests--with-session '("/bin/sh" "-c" "sleep 5")
     (let* ((called nil)
            (cooked-eval-commands `(("noted" . ,(lambda (&rest args) (setq called args))))))
@@ -1175,6 +1213,7 @@ the rest of `cooked--apply' ran against the file buffer, signalled on its nil
 `cooked--screen-start', and `cooked--drain-and-apply''s cleanup cleared
 `cooked--draining' *there* -- leaving this buffer draining for good, so nothing
 it printed afterwards ever appeared again."
+  :tags '(pty)
   (let ((target (make-temp-file "cooked-open" nil ".txt" "opened by the child\n"))
         (terminal nil))
     (unwind-protect
@@ -1205,6 +1244,7 @@ sleep 0.3; printf 'LATER\\n'; sleep 5"
 
 Handlers are an extension point run mid-drain, so one that switches buffers and
 forgets to switch back must cost nothing beyond its own confusion."
+  :tags '(pty)
   (let ((elsewhere (generate-new-buffer "*cooked-elsewhere*")))
     (unwind-protect
         (cooked-tests--with-session
@@ -1237,7 +1277,7 @@ Batch runs no redisplay and no command loop, so the two hooks that would notice
 are called here where Emacs would call them: `cooked--update-attention' from
 `window-buffer-change-functions', and `cooked--track-wandering' from
 `post-command-hook'."
-  :tags '(zsh)
+  :tags '(zsh pty)
   (skip-unless (executable-find "zsh"))
   (let ((buffer (generate-new-buffer "*cooked-zsh*"))
         (target (make-temp-file "cooked-open" nil ".txt" "opened by the child\n")))
@@ -1290,7 +1330,7 @@ are called here where Emacs would call them: `cooked--update-attention' from
 
 (ert-deftest cooked-find-file-works-end-to-end-from-the-shell ()
   "The headline trick: a shell function opens a buffer in the Emacs running it."
-  :tags '(zsh)
+  :tags '(zsh pty)
   (skip-unless (executable-find "zsh"))
   (let ((target (make-temp-file "cooked-open")))
     (unwind-protect
@@ -1311,7 +1351,7 @@ are called here where Emacs would call them: `cooked--update-attention' from
 its whole output family measures from them.  They sat at `point-min' until the
 shell's own marks started feeding them -- which is why `comint-delete-output'
 used to flush the entire buffer."
-  :tags '(zsh)
+  :tags '(zsh pty)
   (skip-unless (executable-find "zsh"))
   (cooked-tests--with-shell ("zsh")
     (cooked--replace-input "echo alpha")
@@ -1380,7 +1420,7 @@ the top and the buffer above grows by exactly what left.
 
 The emulator now keeps each mark on its cell and reports the ones a rewrap moved;
 see `cooked--relocate-marks'."
-  :tags '(zsh)
+  :tags '(zsh pty)
   (skip-unless (executable-find "zsh"))
   (cooked-tests--with-zsh
     (dolist (input '("echo alpha" "echo beta" "echo gamma"))
@@ -1411,7 +1451,7 @@ printing wrapped output walks its own prompt marker away from its prompt.
 Output wider than the screen is what makes it wrapped, so the width here is
 load-bearing: at 20 columns each of these lines is two rows, the second a
 continuation."
-  :tags '(zsh)
+  :tags '(zsh pty)
   (skip-unless (executable-find "zsh"))
   (cooked-tests--with-zsh
     (cooked-tests--resize 8 20)
@@ -1437,7 +1477,7 @@ them is in text Emacs is about to *insert* rather than on a row it is about to
 rewrite.  Both spellings come through `cooked--anchor-position', so the records
 that end up in scrollback and the ones still on the live screen are right
 together."
-  :tags '(zsh)
+  :tags '(zsh pty)
   (skip-unless (executable-find "zsh"))
   (cooked-tests--with-zsh
     (dolist (input '("echo alpha" "echo beta" "echo gamma"))
@@ -1458,7 +1498,7 @@ together."
 it, which collapses every marker Emacs holds into that text -- the rows coming
 back identical is no help, since it was the delete that destroyed them.  So the
 redraw reports its marks the same way a resize does."
-  :tags '(zsh)
+  :tags '(zsh pty)
   (skip-unless (executable-find "zsh"))
   (cooked-tests--with-zsh
     (should (cooked-tests--settle (lambda () (eq cooked--semantic 'input)) 8))
@@ -1478,7 +1518,7 @@ mention again, so `cooked--render-scrolled' drops it -- which keeps the table at
 the handful of marks the live screen carries rather than four per command of the
 session.  The records keep their markers; what goes is the ability to relocate
 them, which nothing will ask for."
-  :tags '(zsh)
+  :tags '(zsh pty)
   (skip-unless (executable-find "zsh"))
   (cooked-tests--with-zsh
     (cooked--replace-input "seq 1 200")
@@ -1496,7 +1536,7 @@ them, which nothing will ask for."
 away for a flag.  It is what `cooked-previous-command' lands on and where the
 outer half of an `evil' command text object starts, and no regexp can recover
 it: a prompt is whatever the user's theme decided to draw."
-  :tags '(zsh)
+  :tags '(zsh pty)
   (skip-unless (executable-find "zsh"))
   (cooked-tests--with-zsh
     (cooked--replace-input "echo alpha")
@@ -1521,7 +1561,7 @@ it: a prompt is whatever the user's theme decided to draw."
 rather than cutting buffer text the grid would still hold.  The check that
 matters is that both ends still agree afterwards: a `cooked-refresh', which
 rebuilds the buffer from the grid alone, must not bring the output back."
-  :tags '(zsh)
+  :tags '(zsh pty)
   (skip-unless (executable-find "zsh"))
   (cooked-tests--with-zsh
     (cooked--replace-input "echo alpha")
@@ -1553,7 +1593,7 @@ rebuilds the buffer from the grid alone, must not bring the output back."
 gone, and exactly the output that has left the grid.  Each half has one owner --
 the emulator removes the rows it still holds, Emacs deletes the scrollback it
 owns outright -- and the seam bookkeeping is only owed when the cut reaches it."
-  :tags '(zsh)
+  :tags '(zsh pty)
   (skip-unless (executable-find "zsh"))
   (cooked-tests--with-zsh
     ;; More lines than the grid is tall, so most of it scrolls into scrollback.
@@ -1595,6 +1635,7 @@ owns outright -- and the seam bookkeeping is only owed when the cut reaches it."
 (ert-deftest cooked-delete-output-refuses-the-row-the-child-is-on ()
   "Below the child's cursor the shell is editing its own prompt line and
 tracking where it sits; moving it would corrupt a redisplay cooked cannot see."
+  :tags '(pty)
   (cooked-tests--with-session '("/bin/sh" "-c" "printf 'ready$ '; exec cat")
     (should (cooked-tests--settle #'cooked--input-start-position))
     (setq cooked--commands
@@ -1606,6 +1647,7 @@ tracking where it sits; moving it would corrupt a redisplay cooked cannot see."
     (should-error (cooked-delete-output) :type 'user-error)))
 
 (ert-deftest cooked-osc-52-copies-to-the-kill-ring ()
+  :tags '(pty)
   (cooked-tests--with-session '("/bin/sh" "-c" "printf '\\033]52;c;aGVsbG8gd29ybGQ=\\007'; sleep 5")
     (let ((kill-ring nil))
       (should (cooked-tests--settle
@@ -1657,6 +1699,7 @@ and returns everything the child received."
   "A query blocks its sender -- neovim's paste provider waits on it -- so the
 refusal is an empty reply, sent once, and the kill ring is neither read nor
 touched."
+  :tags '(pty)
   (cooked-tests--with-kill "secret"
     (cooked-tests--osc-52-replies "\\033]52;c;?\\007"
       (should (equal (replies (lambda (s) (not (string-empty-p s))))
@@ -1664,6 +1707,7 @@ touched."
       (should (equal kill-ring '("secret"))))))
 
 (ert-deftest cooked-osc-52-read-echoes-the-terminator-and-the-target ()
+  :tags '(pty)
   (cooked-tests--osc-52-replies "\\033]52;p;?\\033\\\\"
     (should (equal (replies (lambda (s) (string-suffix-p "\033\\" s)))
                    "\033]52;p;\033\\"))))
@@ -1671,6 +1715,7 @@ touched."
 (ert-deftest cooked-osc-52-private-round-trips-through-a-cut-buffer ()
   "Written to `0', read back from `0', and never near the kill ring --
 while the real clipboard, asked for in the same breath, stays empty."
+  :tags '(pty)
   (cooked-tests--with-kill "secret"
     (let ((cooked-clipboard-read 'private))
       (cooked-tests--osc-52-replies
@@ -1680,12 +1725,14 @@ while the real clipboard, asked for in the same breath, stays empty."
         (should (equal kill-ring '("secret")))))))
 
 (ert-deftest cooked-osc-52-default-reads-no-cut-buffer-either ()
+  :tags '(pty)
   (let ((cooked-clipboard-read nil))
     (cooked-tests--osc-52-replies "\\033]52;0;aGVsbG8=\\007\\033]52;0;?\\007"
       (should (equal (replies (lambda (s) (not (string-empty-p s))))
                      "\033]52;0;\007")))))
 
 (ert-deftest cooked-osc-52-t-answers-from-the-kill-ring-and-primary ()
+  :tags '(pty)
   (cooked-tests--with-kill "héllo"
     (cl-letf (((symbol-function 'gui-get-selection)
                (lambda (type &rest _) (and (eq type 'PRIMARY) "primary"))))
@@ -1701,6 +1748,7 @@ while the real clipboard, asked for in the same breath, stays empty."
   "The prompt names the program and runs outside the filter; a no is still a
 reply, and a second query while the prompt is open is refused rather than
 queued behind it."
+  :tags '(pty)
   (dolist (yes '(t nil))
     (cooked-tests--with-kill "secret"
       (let ((cooked-clipboard-read 'ask)
@@ -1782,6 +1830,7 @@ would encode past it gets the empty reply, once, so the child is not left
 waiting, and a message says why the paste came back blank.  Both settings that
 can hand over the kill ring are checked, since `ask' builds its reply in a
 deferred prompt rather than in the filter."
+  :tags '(pty)
   (dolist (setting '(t ask))
     (cooked-tests--with-kill "0123456789"
       (let ((cooked-clipboard-read setting)
@@ -1803,6 +1852,7 @@ deferred prompt rather than in the filter."
             (should (equal kill-ring '("0123456789")))))))))
 
 (ert-deftest cooked-osc-52-read-at-the-size-bound-is-answered ()
+  :tags '(pty)
   (cooked-tests--with-kill "0123456789"
     (let ((cooked-clipboard-read t)
           (cooked-clipboard-max-size 16))
@@ -1884,6 +1934,7 @@ refuse it, and filling it does not touch the kill ring."
 (ert-deftest cooked-osc-52-read-names-every-target-and-answers-the-first-with-text ()
   "The reply echoes the targets as asked, as xterm does, and its payload comes
 from the first of them that has something to give under the setting."
+  :tags '(pty)
   (cooked-tests--osc-52-replies "\\033]52;cp;?\\007"
     (should (equal (replies (lambda (s) (not (string-empty-p s))))
                    "\033]52;cp;\007")))
@@ -1945,6 +1996,7 @@ and nothing says a copy happened, while PRIMARY and a cut buffer are cleared."
 (ert-deftest cooked-osc-11-answers-a-background-query ()
   "Theme-aware programs block on this before picking a light or dark palette,
 so a terminal that never answers costs them their whole timeout on startup."
+  :tags '(pty)
   (let ((out (make-temp-file "cooked-osc11")))
     (unwind-protect
         (cooked-tests--with-session (cooked-tests--reply-to "\\033]11;?\\007" out)
@@ -1960,6 +2012,7 @@ so a terminal that never answers costs them their whole timeout on startup."
 The answer used to be the theme's face, read without the buffer's remaps, so a
 child was told a background it had already replaced; xterm answers from the
 colours it draws, which DECSCNM exchanges."
+  :tags '(pty)
   (let ((out (make-temp-file "cooked-osc-drawn"))
         (cooked-allow-color-set t))
     (unwind-protect
@@ -2030,6 +2083,7 @@ not here, `17' and `19' the selection: each is answered from the face it would
 be drawn in, and several fall back to a colour `cooked--default-color'
 computes, which is exactly what a query for a colour with no face behind it has
 to be told."
+  :tags '(pty)
   (let ((out (make-temp-file "cooked-color-table"))
         (queries
          (concat
@@ -2076,6 +2130,7 @@ to be told."
 Separate from the table above because it is terminal state rather than a
 question: a child that turned mode 5 on is drawing on the foreground colour,
 and xterm tells it so."
+  :tags '(pty)
   (let ((out (make-temp-file "cooked-color-reverse")))
     (unwind-protect
         (cooked-tests--with-session
@@ -2102,6 +2157,7 @@ the old colour is the true answer.  The honoured case is
 Two sequences rather than one chained `11 ; #ff0000 ; ?', which asks about the
 *cursor*: a chained field advances the code, so the question after a set of the
 background is a question about the next colour along."
+  :tags '(pty)
   (let ((out (make-temp-file "cooked-color-refused"))
         (cooked-allow-color-set nil))
     (unwind-protect
@@ -2127,6 +2183,7 @@ settled the frame -- `cooked--selected-window-changed' here, which is what
 `set-cursor-color' on its own is the gap: it sets a frame parameter and runs no
 hook, so a query between it and the next window change still hears the colour
 the frame had before.  This drives the hook, which is the covered path."
+  :tags '(pty)
   (let ((was (frame-parameter nil 'cursor-color)))
     (unwind-protect
         (cooked-tests--with-echoing-child ""
@@ -2152,6 +2209,7 @@ sweep is answered where it arrives.
 Lisp has no OSC 4 handler left to fall back on, which is the other half of the
 assertion: nothing is registered for the code, so an answer that did not come
 from the core would not come at all."
+  :tags '(pty)
   (let ((out (make-temp-file "cooked-osc4-sweep"))
         (queries (make-temp-file "cooked-osc4-queries"))
         (expected (mapconcat #'cooked-tests--palette-answer
@@ -2183,6 +2241,7 @@ is never behind a freeze and asking for one here would assert the opposite of
 what this test is for.  `OSC 22 ; ?' -- what pointer shape is this? -- is a
 question Lisp still answers, being about a window rather than a colour, and it
 holds DA1 back in exactly the same way."
+  :tags '(pty)
   (let ((out (make-temp-file "cooked-frozen-osc22"))
         (flag (make-temp-name (expand-file-name "cooked-frozen-flag"
                                                 temporary-file-directory))))
@@ -2207,6 +2266,7 @@ holds DA1 back in exactly the same way."
 
 (ert-deftest cooked-osc-color-reply-echoes-the-terminator-it-was-asked-with ()
   "A client that queried with ST does not recognise a BEL-terminated answer."
+  :tags '(pty)
   (let ((out (make-temp-file "cooked-osc10")))
     (unwind-protect
         (cooked-tests--with-session (cooked-tests--reply-to "\\033]10;?\\033\\\\" out)
@@ -2218,6 +2278,7 @@ holds DA1 back in exactly the same way."
 
 (ert-deftest cooked-osc-color-answers-each-part-of-a-chained-query ()
   "`ESC ] 10 ; ? ; ? ST' asks for the foreground and then the background."
+  :tags '(pty)
   (let ((out (make-temp-file "cooked-osc-chain")))
     (unwind-protect
         (cooked-tests--with-session (cooked-tests--reply-to "\\033]10;?;?\\007" out)
@@ -2240,6 +2301,7 @@ with the colour that had just been replaced.
 once, for the set, and not again for the query the core now answers.  The child
 echoes what it is sent -- `cat -v' spelling the escape out -- so the answer
 arrives as buffer text."
+  :tags '(pty)
   (let ((cooked-allow-color-set t)
         (reached 0)
         (osc-color (symbol-function 'cooked--osc-color)))
@@ -2270,6 +2332,7 @@ a set in front of them produces neither a reply nor a change.
 The expected colours are read before the child sends its set.  Read after it,
 they would move with a set that took effect, and the comparison would still
 hold."
+  :tags '(pty)
   (let ((out (make-temp-file "cooked-osc4"))
         (expected (mapconcat
                    (lambda (n)
@@ -2312,6 +2375,7 @@ sets switched on."
 them alone is not left waiting.  The pointer is the `mouse' face over the
 default background, and xterm's Tektronix window, which is not here, has the
 default colours and the cursor's.  None of them is settable."
+  :tags '(pty)
   (let ((out (make-temp-file "cooked-osc-13")))
     (unwind-protect
         (cooked-tests--with-session
@@ -2368,6 +2432,7 @@ back a colour something else set in the meantime rather than the stale one.
 Batch runs no redisplay, so the window hooks are run here where redisplay would
 run them, by their global values: the buffer leaving the window and coming back,
 and the selection moving to another window and back."
+  :tags '(pty)
   (let* ((frame (selected-frame))
          (window (selected-window))
          (before (window-buffer window))
@@ -2440,6 +2505,7 @@ which is a text terminal's."
 one it has not, the top of the stack -- empty, so 0 -- for `__current__',
 Emacs' own text pointer for `__default__', and the arrow shown while the child
 has the mouse, by its CSS name, for `__grabbed__'."
+  :tags '(pty)
   (should (equal (cooked-tests--osc-22-query-reply t)
                  "\033]22;1,0,1,0,text,default\033\\"))
   (let ((cooked-grabbed-pointer-shape nil))
@@ -2449,6 +2515,7 @@ has the mouse, by its CSS name, for `__grabbed__'."
 (ert-deftest cooked-osc-22-query-supports-nothing-where-no-pointer-is-seen ()
   "On a text terminal, and with the knob off, a real child is told no shape is
 supported, since a set would change nothing it could see."
+  :tags '(pty)
   (should (equal (cooked-tests--osc-22-query-reply nil)
                  "\033]22;0,0,0,0,text,default\033\\"))
   (let ((cooked-allow-pointer-shape nil))
@@ -2459,6 +2526,7 @@ supported, since a set would change nothing it could see."
   "kitty's `ESC ] 22 ; ST' resets the top of the stack to the default pointer
 and leaves what is under it for the pop; a 17th push drops the oldest shape;
 and turning the knob off takes a shape on show away at once."
+  :tags '(pty)
   (cooked-tests--with-session '("/bin/sh" "-c" "stty -icanon -echo; printf '\\033[?1000h'; exec sleep 30")
     (should (cooked-tests--settle (lambda () cooked--mouse-grab)))
     (cl-flet ((shown () (and cooked--pointer-overlay
@@ -2500,6 +2568,7 @@ and turning the knob off takes a shape on show away at once."
   "The pointer changes over the screen and not the scrollback above it, stays off
 the scrollback when more output scrolls the screen down, and is gone the moment
 the child stops asking for mouse reports."
+  :tags '(pty)
   (let ((go (make-temp-name (expand-file-name "cooked-osc22-go" temporary-file-directory))))
     (unwind-protect
         (cooked-tests--with-session
@@ -2541,6 +2610,7 @@ while [ ! -e %s ]; do sleep 0.05; done; seq 100 160; echo scrolled; exec sleep 3
   "A drain that scrolls nothing, and a set of the shape already on top, do not
 move the overlay.  A move to the same bounds still marks the buffer's overlays
 changed, which costs redisplay its shortcuts for an unchanged buffer."
+  :tags '(pty)
   (let ((go (make-temp-name (expand-file-name "cooked-osc22-go" temporary-file-directory)))
         (moves 0))
     (unwind-protect
@@ -2575,6 +2645,7 @@ exec sleep 30"
 reporting off, or with only alternate scroll opening the gate, Emacs' own
 I-beam shows; a shape the child sets replaces the arrow; and the knob follows a
 change without waiting for a drain."
+  :tags '(pty)
   (cooked-tests--with-session '("/bin/sh" "-c" "stty -icanon -echo; exec sleep 30")
     (cl-flet ((shown () (and cooked--pointer-overlay
                              (overlay-get cooked--pointer-overlay 'pointer))))
@@ -2606,6 +2677,7 @@ change without waiting for a drain."
   "Push, pop and set move the top of the current screen's stack; the other
 screen's stack is untouched; a reset empties both; and with the knob off a set
 does nothing and a query is told nothing is supported."
+  :tags '(pty)
   (cooked-tests--with-session '("/bin/sh" "-c" "stty -icanon -echo; printf '\\033[?1000h'; exec sleep 30")
     (should (cooked-tests--settle (lambda () cooked--mouse-grab)))
     (let ((cooked--osc-bell-terminated t)
@@ -2686,6 +2758,7 @@ carry it -- after the `?', in place of an index or target, and stored first by
 a set or push that a later query reads back -- with every knob that widens an
 answer turned on.  The child's input must never contain that text.  A DSR is
 sent last, so its answer marks the point by which everything has come back."
+  :tags '(pty)
   (let* ((payload "rm -rf ~ x")
          (bodies
           (append
@@ -2733,6 +2806,7 @@ Only when both remaps are in force and nothing outranks them."
   "DECSCNM from a real child: set, reset, and set again then RIS.
 Each step waits on the child reading a line, so no two of them can land in one
 drain and cancel out before the buffer has seen the first."
+  :tags '(pty)
   (cooked-tests--with-session
       '("/bin/sh" "-c" "stty raw -echo; printf '\\033[?5h'; read -r _; printf '\\033[?5l'; read -r _; printf '\\033[?5h'; read -r _; printf '\\033c'; sleep 5")
     (let ((foreground (cooked--default-color 'foreground))
@@ -2757,6 +2831,7 @@ The set and the reset reach the core in one read, so the drain after them report
 the level where it began; only the toggle count says anything happened.  Every
 change actually drawn is recorded, and the screen must have gone reversed and
 then come back, with the reversal held until the timer ends it."
+  :tags '(pty)
   (let ((drawn nil))
     (cl-flet ((record (on)
                 (unless (eq on cooked--reverse-screen)
@@ -2778,6 +2853,7 @@ then come back, with the reversal held until the timer ends it."
 (ert-deftest cooked-a-held-flash-outlasts-the-drains-during-it ()
   "Drains arriving while a flash shows leave it showing, and its end draws the
 level the last of them reported, which a reset in the meantime may have moved."
+  :tags '(pty)
   (cooked-tests--with-session '("/bin/sh" "-c" "sleep 5")
     (cooked--set-reverse-screen nil 2)
     (should cooked--reverse-screen)
@@ -2914,6 +2990,7 @@ buffer's remaps: after an OSC 11 set, or under the three DECSCNM remaps, the
 text came out in the old background over the new one, plainly legible.  Q is
 concealed in the default colours, R is concealed and reversed, and the a
 beside them is ordinary text, there to show each step really moved the colours."
+  :tags '(pty)
   (cooked-tests--with-tty-frame
     (cooked-tests--with-session
         '("/bin/sh" "-c" "printf 'a\\033[8mQ\\033[7mR\\033[m\\n'; sleep 5")
@@ -2957,6 +3034,7 @@ beside them is ordinary text, there to show each step really moved the colours."
 
 (ert-deftest cooked-reverse-video-from-a-child-reaches-the-buffer ()
   "`printf \\='\\e[7mX\\e[m\\=' leaves X in a face that draws reversed."
+  :tags '(pty)
   (cooked-tests--with-session '("/bin/sh" "-c" "printf 'a\\033[7mX\\033[mb\\n'; sleep 5")
     (should (cooked-tests--settle
              (lambda () (string-match-p "aXb" (cooked-tests--text)))))
@@ -2978,6 +3056,7 @@ scheme change by querying the background cannot be told two different things."
 (ert-deftest cooked-color-scheme-is-answered-from-session-start ()
   "`cooked--start' reports it once, or a session that outlives no theme change
 would answer `CSI ? 996 n' with silence for its whole life."
+  :tags '(pty)
   (let ((out (make-temp-file "cooked-996")))
     (unwind-protect
         (cooked-tests--with-session
@@ -3018,6 +3097,7 @@ function: the wiring — the hook, `cooked--dolist-buffers', and the buffer bein
 current — is the half most likely to be wrong.  The scheme is stubbed rather than
 really themed: `-Q --batch' has no theme worth enabling, and the derivation is
 `cooked-color-scheme-follows-the-rendered-background'."
+  :tags '(pty)
   (let ((out (make-temp-file "cooked-2031"))
         (scheme 'dark))
     (unwind-protect
@@ -3047,6 +3127,7 @@ really themed: `-Q --batch' has no theme worth enabling, and the derivation is
       (delete-file out))))
 
 (ert-deftest cooked-a-theme-change-says-nothing-to-an-unsubscribed-child ()
+  :tags '(pty)
   (let ((out (make-temp-file "cooked-no-2031"))
         (scheme 'dark))
     (unwind-protect
@@ -3074,6 +3155,7 @@ really themed: `-Q --batch' has no theme worth enabling, and the derivation is
 empties the buffer -- the `2 J' before it archives the screen rather than losing
 it.  Unlike `2 J', real xterm's `3 J' never touches the visible screen either,
 only the scrollback."
+  :tags '(pty)
   (cooked-tests--with-session (list "/bin/sh" "-c" cooked-tests--erase-scrollback-script)
     (should (cooked-tests--settle
              (lambda () (string-match-p "line60" (cooked-tests--text)))))
@@ -3111,6 +3193,7 @@ A second `C' before the `D' would move the start of the output region down to
 it, dropping whatever the command printed in between -- and the exit code, which
 the first mark opened the record for, would then be attributed to a region that
 does not describe it.  The first `C' wins."
+  :tags '(pty)
   (cooked-tests--with-session
       (cooked-tests--marks
        "\\033]133;A\\007$ \\033]133;B\\007cmd\\r\\n\\033]133;C\\007one\\r\\n\\033]133;C\\007two\\r\\n\\033]133;D;0\\007")
@@ -3127,6 +3210,7 @@ does not describe it.  The first `C' wins."
   "The escape hatch on that rule.  A shell that drops its `D' -- or one killed
 between two commands -- must still open a record at its next prompt, or the
 session never produces another one.  `A' is what says the last command is over."
+  :tags '(pty)
   (cooked-tests--with-session
       (cooked-tests--marks
        "\\033]133;C\\007one\\r\\n\\033]133;A\\007$ \\033]133;B\\007\\033]133;C\\007two\\r\\n\\033]133;D;0\\007")
@@ -3141,6 +3225,7 @@ session never produces another one.  `A' is what says the last command is over."
 (ert-deftest cooked-a-second-command-end-is-a-no-op ()
   "`D' clears the start marker on its way out and guards on it, so the second one
 has nothing to close.  One record, and the exit code is the first `D''s."
+  :tags '(pty)
   (cooked-tests--with-session
       (cooked-tests--marks
        "\\033]133;A\\007$ \\033]133;B\\007\\033]133;C\\007out\\r\\n\\033]133;D;0\\007\\033]133;D;7\\007")
@@ -3152,6 +3237,7 @@ has nothing to close.  One record, and the exit code is the first `D''s."
   "There is no region to record and no input to attribute to it.  A `D' arriving
 alone is a shell whose `C' we never saw -- the first prompt after sourcing the
 snippet, or a `no-marks' rc that only half took effect."
+  :tags '(pty)
   (cooked-tests--with-session
       (cooked-tests--marks "\\033]133;A\\007$ \\033]133;B\\007\\033]133;D;0\\007")
     (should (cooked-tests--settle (lambda () (eq cooked--semantic nil)) 8))
@@ -3161,6 +3247,7 @@ snippet, or a `no-marks' rc that only half took effect."
   "A second `A' before any `C' is a prompt redrawn, not a command begun -- a
 theme repainting, or two emitters bracketing the same prompt.  The later mark
 wins, because it is the one the prompt on screen actually starts at."
+  :tags '(pty)
   (cooked-tests--with-session
       (cooked-tests--marks "one\\r\\n\\033]133;A\\007two\\r\\n\\033]133;A\\007$ \\033]133;B\\007")
     (should (cooked-tests--settle
@@ -3178,6 +3265,7 @@ wins, because it is the one the prompt on screen actually starts at."
 the line the same way a first prompt does, and deliberately does *not* move the
 prompt marker: the command record is filed under the prompt the construct began
 at, not under its last continuation line."
+  :tags '(pty)
   (cooked-tests--with-session
       (cooked-tests--marks
        "\\033]133;A\\007$ for x in 1 2; do\\r\\n\\033]133;A;k=s\\007> \\033]133;B\\007")
@@ -3202,6 +3290,7 @@ no `A' ever set a prompt marker and no `C' ever consumed one.  Both arms that
 clear the flag are therefore unreachable, and every line submitted afterwards was
 appended to the one before it -- one record's input growing without bound, and
 the whole session's history attached to whichever command finally closed."
+  :tags '(pty)
   (cooked-tests--with-session
       (cooked-tests--marks "\\033]133;A;k=s\\007> \\033]133;B\\007")
     (should (cooked-tests--settle (lambda () (eq cooked--semantic 'input)) 8))
@@ -3222,7 +3311,7 @@ the shell's own line editor.
 The record is the other half.  Each continuation line is submitted separately,
 so the command's own text has to accumulate across them or the record for the
 whole construct would say only its last line."
-  :tags '(zsh)
+  :tags '(zsh pty)
   (skip-unless (executable-find "zsh"))
   (cooked-tests--with-zsh
     (cooked--replace-input "for x in alpha beta; do")
@@ -3412,6 +3501,7 @@ including one that renders nothing and puts the state somewhere else entirely."
       (should (cooked--mode-line)))))
 
 (ert-deftest cooked-progress-reaches-the-mode-line-from-a-real-child ()
+  :tags '(pty)
   (cooked-tests--with-session
       '("/bin/sh" "-c" "printf '\\033]9;4;1;37\\007'; sleep 5")
     (should (cooked-tests--settle (lambda () (equal cooked--progress '(set . 37)))))
@@ -3424,6 +3514,7 @@ tmux passes on a pane's `9;4;3' as `Spb' with a percentage of -1, closed
 by ST, and that is what the child sends here.  The Rust test
 `the_extended_names_tmux_reads_do_what_they_say' pins the entry's `Spb' to
 the same bytes."
+  :tags '(pty)
   (cooked-tests--with-session
       '("/bin/sh" "-c" "printf '\\033]9;4;1;37\\033\\\\\\033]9;4;3;-1\\033\\\\'; sleep 5")
     (should (cooked-tests--settle
@@ -3453,6 +3544,7 @@ Tools resend the same percentage many times a second while a step runs."
 (ert-deftest cooked-progress-is-cleared-when-the-command-is-over ()
   "A build that never sends the report removing its bar loses it at the shell's
 next OSC 133 C, at its D, and when the child exits."
+  :tags '(pty)
   (let ((go (make-temp-name (expand-file-name "cooked-progress-go" temporary-file-directory))))
     (unwind-protect
         (cooked-tests--with-session
@@ -3531,6 +3623,7 @@ shell has sent D and its next prompt."
 (ert-deftest cooked-command-end-ends-size-reports ()
   "A command killed with mode 2048 on would have every resize type
 `ESC [ 48 ; ...' into the prompt after it."
+  :tags '(pty)
   (cooked-tests--after-dying-command "\\033[?2048h"
       (cooked-tests--mode-probe 2048)
     (cooked-tests--text-has "before:.*E\\[\\?2048;1\\$y")
@@ -3539,6 +3632,7 @@ shell has sent D and its next prompt."
 (ert-deftest cooked-command-end-ends-mouse-tracking ()
   "Left on, a hovering pointer is input for the next program that takes the
 keyboard."
+  :tags '(pty)
   (cooked-tests--after-dying-command "\\033[?1003h\\033[?1006h" nil
     (cooked-mouse-state-motion cooked--mouse-state)
     (and (cooked-tests--text-has "next\\$")
@@ -3547,6 +3641,7 @@ keyboard."
 
 (ert-deftest cooked-command-end-ends-focus-reports ()
   "Left on, every change of window types `ESC [ I' into bash."
+  :tags '(pty)
   (cooked-tests--after-dying-command "\\033[?1004h" nil
     (cooked--focus-events-p cooked--session)
     (and (cooked-tests--text-has "next\\$")
@@ -3555,6 +3650,7 @@ keyboard."
 (ert-deftest cooked-command-end-pops-the-primary-kitty-flags ()
   "A primary-screen program that pushed kitty flags and crashed left bash
 reading `CSI 114 ; 5 u' for C-r."
+  :tags '(pty)
   (cooked-tests--after-dying-command "\\033[>1u" nil
     (eq cooked--keys 'kitty)
     (and (cooked-tests--text-has "next\\$")
@@ -3563,6 +3659,7 @@ reading `CSI 114 ; 5 u' for C-r."
 (ert-deftest cooked-command-end-empties-the-alternate-kitty-stack ()
   "A program that left the alternate screen without popping handed its flags to
 the next full-screen program that pushes none of its own."
+  :tags '(pty)
   (cooked-tests--after-dying-command "\\033[?1049h\\033[>1u\\033[?1049l"
       (lambda (label)
         (format "stty raw -echo; printf '\\033[?1049h\\033[?u'; \
@@ -3574,6 +3671,7 @@ printf '%s:%%s\\r\\n' \"$r\" | tr '\\033' E;"
 
 (ert-deftest cooked-command-end-empties-the-pointer-stacks ()
   "A pointer a crashed editor left as a text bar is not the shell's."
+  :tags '(pty)
   (cooked-tests--after-dying-command "\\033]22;>text\\007" nil
     (alist-get 'main cooked--pointer-stacks)
     (and (cooked-tests--text-has "next\\$")
@@ -3583,6 +3681,7 @@ printf '%s:%%s\\r\\n' \"$r\" | tr '\\033' E;"
   "bash, zsh and fish all set bracketed paste before the prompt that carries
 their A, so the handover must not take it back: at D it is still as the command
 left it, and the shell clears it before the next command itself."
+  :tags '(pty)
   (cooked-tests--after-dying-command "\\033[?2004h" nil
     (cooked--bracketed-paste-p cooked--session)
     (and (cooked-tests--text-has "next\\$")
@@ -3611,6 +3710,7 @@ BEFORE must come to hold first; AFTER is the body run once the child is gone."
 (ert-deftest cooked-exit-ends-hover-tracking ()
   "Nothing reports the mouse off once the child is dead, so a buffer kept after
 exit went on holding `track-mouse' on, a command-loop turn per glyph crossed."
+  :tags '(pty)
   (let ((cooked-mouse-hover-motion t))
     (cooked-tests--until-exit
         "printf '\\033[?1049h\\033[?1003h\\033[?1006h'; stty raw -echo"
@@ -3621,6 +3721,7 @@ exit went on holding `track-mouse' on, a command-loop turn per glyph crossed."
 (ert-deftest cooked-exit-takes-off-the-cursor-colour-and-marks-do-not ()
   "base16-shell sets OSC 12 from `.bashrc', so a prompt mark keeps it; the frame
 wearing it after the child exited was the other way round."
+  :tags '(pty)
   (let ((cooked-allow-color-set t))
     (cooked-tests--until-exit
         "printf '\\033]12;#ff0000\\007\\033]133;C\\007\\033]133;D;0\\007\\033]133;A\\007$ '"
@@ -3629,6 +3730,7 @@ wearing it after the child exited was the other way round."
 
 (ert-deftest cooked-osc-9-notifies-from-a-real-child ()
   "The TERM.org check, end to end: a message notifies and `9;9;PATH' does not."
+  :tags '(pty)
   (let* ((cooked-allow-notifications t)
          (seen (cooked-tests--capturing-notifications
                  (cooked-tests--with-session
@@ -3640,6 +3742,7 @@ wearing it after the child exited was the other way round."
 
 (ert-deftest cooked-user-var-set-reaches-the-hook ()
   "The WezTerm snippet's shape, through a real pty: stored, then announced."
+  :tags '(pty)
   (let* ((seen nil)
          (cooked-user-var-functions
           (list (lambda (name value) (push (cons name value) seen)))))

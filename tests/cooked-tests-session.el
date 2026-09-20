@@ -88,6 +88,7 @@ is, and the conversion used to be a cast.  4294967305 truncates to 9, so asking
 for a signal that does not exist killed the child outright -- the one number in
 range where getting it wrong is unrecoverable.  It is rejected now, and the
 child is still there afterwards to prove it."
+  :tags '(pty)
   (cooked-tests--with-session (list "/bin/sh")
     (should (cooked-tests--settle (lambda () (cooked--live-p cooked--session))))
     (dolist (n (list 9999 4294967305 99999999999 -1))
@@ -107,6 +108,7 @@ can see which platform it is on; see `cooked--send-job-control'.
 
 A name that is not a signal is refused the same way a number that is not one
 is, and the child is still there afterwards to prove nothing was guessed at."
+  :tags '(pty)
   (cooked-tests--with-session (list "/bin/sh")
     (should (cooked-tests--settle (lambda () (cooked--live-p cooked--session))))
     (dolist (name '(sigwoof sig nil t))
@@ -170,7 +172,7 @@ there is no autoload left to resolve."
 (ert-deftest cooked-zsh-sources-the-users-zshenv ()
   "Regression: ZDOTDIR pointed at a directory with only a .zshrc, so the user's
 own ~/.zshenv — where PATH and friends usually live — was never read."
-  :tags '(zsh)
+  :tags '(zsh pty)
   (skip-unless (executable-find "zsh"))
   (cooked-tests--with-fake-zdotdir
       '((".zshenv" . "export COOKED_ZSHENV_WITNESS=yes\n")
@@ -195,7 +197,7 @@ own ~/.zshenv — where PATH and friends usually live — was never read."
 theme rebuilding PS1 from its own precmd dropped it — and with it the whole
 hand-the-keyboard-back feature.  Exit codes broke the same way, because our
 precmd then ran after the theme's and read its status instead of the command's."
-  :tags '(zsh)
+  :tags '(zsh pty)
   (skip-unless (executable-find "zsh"))
   (cooked-tests--with-fake-zdotdir
       '((".zshrc" . "__theme_precmd() { PS1='theme%% ' }\n\
@@ -265,7 +267,7 @@ which is the half a user standing the marks down still wants.
 
 The snippet defers its own setup to the first prompt precisely so that the rc,
 which runs earlier, has somewhere to stand."
-  :tags '(zsh)
+  :tags '(zsh pty)
   (skip-unless (executable-find "zsh"))
   (cooked-tests--with-fake-zdotdir
       '((".zshrc" . "PROMPT='$ '\nCOOKED_SHELL_INTEGRATION_FEATURES=\"${COOKED_SHELL_INTEGRATION_FEATURES-} no-marks\"\n"))
@@ -337,6 +339,7 @@ poll it is in when teardown reaches it -- deliberately, since a descriptor close
 under a polling thread is a number the kernel may hand straight to the next pty.
 
 Skipped where the running process\\=' descriptors are not listed in a directory."
+  :tags '(pty)
   (let ((directory (seq-find #'file-directory-p '("/proc/self/fd" "/dev/fd"))))
     (skip-unless directory)
     (cl-flet ((descriptors () (length (directory-files directory))))
@@ -381,23 +384,28 @@ that was passed rather than the one that was wanted."
                      (list 'cooked-session-p filter))))))
 
 (ert-deftest cooked-exit-status-is-reported ()
+  :tags '(pty)
   (cooked-tests--with-session '("/bin/sh" "-c" "exit 9")
     (should (cooked-tests--settle
              (lambda () (string-match-p "\\[exited 9\\]" (cooked-tests--text)))))))
 
 (ert-deftest cooked-buffer-is-kept-on-exit-by-default ()
+  :tags '(pty)
   (should-not (cooked-tests--run-until-dead '("/bin/sh" "-c" "exit 0") 1)))
 
 (ert-deftest cooked-buffer-can-close-itself-on-exit ()
+  :tags '(pty)
   (let ((cooked-kill-buffer-on-exit t))
     (should (cooked-tests--run-until-dead '("/bin/sh" "-c" "exit 3") 5))))
 
 (ert-deftest cooked-buffer-can-close-itself-only-on-success ()
+  :tags '(pty)
   (let ((cooked-kill-buffer-on-exit 'on-success))
     (should (cooked-tests--run-until-dead '("/bin/sh" "-c" "exit 0") 5))
     (should-not (cooked-tests--run-until-dead '("/bin/sh" "-c" "exit 3") 1))))
 
 (ert-deftest cooked-buffer-close-can-be-decided-by-a-function ()
+  :tags '(pty)
   (let ((cooked-kill-buffer-on-exit (lambda (code) (eql code 7))))
     (should (cooked-tests--run-until-dead '("/bin/sh" "-c" "exit 7") 5))
     (should-not (cooked-tests--run-until-dead '("/bin/sh" "-c" "exit 8") 1))))
@@ -681,7 +689,7 @@ installs nothing there, by design.  That is the arrangement worth asserting,
 because it is the one every fish user gets.  The snippet's own path is
 `cooked-fish-supplies-the-marks-fish-declines-to-send', which has to force
 fish to be quiet before there is anything of ours to see."
-  :tags '(fish)
+  :tags '(fish pty)
   (skip-unless (executable-find "fish"))
   (cooked-tests--with-fish
     ;; The `B' arrived and was believed: Emacs owns the line.
@@ -876,7 +884,7 @@ Asserted through the feature list rather than by counting marks on the wire,
 because the feature list is *how* it gets out of the way: the snippet appends the
 same `no-NAME' forms an rc would, so there is one mechanism deciding what is on
 and `__cooked_want' remains the only thing that answers."
-  :tags '(fish)
+  :tags '(fish pty)
   (skip-unless (executable-find "fish"))
   (cooked-tests--with-fish
     ;; Asked of `__cooked_want' rather than read off `$__cooked_features', which is
@@ -1051,7 +1059,7 @@ three shells at once, so all three are checked here against the same directory."
 
 (ert-deftest cooked-real-bash-reaches-input-state-at-its-prompt ()
   "The headline case: a real interactive shell, whose prompt is raw-mode."
-  :tags '(bash)
+  :tags '(bash pty)
   (skip-unless (executable-find "bash"))
   (cooked-tests--with-shell
       ("bash"
@@ -1073,7 +1081,7 @@ three shells at once, so all three are checked here against the same directory."
 
 (ert-deftest cooked-zsh-reports-command-exit-codes ()
   "Regression: `local status=$?' fails in zsh, which silently killed OSC 133;D."
-  :tags '(zsh)
+  :tags '(zsh pty)
   (skip-unless (executable-find "zsh"))
   (cooked-tests--with-shell ("zsh" :settle (lambda () (eq cooked--semantic 'input)))
     (should-not (string-match-p "read-only variable" (cooked-tests--text)))
@@ -1096,6 +1104,7 @@ three shells at once, so all three are checked here against the same directory."
 
 (ert-deftest cooked-resize-reaches-sessions-in-other-buffers ()
   "`window-size-change-functions' runs per frame, not per buffer."
+  :tags '(pty)
   (cooked-tests--with-session '("/bin/sh" "-c" "while true; do sleep 0.1; done")
     (should (cooked-tests--settle (lambda () cooked--session)))
     (let ((buffer (current-buffer)))
@@ -1115,6 +1124,7 @@ three shells at once, so all three are checked here against the same directory."
   "`text-scale-increase' rescales the font without resizing any window, so
 `window-configuration-change-hook' and `window-size-change-functions' both
 stay silent -- `text-scale-mode-hook' is the one that has to pick it up."
+  :tags '(pty)
   (cooked-tests--with-session '("/bin/sh" "-c" "while true; do sleep 0.1; done")
     (should (cooked-tests--settle (lambda () cooked--session)))
     (set-window-buffer (selected-window) (current-buffer))
@@ -1140,6 +1150,7 @@ height by `face-remap-add-relative' is the same, and runs no hook either.
 Batch has no line spacing or face height to measure, so the line height is made
 to include a pixel of each, as a graphical frame's would, and the redisplay
 that would draw the buffer runs its hooks by hand."
+  :tags '(pty)
   (cooked-tests--with-session
       '("/bin/sh" "-c" "old=; while :; do s=$(stty size); [ \"$s\" = \"$old\" ] || echo \"$s\"; old=$s; sleep 0.05; done")
     (set-window-buffer (selected-window) (current-buffer))
@@ -1172,6 +1183,7 @@ that would draw the buffer runs its hooks by hand."
 Whichever database it came out of -- the one we ship or one compiled here.  The
 assertion is the child's answer, which is the only one that matters, and
 `tput colors' is the child answering."
+  :tags '(pty)
   (should (equal (cooked--terminfo) cooked-term-name))
   (cooked-tests--with-session '("/bin/sh" "-c" "printf '%s|%s\\n' \"$TERM\" \"$(tput colors)\"; sleep 5")
     (should (cooked-tests--settle
@@ -1189,6 +1201,7 @@ assertion is the child's answer, which is the only one that matters, and
 
 This is the request neovim makes over ssh, where no terminfo database knows
 our TERM, and the only way it learns there is direct colour."
+  :tags '(pty)
   (let ((out (make-temp-file "cooked-xtgettcap")))
     (unwind-protect
         (cooked-tests--with-session (cooked-tests--reply-to "\\033P+q5463\\033\\\\" out)
@@ -1204,6 +1217,7 @@ A freeze defers the render, and every reply used to be sent from the drain, so
 DA1 from a child started under a held selection went unanswered until the user
 let go.  The child waits on a flag file rather than a delay, so the query is
 provably sent after the freeze is in place."
+  :tags '(pty)
   (let ((out (make-temp-file "cooked-frozen-da1"))
         (flag (make-temp-name (expand-file-name "cooked-frozen-flag"
                                                 temporary-file-directory))))
@@ -1237,6 +1251,7 @@ Hiding a buffer leaves its screen undrawn, and none of this is drawing: DA1
 goes out from the core, and the OSC 133 marks that make a command record ask
 for a whole drain because a marker needs its row.  The child waits on a flag
 file, so everything it sends is sent after the buffer is hidden."
+  :tags '(pty)
   (let ((out (make-temp-file "cooked-hidden-da1"))
         (flag (make-temp-name (expand-file-name "cooked-hidden-flag"
                                                 temporary-file-directory))))
@@ -1296,6 +1311,7 @@ out is stale whether or not anything is still holding it back."
 The child prints after the buffer is hidden and says so with a file, and the
 screen still does not show it: nothing woke Emacs, and a drain would have left
 the rows out anyway.  `cooked--sync', which readers of the text call, draws it."
+  :tags '(pty)
   (let ((flag (make-temp-name (expand-file-name "cooked-hidden-flag"
                                                 temporary-file-directory)))
         (done (make-temp-name (expand-file-name "cooked-hidden-done"
@@ -1329,6 +1345,7 @@ child blocks, so a hidden drain that kept it would stop the build for good.
 Every drain until the child exits leaves the rows out; the one that reports the
 exit is whole, since the session is gone after it and nothing could draw the
 screen later."
+  :tags '(pty)
   (let ((rows 0))
     (cooked-tests--with-session '("/bin/sh" "-c" "stty raw -echo; printf ready; read -r _; yes \"$(printf 'y\\r')\" | head -n 2000000")
       (should (cooked-tests--settle
@@ -1357,6 +1374,7 @@ window hook says a whole drain is owed and `cooked--sync-before-redisplay'
 makes it, so the first frame is the child's screen as it is now, with point on
 its cursor rather than somewhere in the scrollback that went in above.  The
 cursor starts at the top of the screen, where an insertion leaves point behind."
+  :tags '(pty)
   (let ((done (make-temp-name (expand-file-name "cooked-hidden-done"
                                                 temporary-file-directory)))
         (appended 0))
@@ -1406,6 +1424,7 @@ key into a buffer with no window, and `cooked--sync-before-redisplay' forces a
 whole drain -- which is what actually refreshes the copy -- before the window
 is redrawn.  This is the Lisp half: the flags are still stale immediately after
 the push, and already correct by the time the buffer can take a keystroke."
+  :tags '(pty)
   (cooked-tests--with-session
       (list "/bin/sh" "-c" "stty raw -echo; printf 'ready\\r'; read -r _; printf '\\033[>1u'; cat -v")
     (should (cooked-tests--settle
@@ -1431,7 +1450,7 @@ the push, and already correct by the time the buffer can take a keystroke."
 RGB is declared on cooked-direct and deliberately not on cooked-256color, so
 the same question gets a hit under one TERM and a miss under the other.  The
 name travels to the core in the environment the child is spawned with."
-  :tags '(terminfo)
+  :tags '(terminfo pty)
   (skip-unless (cooked--terminfo-database))
   (dolist (case '(("cooked-direct" . "\033P1+r524742\033\\")
                   ("cooked-256color" . "\033P0+r524742\033\\")))
@@ -1527,7 +1546,7 @@ the binding existed to replace."
 
 (ert-deftest cooked-full-screen-programs-redraw-after-a-resize ()
   "End to end: htop must move its footer when the terminal grows."
-  :tags '(htop)
+  :tags '(htop pty)
   (skip-unless (executable-find "htop"))
   (let ((buffer (generate-new-buffer "*cooked-htop*")))
     (unwind-protect
@@ -1588,6 +1607,7 @@ the binding existed to replace."
 which is what `vterm' and `eat' never offered: their commands display what they
 make.  A list is the child's argv, and `cooked-buffer-list' finds the session by
 where its shell is, at or below the directory asked about."
+  :tags '(pty)
   (let ((directory (file-name-as-directory (make-temp-file "cooked-create" t))))
     (unwind-protect
         (cooked-tests--with-created (buffer (cooked-create '("/bin/sh" "-c" "exec sleep 5")
@@ -1767,6 +1787,7 @@ window, or one the user pinned) must still land somewhere rather than
 made them the only options a running session could not be told about, and meant
 tuning the one knob with a taste question behind it began by killing the
 terminal you were tuning it for."
+  :tags '(pty)
   (cooked-tests--with-session '("/bin/sh" "-c" "sleep 5")
     (let ((cooked-min-redisplay-interval cooked-min-redisplay-interval)
           (cooked-backlog-limit cooked-backlog-limit))
@@ -1826,6 +1847,7 @@ The sender tells `cooked--send' the bytes are typing, and that lets the frame
 which echoes them skip `cooked-min-redisplay-interval'.  Held down, every key
 otherwise waited out the rest of the interval that the previous echo had
 started."
+  :tags '(pty)
   (should (cooked-tests--echo-arrives-early-p t)))
 
 (ert-deftest cooked-input-the-user-did-not-type-waits-out-the-interval ()
@@ -1837,6 +1859,7 @@ echo anybody is waiting on, and a frame apiece is what the interval is there to
 prevent.  The bytes cannot say which they are -- a wheel notch under alternate
 scroll sends the cursor keys a real arrow key sends -- so the sender says, and
 `cooked--send-if-live' is the caller that says nothing."
+  :tags '(pty)
   (should-not (cooked-tests--echo-arrives-early-p nil)))
 
 ;;;; The seam, with wrapped rows kept split
@@ -1908,6 +1931,7 @@ The seam is one number the two ends co-own, and with
 over gets a newline of its own.  The emulator goes on counting a head anyway --
 nothing on that side is told which shape the rows were handed over in -- and
 `cooked--split-seam' is what settles it, once per drain."
+  :tags '(pty)
   (cooked-tests--with-straddling-session nil
     (should (= 0 (cooked-grid-head cooked--grid)))
     (should (= 0 (cooked-tests--seam-offset)))))
@@ -1921,6 +1945,7 @@ rows at the new width.  With rows rejoined that fragment continues the line
 above; with them split it arrives as a line of its own -- a stub of a few
 characters, or of nothing but the padding a chunk boundary landed in -- and
 another one lands at every resize after it."
+  :tags '(pty)
   (cooked-tests--with-straddling-session nil
     (dolist (cols '(30 7 13 10))
       (cooked-tests--split-resize 4 cols)
@@ -1947,6 +1972,7 @@ evict and the transcript must come out of it exactly as tall as it went in.  The
 carry is what breaks that -- twenty characters of head to top up to a whole row
 of thirty leaves a ten-character fragment, and with rows split it lands as a
 third line above the seam that the child never printed."
+  :tags '(pty)
   (cooked-tests--with-straddling-session nil
     (let ((before (count-lines (point-min) (cooked--screen-start-position))))
       (cooked-tests--split-resize 4 30)
@@ -1973,6 +1999,7 @@ continuation, so a resize arriving before the next drain must rewrap against it;
 what the emulator has to stop counting is the head the rows handed over *after*
 the flip do not have, and `cooked--split-seam' picks that up on the drain that
 closes the line.  Both ends agreeing throughout is the whole of the invariant."
+  :tags '(pty)
   (cooked-tests--with-straddling-session t
     ;; Rejoined, so the seam is genuinely mid-line and the core says so.
     (should (> (cooked-grid-head cooked--grid) 0))
@@ -2000,6 +2027,7 @@ closes the line.  Both ends agreeing throughout is the whole of the invariant."
 A reset that fired in both modes would take the head away from the one end that
 has it right, and the next rewrap would resume row 0's line at column zero
 against a buffer holding half of it."
+  :tags '(pty)
   (cooked-tests--with-straddling-session t
     (should (> (cooked-grid-head cooked--grid) 0))
     (should (= (cooked-tests--seam-offset) (cooked-grid-head cooked--grid)))
@@ -2330,7 +2358,7 @@ tmux is kept off the alternate screen and without a status line, which is the
 arrangement docs/SHELL.md gives for marks that last into scrollback.  The long
 command is there to push its own prompt off the screen: a mark that was not
 carried into scrollback with its row would now name a line of its output."
-  :tags '(tmux bash)
+  :tags '(tmux bash pty)
   (skip-unless (cooked-tests--tmux))
   (skip-unless (executable-find "bash"))
   (cooked-tests--with-tmux
@@ -2357,7 +2385,7 @@ The directory is still tracked, but the prompt marks passed through are
 dropped: the screen is tmux\\='s frame and scrolls with no scrollback, so a mark
 there would name a line of output as soon as the pane scrolled, and no command
 record is filed from one."
-  :tags '(tmux bash)
+  :tags '(tmux bash pty)
   (skip-unless (cooked-tests--tmux))
   (skip-unless (executable-find "bash"))
   (cooked-tests--with-tmux "set -g allow-passthrough on\n"
@@ -2376,7 +2404,7 @@ entry\\='s `Swd\\=', and nothing else\\='s.
 and only tmux\\='s own can move `default-directory\\='.  The panes write plain
 OSC 7, which tmux keeps per pane.  A background pane changing directory moves
 nothing, and selecting it hands its directory on."
-  :tags '(tmux bash)
+  :tags '(tmux bash pty)
   (skip-unless (cooked-tests--tmux))
   (skip-unless (executable-find "bash"))
   (cooked-tests--with-tmux "set -g set-titles on\n"

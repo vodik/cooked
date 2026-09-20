@@ -23,6 +23,7 @@
       (match-beginning 0))))
 
 (ert-deftest cooked-osc-8-makes-the-text-a-link ()
+  :tags '(pty)
   (cooked-tests--with-session
       '("/bin/sh" "-c"
         "printf 'see \\033]8;;https://example.com/\\033\\\\here\\033]8;;\\033\\\\ ok\\n'; sleep 5")
@@ -78,6 +79,7 @@ actually active there rather than assumed outright -- see
                    "https://example.com/\nmouse-2, C-c RET: follow link"))))
 
 (ert-deftest cooked-osc-8-survives-being-coloured-mid-link ()
+  :tags '(pty)
   ;; The regression this whole feature is one line away from: OSC 8 is not an SGR
   ;; attribute, so `ESC[0m' must not close it.  Guarded in Rust as well
   ;; (`an_sgr_reset_does_not_close_a_hyperlink'); asserted here because this is the
@@ -93,6 +95,7 @@ actually active there rather than assumed outright -- see
                    "https://example.com/"))))
 
 (ert-deftest cooked-osc-8-keeps-the-childs-own-colour ()
+  :tags '(pty)
   (cooked-tests--with-session
       '("/bin/sh" "-c"
         "printf '\\033[31m\\033]8;;https://example.com/\\033\\\\red\\033]8;;\\033\\\\\\033[0m\\n'; sleep 5")
@@ -104,6 +107,7 @@ actually active there rather than assumed outright -- see
       (should-not (eq face 'cooked-link)))))
 
 (ert-deftest cooked-a-bare-url-is-fontified-by-goto-addr ()
+  :tags '(pty)
   (cooked-tests--with-session
       '("/bin/sh" "-c" "printf 'go to https://example.com/ now\\n'; sleep 5")
     (should (cooked-tests--settle
@@ -132,6 +136,7 @@ An overlay per detected URL is paid twice on a live row: redisplay assembles
 the overlay list per window per redisplay, and `note_mouse_highlight' walks
 `overlays_at' on every motion event.  A build log is mostly URLs, so this is
 not a rounding error -- REPORT.org §7 ranks it fourth of the borrowables."
+  :tags '(pty)
   (cooked-tests--with-session
       '("/bin/sh" "-c"
         "printf 'a https://one.example/ b https://two.example/ c d@e.example\\n'; sleep 5")
@@ -157,6 +162,7 @@ could simply be deleted.  Properties cannot: the guess sets `mouse-face',
 so a blanket `remove-text-properties' over the region would silently
 de-link every real hyperlink on it.  Only runs carrying `cooked-link-url'
 may be cleared."
+  :tags '(pty)
   (cooked-tests--with-session
       '("/bin/sh" "-c"
         "printf '\\033]8;;https://real.example/\\033\\\\LABEL\\033]8;;\\033\\\\ and https://guess.example/\\n'; sleep 5")
@@ -183,6 +189,7 @@ Each rewrite marks the row unfontified, so without this the scan is made again
 on every frame, over text nobody has finished writing.  What must still hold is
 that declining is a *deferral*: the text on the rows above is scanned as
 normal."
+  :tags '(pty)
   (cooked-tests--with-session
       '("/bin/sh" "-c"
         "printf 'settled https://above.example/\\n'; printf 'live https://cursor.example/'; sleep 5")
@@ -206,6 +213,7 @@ A URL printed with no newline after it sits on the cursor's own row, so it is
 declined -- and if nothing ever asked again it would never be a link at all.
 `cooked--release-held-link-row' runs from `cooked--apply', the moment the
 cursor can have moved, and puts the row back on jit-lock's unfontified list."
+  :tags '(pty)
   (cooked-tests--with-session
       '("/bin/sh" "-c"
         "printf 'here https://later.example/'; sleep 0.3; printf '\\nand on\\n'; sleep 5")
@@ -234,6 +242,7 @@ was not scanned at all -- while jit-lock marked it done.  So a URL 180 KB back
 never became a link.  `cooked-tests--fontify' fontifies the whole buffer,
 which holds the cursor's row inside the one chunk, so this has to ask for a
 chunk of its own the way scrolling there does."
+  :tags '(pty)
   (cooked-tests--with-session
       '("/bin/sh" "-c"
         "printf 'old https://scrolled.example/\\n'; awk 'BEGIN { for (i = 0; i < 2400; i++) printf \"%079d\\n\", i }'; printf 'done'; sleep 5")
@@ -295,6 +304,7 @@ unbroken word, so on a 1000-character line that was 6.7 ms a keystroke against
 
 Seventy characters fill three rows and ten of a fourth, so five more keep the
 cursor on that row and the scan has no reason to look at anything."
+  :tags '(pty)
   (cooked-tests--with-narrow-cat
     (cooked-tests--type-and-settle
      (make-string 70 ?a)
@@ -324,6 +334,7 @@ rewrites the word's first row to begin with a scheme while the cursor stays wher
 was.  The rewritten row is scanned at once, since only the cursor's own row is
 held.  Once the cursor leaves the line, the whole of it is scanned again and
 every row of it carries the one URL."
+  :tags '(pty)
   (cooked-tests--with-narrow-cat
     (cooked-tests--type-and-settle
      (make-string 50 ?a)
@@ -348,6 +359,7 @@ every row of it carries the one URL."
         (should (equal (nth 2 run) url))))))
 
 (ert-deftest cooked-an-explicit-link-wins-over-the-guess ()
+  :tags '(pty)
   ;; The text is a URL *and* an OSC 8 span pointing somewhere else.  What the child
   ;; said wins, and the guess is dropped rather than layered underneath it.
   (cooked-tests--with-session
@@ -363,6 +375,7 @@ every row of it carries the one URL."
       (should-not (get-text-property at 'cooked-link-url)))))
 
 (ert-deftest cooked-a-link-does-not-steal-a-click-from-the-child ()
+  :tags '(pty)
   ;; A `keymap' text property is consulted before `emulation-mode-map-alists', so
   ;; without the gate in `cooked-follow-link' a click on a link would beat an active
   ;; `cooked--mouse-grab' -- contradicting the guarantee that a plain click belongs to
@@ -444,6 +457,7 @@ property, so it found `cooked-follow-link' again.
 
 Both halves of the fix are here: the rewrite does not happen while the grab is
 on, and a rewrite that happened anyway is answered once rather than forever."
+  :tags '(pty)
   (cooked-tests--with-file-links
     (cooked-tests--with-session cooked-tests--file-link-child
       (should (cooked-tests--settle
@@ -521,6 +535,7 @@ Claude Code do.
 `cooked--suppress-link-clicks' keeps the rename from happening while the grab
 is on; this is what closes the gesture when it happened anyway, the grab having
 arrived between the press and the release."
+  :tags '(pty)
   (cooked-tests--with-file-links
     (cooked-tests--with-session cooked-tests--file-link-child
       (should (cooked-tests--settle
@@ -558,6 +573,7 @@ arrived between the press and the release."
                                   (cooked-tests--text))))))))
 
 (ert-deftest cooked-a-link-does-not-steal-return-from-the-child ()
+  :tags '(pty)
   (cooked-tests--with-session
       '("/bin/sh" "-c"
         "printf '\\033]8;;https://example.com/\\033\\\\here\\033]8;;\\033\\\\\\n'; sleep 5")
@@ -599,6 +615,7 @@ ask where point landed."
 `browse-url-emacs' opens the file and drops the fragment, so `#L3' used to
 arrive at the top of the file.  End to end, from the escape sequence, so the
 OSC 8 branch of `cooked--open-link-at-point' is what is exercised."
+  :tags '(pty)
   (let ((file (make-temp-file "cooked-link" nil ".txt" "one\ntwo\nthree\nfour\n")))
     (unwind-protect
         (cooked-tests--with-session
@@ -724,6 +741,7 @@ questions.  It used to ask `cooked--child-owns-keyboard-p' and
 With no delegate installed there is nothing above to answer, and the only
 correct behaviour is to follow the link -- not to guess, and not to signal
 `void-function' reaching for a layer that was never loaded."
+  :tags '(pty)
   (cooked-tests--with-session
       '("/bin/sh" "-c"
         "printf '\\033]8;;https://example.com/\\033\\\\here\\033]8;;\\033\\\\\\n'; sleep 5")
@@ -795,6 +813,7 @@ The case no generic provider can get right: an `OSC 8' span's *text* is
 usually a label, so the destination appears nowhere in the buffer.  This is
 also what makes ROADMAP §3 fall out with no embark dependency -- embark's URL
 finder goes through `thing-at-point', so answering here answers there."
+  :tags '(pty)
   (cooked-tests--with-session
       '("/bin/sh" "-c"
         "printf '\\033]8;;https://example.com/deep\\033\\\\LABEL\\033]8;;\\033\\\\\\n'; sleep 5")
@@ -901,6 +920,7 @@ the everyday shape of this."
         (delete-directory root t)))))
 
 (ert-deftest cooked-a-link-survives-scrolling-into-the-scrollback ()
+  :tags '(pty)
   ;; The id travels with the row through eviction, because both live and scrolled
   ;; rows go through the same `Row::runs' -- which is also why a cell's link needed no
   ;; work of its own to get there.
@@ -914,6 +934,7 @@ the everyday shape of this."
       (should (equal (cooked-link-uri at) "https://example.com/")))))
 
 (ert-deftest cooked-links-can-be-switched-off ()
+  :tags '(pty)
   (let ((cooked-detect-links nil))
     (cooked-tests--with-session
         '("/bin/sh" "-c" "printf 'go to https://example.com/ now\\n'; sleep 5")
@@ -930,6 +951,7 @@ The guess runs once per stretch of text, from jit-lock, so a URL found before
 the switch stayed clickable after it was turned off, and one shown while it was
 off never became a link once it was turned back on.  The `OSC 8' span beside
 it is what the child said, and survives both."
+  :tags '(pty)
   (cooked-tests--with-session
       '("/bin/sh" "-c"
         "printf 'go to https://example.com/ or \\033]8;;https://osc.example/\\033\\\\here\\033]8;;\\033\\\\\\n'; sleep 5")
@@ -1198,6 +1220,7 @@ as one silently still missing."
 The guess is redisplay's work now, not the drain's, which is what stops a
 child painting faster than Emacs redraws from being scanned once per frame it
 paints.  Nothing has displayed this buffer, so nothing has guessed yet."
+  :tags '(pty)
   (cooked-tests--with-session
       '("/bin/sh" "-c" "printf 'go to https://example.com/ now\\n'; sleep 5")
     (should (cooked-tests--settle
@@ -1239,6 +1262,7 @@ Both shapes of row, because they take different amounts of the inhibited path:
 plain text applies style spans and nothing else, while box drawing also runs
 `cooked--apply-deco' and is the case the hook cost was measured on -- see
 `cooked--sync-fontification'."
+  :tags '(pty)
   (cooked-tests--with-session
       '("/bin/sh" "-c"
         "printf 'go to https://one.example/ now\\n'; \
@@ -1289,6 +1313,7 @@ glyphs applied to the new text, one call per span, because those are what the
 binding is there to keep quiet.  A property change is the one call whose length
 equals its extent, so on `go to https://...' with `to' in bold, the bold
 span would arrive as a change of 2 over 2 characters inside the rewrite."
+  :tags '(pty)
   (cooked-tests--with-session
       '("/bin/sh" "-c"
         "printf 'go \\033[1mto\\033[0m https://one.example/ now\\n'; \
@@ -1354,6 +1379,7 @@ follows the work -- see `cooked--sync-fontification'."
 filesystem from, which is affordable only because scrollback is final.  The
 live screen is rewritten by the next drain, so an answer about it would be
 bought again every redraw."
+  :tags '(pty)
   (cooked-tests--with-session
       '("/bin/sh" "-c" "for i in $(seq 40); do echo line $i; done; sleep 5")
     (should (cooked-tests--settle
@@ -1423,6 +1449,7 @@ Each live row is its own buffer line, so until the emulator started reporting
 `Row::wrapped' for damaged rows this matched only as far as the first column
 boundary -- `https://example' and nothing else.  The whole URL is now one match,
 and the assertion is on the URL *recorded*, which is the thing a click opens."
+  :tags '(pty)
   (cooked-tests--with-wrapped-line cooked-tests--wrapping-url
     (let ((runs (cooked-tests--url-runs)))
       (should runs)
@@ -1442,6 +1469,7 @@ the row marked as wrapped.  A screen row is inserted without its trailing
 blanks, so joining the two rows at the wrap newline used to read
 \"https://e.x/abcend\" and link that.  The joined text keeps a blank where the
 row's cells end short of the width, as the scrollback's rejoined line does."
+  :tags '(pty)
   (cooked-tests--with-wrapped-line "see https://e.x/abc end"
     (should (get-text-property (cooked-tests--link-at "abc") 'cooked-link-url))
     (let ((runs (cooked-tests--url-runs)))
@@ -1456,6 +1484,7 @@ row's cells end short of the width, as the scrollback's rejoined line does."
 A `mouse-face' there would highlight the gap at the end of the row, and a
 `keymap' would claim a click on nothing.  ghostel's `ghostel--wrap-fragments'
 makes the same exclusion for the same reason."
+  :tags '(pty)
   (cooked-tests--with-wrapped-line cooked-tests--wrapping-url
     (let ((runs (cooked-tests--url-runs)))
       (should (> (length runs) 1))
@@ -1475,6 +1504,7 @@ The shared `cooked-link-fragment' id is what makes that exact -- adjacency in
 the text would not, since two links can sit on consecutive rows -- and it is
 what `thing-at-point' and embark need in order to act on the whole URL rather
 than on the row point happens to be in."
+  :tags '(pty)
   (cooked-tests--with-wrapped-line cooked-tests--wrapping-url
     (let* ((runs (cooked-tests--url-runs))
            (ids (mapcar (lambda (run)
@@ -1497,6 +1527,7 @@ than on the row point happens to be in."
 So this is the second case `cooked-link--url-at-point' answers, on the same
 argument as the first: what thingatpt cannot know.  An unwrapped detected URL is
 still left to it."
+  :tags '(pty)
   (cooked-tests--with-wrapped-line cooked-tests--wrapping-url
     (goto-char (car (car (cooked-tests--url-runs))))
     (cooked--install-thing-at-point-providers)
@@ -1506,6 +1537,7 @@ still left to it."
 (ert-deftest cooked-following-a-wrapped-link-opens-the-whole-url ()
   "`goto-address-at-point' would open the fragment point is in, reading the URL
 out of the text being all it can do.  The scan already wrote the whole one down."
+  :tags '(pty)
   (cooked-tests--with-wrapped-line cooked-tests--wrapping-url
     (let ((opened nil))
       (cl-letf (((symbol-function 'browse-url)
@@ -1521,6 +1553,7 @@ emulator rather than be guessed from the geometry.  Two lines the child ended
 are two things whatever they look like, and gluing them would invent a URL
 nobody printed -- a real hazard rather than a tidy one, since the invented
 destination names a host neither line did."
+  :tags '(pty)
   (cooked-tests--with-wrapped-line "see https://a.example\n/evil/path end"
     (let ((runs (cooked-tests--url-runs)))
       (should runs)
@@ -1532,6 +1565,7 @@ destination names a host neither line did."
 search, and the way that is guaranteed is that the join declines: with no
 `cooked-wrap' in the region `cooked-link--join-wrapped' answers nil and the scan
 runs over the buffer exactly as before."
+  :tags '(pty)
   (cooked-tests--with-session
       '("/bin/sh" "-c" "printf 'go to https://example.com/ now\\n'; sleep 5")
     (should (cooked-tests--settle
@@ -1553,6 +1587,7 @@ A child can open an `OSC 8' span halfway through text that also reads as a
 URL.  Asked only about the start, the guess found nothing there and laid its
 `help-echo' over the span's tail, so hovering the explicit link showed goto-addr's
 string instead of where the link goes."
+  :tags '(pty)
   (cooked-tests--with-session
       '("/bin/sh" "-c"
         "printf 'https://example.com/\\033]8;;https://elsewhere.example/\\033\\\\tail\\033]8;;\\033\\\\\\n'; sleep 5")
@@ -1584,6 +1619,7 @@ the row above, and at position 2 that look signalled `args-out-of-range'."
 The joined scan used to mark every match with a `cooked-link-fragment' id, so
 the url provider answered an unwrapped URL from the property, which is the case
 `cooked-link--url-at-point' says it leaves to thingatpt."
+  :tags '(pty)
   (cooked-tests--with-wrapped-line "https://a.io/ https://example.com/a/long/path end"
     (let ((short (cooked-tests--link-at "https://a.io/"))
           ;; Found by column, since the row break is inside `https:'.
@@ -1600,6 +1636,7 @@ the url provider answered an unwrapped URL from the property, which is the case
 ffap reads to the end of the buffer line, which on the live screen is a row, so
 point on the second row of `src/some/deeply/nested/file.txt' used to be
 answered `nested/file.txt', and `find-file' offered that."
+  :tags '(pty)
   (cooked-tests--with-file-links
     (cooked-tests--with-wrapped-line "see src/some/deeply/nested/file.txt end"
       (cooked--install-thing-at-point-providers)
@@ -1621,6 +1658,7 @@ With a region active, ffap takes the region as the file name and the line and
 column come from `cooked-file-link-error-rules'.  Those were matched against the
 row, and the twenty-column screen breaks this line after the name's colon, so
 the row matched nothing and the file opened at no line."
+  :tags '(pty)
   (cooked-tests--with-file-links
     (cooked-tests--with-wrapped-line "lisp/cooked-link.el:12:3: error end"
       (setq-local default-directory
@@ -1719,6 +1757,7 @@ character rather than a line break."
 The edit replaces only the characters that changed, and jit-lock is told
 only about those; the link pass rounds out to the whole line, so the part of
 the URL the edit did not touch is scanned again with the rest."
+  :tags '(pty)
   (cooked-tests--with-session
       '("/bin/sh" "-c"
         "printf 'see https://example.com/aaa for the full report today\\n'; sleep 0.4; printf '\\033[1;25Hbbb\\033[3;1Hsync'; sleep 5")
@@ -1834,6 +1873,7 @@ the first character of the whole link."
 Nothing fontifies the buffer first: batch mode never redisplays, so until the
 search scans the text it reaches, no URL in it is a link yet.  That is the
 state of any scrollback nobody has scrolled back through."
+  :tags '(pty)
   (cooked-tests--with-narrow-cat
     (cooked-tests--type-and-settle
      cooked-tests--links-to-visit
@@ -1850,6 +1890,7 @@ state of any scrollback nobody has scrolled back through."
 
 ghostel walks back over the pieces that share an id for the same reason: the
 search meets the last row of the link first."
+  :tags '(pty)
   (cooked-tests--with-narrow-cat
     (cooked-tests--type-and-settle
      cooked-tests--links-to-visit
@@ -1879,6 +1920,7 @@ search meets the last row of the link first."
 
 An `OSC 8' span labelled aa goes to https://a.example/, and the URL a mail
 address opens is its mailto: form.  Off a link, eldoc is told nothing."
+  :tags '(pty)
   (cooked-tests--with-narrow-cat
     (should (memq #'cooked-link--eldoc eldoc-documentation-functions))
     (cooked-tests--type-and-settle

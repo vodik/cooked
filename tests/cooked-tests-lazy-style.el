@@ -97,6 +97,7 @@ begins."
 
 (ert-deftest cooked-scrollback-is-not-coloured-until-it-is-displayed ()
   "The deferral itself: faces absent after a flood, present once looked at."
+  :tags '(pty)
   (cooked-tests--with-session (list "/bin/sh" "-c" cooked-tests--red-flood)
     (cooked-tests--settled-flood)
     (let ((pos (cooked-tests--scrollback-red)))
@@ -124,6 +125,7 @@ begins."
 Rendered twice, once with `cooked-lazy-scrollback-styles' off, and compared run
 for run over the whole buffer -- which is the assertion that covers the runs no
 other test here names, the reset at the end of a line and the blanks between."
+  :tags '(pty)
   (let (eager lazy text)
     (let ((cooked-lazy-scrollback-styles nil))
       (cooked-tests--with-session (list "/bin/sh" "-c" cooked-tests--red-flood)
@@ -143,6 +145,7 @@ other test here names, the reset at the end of a line and the blanks between."
 
 (ert-deftest cooked-trimming-scrollback-leaves-no-unpaid-batch-behind ()
   "A trim throws away what it cuts and pays for the part of a batch it keeps."
+  :tags '(pty)
   (let ((cooked-scrollback-lines 20))
     (cooked-tests--with-session (list "/bin/sh" "-c" cooked-tests--red-flood)
       (cooked-tests--settled-flood)
@@ -272,6 +275,7 @@ The core frees a rendition id once no cell names it, which every batch of
 scrollback has stopped doing, and mints it again for another rendition.  So
 `cooked--install-styles' settles what is owed before it redefines one, and this
 asks it to redefine the very id the flood's red runs name."
+  :tags '(pty)
   (cooked-tests--with-session (list "/bin/sh" "-c" cooked-tests--red-flood)
     (cooked-tests--settled-flood)
     (let ((pos (cooked-tests--scrollback-red))
@@ -296,6 +300,7 @@ A batch waiting to be displayed holds rendition ids, not faces, so a theme
 change between the output and the looking is answered by resolving late --
 which is the one way deferred scrollback differs from scrollback already
 coloured, and it differs in the direction of being more right."
+  :tags '(pty)
   (cooked-tests--with-session (list "/bin/sh" "-c" cooked-tests--red-flood)
     (cooked-tests--settled-flood)
     (let ((pos (cooked-tests--scrollback-red)))
@@ -308,6 +313,7 @@ coloured, and it differs in the direction of being more right."
 
 (ert-deftest cooked-copying-undisplayed-scrollback-takes-its-colours-along ()
   "`filter-buffer-substring' pays the debt over the region it is lifting out."
+  :tags '(pty)
   (cooked-tests--with-session (list "/bin/sh" "-c" cooked-tests--red-flood)
     (cooked-tests--settled-flood)
     (let* ((pos (cooked-tests--scrollback-red))
@@ -323,6 +329,7 @@ coloured, and it differs in the direction of being more right."
 the batch is inserted; only the faces are deferred.  An unstyled link run is
 given `cooked-link' then and there, which is the one face a deferred batch can
 carry before anybody looks at it."
+  :tags '(pty)
   (cooked-tests--with-session
       (list "/bin/sh" "-c"
             (concat "i=0; while [ $i -lt 90 ]; do "
@@ -344,6 +351,7 @@ A session with the URL guess off and no scan layer loaded registers no
 fontification pass at all -- that is what `cooked--sync-fontification' is for --
 and deferred colours would then never be put on.  So the count of unpaid
 batches is one of the things the registration follows."
+  :tags '(pty)
   (let ((cooked-detect-links nil)
         (cooked-link-scan-functions nil))
     (cooked-tests--with-session (list "/bin/sh" "-c" cooked-tests--red-flood)
@@ -359,6 +367,7 @@ batches is one of the things the registration follows."
   "The drain that leaves the screen out still appends scrollback, and still
 defers its colours -- which is the case the deferral is worth most in, nobody
 having looked at the buffer at all."
+  :tags '(pty)
   (cooked-tests--with-session
       (list "/bin/sh" "-c" (concat "read -r _; " cooked-tests--red-flood))
     (should (cooked-tests--settle (lambda () cooked--session)))
@@ -389,6 +398,7 @@ having looked at the buffer at all."
 writes over the shade, so a rendition that arrived later would be both
 invisible to the blend and written over it.  The block is the unit either way,
 so a batch with any decoration span on it is coloured as it is inserted."
+  :tags '(pty)
   (cooked-tests--with-session
       (list "/bin/sh" "-c"
             (concat "i=0; while [ $i -lt 90 ]; do "
@@ -419,6 +429,7 @@ tens of thousands of lines to do.
 
 The count dropping by exactly the number of pieces the chunk overlapped is the
 assertion: settling one piece must leave the rest of the batch owing."
+  :tags '(pty)
   (let ((cooked--style-piece-spans 8))
     (cooked-tests--with-session (list "/bin/sh" "-c" cooked-tests--red-flood)
       (cooked-tests--settled-flood)
@@ -472,6 +483,7 @@ after it is still owing, and is paid afterwards.  They have to agree, and they
 have to agree on the new colour.  Nothing is redrawn and nothing walks the
 buffer: the paid batch's `face' is the very same cons after the theme as
 before, which is what `eq' is asserting."
+  :tags '(pty)
   (let ((loop (concat "i=0; while [ $i -lt 90 ]; do "
                       "printf '\\033[31mred\\033[0m line %s\\n' $i; i=$((i+1)); done; ")))
     (cooked-tests--with-session

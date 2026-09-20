@@ -125,6 +125,7 @@ for, and it says so within one screenful of output rather than never.
 
 `long-line-optimizations-p' is the only reader of the flag, and it is what says
 the threshold was low enough to be reached."
+  :tags '(pty)
   (skip-unless (boundp 'long-line-threshold))
   (cooked-tests--with-long-line
     (should (long-line-optimizations-p))))
@@ -133,6 +134,7 @@ the threshold was low enough to be reached."
   "The flag is sticky, so the threshold has nothing left to do -- and nil is
 what stops `redisplay_window' rescanning the whole transcript for a long line
 after every drain.  See `cooked--sync-long-line-threshold'."
+  :tags '(pty)
   (skip-unless (boundp 'long-line-threshold))
   (cooked-tests--with-long-line
     (should (long-line-optimizations-p))
@@ -145,6 +147,7 @@ after every drain.  See `cooked--sync-long-line-threshold'."
   "The control, and it is about the threshold being a claim rather than a switch:
 a session whose lines fit is left as Emacs would have it, with no shortcuts and
 no narrowing."
+  :tags '(pty)
   (skip-unless (boundp 'long-line-threshold))
   (cooked-tests--with-tty-frame
     (let ((buffer (generate-new-buffer "*cooked-shortline*"))
@@ -172,6 +175,7 @@ these two should have nothing to say to each other.  Asserted rather than
 assumed, because `cooked--check-seam' measures a whole line with
 `line-beginning-position' -- which a narrowing *can* clip -- and because the
 drains that built this buffer ran it under `cooked-debug' already."
+  :tags '(pty)
   (skip-unless (boundp 'long-line-threshold))
   (cooked-tests--with-long-line
     (should (long-line-optimizations-p))
@@ -181,6 +185,7 @@ drains that built this buffer ran it under `cooked-debug' already."
   "Yanking a wrapped line out of the scrollback picks up no newline nobody
 typed, which is what `cooked-rejoin-wrapped-lines' is for and what the
 narrowing must not have touched: the buffer's text is not what changed."
+  :tags '(pty)
   (skip-unless (boundp 'long-line-threshold))
   (cooked-tests--with-long-line
     (should (long-line-optimizations-p))
@@ -195,6 +200,7 @@ narrowing must not have touched: the buffer's text is not what changed."
 `cooked--fontify-region' rounds out to whole *logical* lines inside that.  A
 URL 700 characters into a 1438-character line is the case where a threshold
 close to that region size would have cut the line the rounding exists to keep."
+  :tags '(pty)
   (skip-unless (boundp 'long-line-threshold))
   (cooked-tests--with-long-line
     (should (long-line-optimizations-p))
@@ -212,6 +218,7 @@ close to that region size would have cut the line the rounding exists to keep."
 is one of the calls the narrowing reaches.  A live row is one row long and so
 nowhere near the narrowed window, and the rows arriving after the long line say
 so: a trimmed row would be short a character and carry a truncation mark."
+  :tags '(pty)
   (skip-unless (boundp 'long-line-threshold))
   (cooked-tests--with-long-line
     (should (long-line-optimizations-p))
@@ -226,6 +233,7 @@ so: a trimmed row would be short a character and carry a truncation mark."
 point.  A wrong answer there puts the window start somewhere other than a
 screenful above the tail, and the child's newest output is off screen -- so the
 assertion is the one the follow exists for."
+  :tags '(pty)
   (skip-unless (boundp 'long-line-threshold))
   (cooked-tests--with-long-line
     (should (long-line-optimizations-p))

@@ -167,7 +167,7 @@ it, sorted ahead of the finished command beside it; the pick puts it in the
 selected window with point on the child's cursor; and output that arrives
 *afterwards* still carries point along, which is what following means and what
 landing on the prompt, as a finished command does, would not do."
-  :tags '(zsh)
+  :tags '(zsh pty)
   (skip-unless (executable-find "zsh"))
   (let ((elsewhere (get-buffer-create "*cooked-elsewhere*")))
     (unwind-protect
@@ -213,7 +213,7 @@ The finish happens inside `completing-read', which is where it happens for a
 user.  The record found is the one `cooked--mark-command-end' built on the very
 marker the running candidate held -- so jumping lands on *that* command's
 prompt, and interrupting it is refused as what it now is, a finished command."
-  :tags '(zsh)
+  :tags '(zsh pty)
   (skip-unless (executable-find "zsh"))
   (cooked-tests--with-zsh
     (cooked--send-input-string "sleep 1; printf 'finished\\n'")

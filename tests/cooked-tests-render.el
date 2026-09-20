@@ -18,11 +18,13 @@
 without borrowing a real seam and having its own listeners in the way.")
 
 (ert-deftest cooked-child-output-reaches-the-buffer ()
+  :tags '(pty)
   (cooked-tests--with-session '("/bin/sh" "-c" "printf 'hello world\\n'")
     (should (cooked-tests--settle
              (lambda () (string-match-p "hello world" (cooked-tests--text)))))))
 
 (ert-deftest cooked-colors-become-faces ()
+  :tags '(pty)
   (cooked-tests--with-session '("/bin/sh" "-c" "printf '\\033[31mred\\033[0m\\n'")
     (should (cooked-tests--settle
              (lambda () (string-match-p "red" (cooked-tests--text)))))
@@ -36,6 +38,7 @@ without borrowing a real seam and having its own listeners in the way.")
                      (aref cooked-color-names 1))))))
 
 (ert-deftest cooked-cooked-mode-gives-emacs-the-input-line ()
+  :tags '(pty)
   (cooked-tests--with-session '("/bin/cat")
     (should (cooked-tests--settle (lambda () (eq cooked--mode 'cooked))))
     (should (cooked--input-state-p))
@@ -50,6 +53,7 @@ without borrowing a real seam and having its own listeners in the way.")
              (lambda () (string-match-p "typed" (cooked-tests--text)))))))
 
 (ert-deftest cooked-command-output-is-tagged-with-its-exit-code ()
+  :tags '(pty)
   (cooked-tests--with-session
       '("/bin/sh" "-c" "printf '\\033]133;C\\007'; printf 'out\\n'; printf '\\033]133;D;3\\007'; sleep 5")
     (should (cooked-tests--settle (lambda () (string-match-p "out" (cooked-tests--text)))))
@@ -64,6 +68,7 @@ without borrowing a real seam and having its own listeners in the way.")
       (should (equal (get-text-property (match-beginning 0) 'cooked-exit-code) 3)))))
 
 (ert-deftest cooked-scrollback-accumulates-above-the-screen ()
+  :tags '(pty)
   (cooked-tests--with-session
       '("/bin/sh" "-c" "for i in $(seq 60); do printf 'line%s\\n' $i; done; sleep 5")
     (should (cooked-tests--settle
@@ -74,6 +79,7 @@ without borrowing a real seam and having its own listeners in the way.")
     (should (get-text-property (point) 'cooked-scrollback))))
 
 (ert-deftest cooked-alt-screen-hides-then-restores-the-primary-screen ()
+  :tags '(pty)
   (cooked-tests--with-session
       '("/bin/sh" "-c" "printf 'keepme\\n'; printf '\\033[?1049h'; printf 'inalt\\n'; \
                         sleep 0.3; printf '\\033[?1049l'; sleep 5")
@@ -91,6 +97,7 @@ without borrowing a real seam and having its own listeners in the way.")
 The `reset' a user types after a full-screen program died without its
 `rmcup': the drain that carries it has to unpin and widen exactly as a
 `?1049l' would, with the primary's text archived rather than lost."
+  :tags '(pty)
   (cooked-tests--with-session
       (list "/bin/sh" "-c"
             (concat cooked-tests--scrollback-then-alt
@@ -117,6 +124,7 @@ The `reset' a user types after a full-screen program died without its
     (should (eq (current-local-map) cooked-input-map))))
 
 (ert-deftest cooked-alt-screen-narrows-away-the-scrollback ()
+  :tags '(pty)
   (cooked-tests--with-session
       (list "/bin/sh" "-c"
             (concat cooked-tests--scrollback-then-alt
@@ -136,6 +144,7 @@ The `reset' a user types after a full-screen program died without its
     (should (string-match-p "MARKER" (cooked-tests--text)))))
 
 (ert-deftest cooked-clear-scrollback-reaches-past-the-alt-screen-restriction ()
+  :tags '(pty)
   (cooked-tests--with-session
       (list "/bin/sh" "-c" (concat cooked-tests--scrollback-then-alt "sleep 5"))
     (should (cooked-tests--settle (lambda () cooked--alt)))
@@ -165,6 +174,7 @@ The `reset' a user types after a full-screen program died without its
     (should-not (buffer-narrowed-p))))
 
 (ert-deftest cooked-a-child-dying-on-the-alt-screen-leaves-the-buffer-widened ()
+  :tags '(pty)
   (cooked-tests--with-session
       (list "/bin/sh" "-c" (concat cooked-tests--scrollback-then-alt "exit 3"))
     (should (cooked-tests--settle
@@ -175,6 +185,7 @@ The `reset' a user types after a full-screen program died without its
 (ert-deftest cooked-colors-survive-font-lock ()
   "comint leaves `font-lock-defaults' at (nil t); fontifying unfontifies first,
 which strips a bare `face' property and with it every colour."
+  :tags '(pty)
   (cooked-tests--with-session '("/bin/sh" "-c" "printf '\\033[32mGREEN\\033[0m\\n'; sleep 5")
     (should (cooked-tests--settle
              (lambda () (string-match-p "GREEN" (cooked-tests--text)))))
@@ -203,6 +214,7 @@ brightens with it, as xterm's `boldColors' does.  X is bold in an RGB red,
 which no palette index names and so stays as it is.  Off, B draws in red; set,
 the screen already drawn is redrawn and B draws in bright red, with N beside
 it unchanged."
+  :tags '(pty)
   (cooked-tests--with-tty-frame
     (cooked-tests--with-session
         '("/bin/sh" "-c"
@@ -243,6 +255,7 @@ and the escape sequence it emits for Q is read back.
 every live row again is what a theme change used to cost, and the only thing
 that still asks for it is an indexed SGR 58 underline colour, which nothing
 here prints."
+  :tags '(pty)
   (cooked-tests--with-tty-frame
     (cooked-tests--with-session
         '("/bin/sh" "-c" "printf '\\033[31mQ\\033[0m\\n'; sleep 5")
@@ -269,6 +282,7 @@ here prints."
   (should-not (eval (car (get 'cooked-bold-is-bright 'standard-value)))))
 
 (ert-deftest cooked-scrollback-and-screen-are-read-only ()
+  :tags '(pty)
   (cooked-tests--with-session '("/bin/sh" "-c" "printf 'banner\\n'; exec cat")
     (should (cooked-tests--settle
              (lambda () (string-match-p "banner" (cooked-tests--text)))))
@@ -291,6 +305,7 @@ of them lacks the properties, treats the whole range as modified, so the sweep
 cost whatever the screen held rather than what the drain wrote.  The rows above
 the cursor are already read-only, so what `cooked--protect' hands it has to
 start on the cursor's row.  The screen still ends up read-only throughout."
+  :tags '(pty)
   (cooked-tests--with-echoing-child "printf 'one\\ntwo\\n'; "
     (should (cooked-tests--settle
              (lambda () (string-match-p "two" (cooked-tests--text)))))
@@ -321,6 +336,7 @@ start on the cursor's row.  The screen still ends up read-only throughout."
                                          (point-max) 'read-only t)))))
 
 (ert-deftest cooked-screen-is-trimmed-to-a-transcript ()
+  :tags '(pty)
   (cooked-tests--with-session '("/bin/sh" "-c" "printf 'one\\ntwo\\n'; sleep 5")
     (should (cooked-tests--settle
              (lambda () (string-match-p "two" (cooked-tests--text)))))
@@ -330,6 +346,7 @@ start on the cursor's row.  The screen still ends up read-only throughout."
 
 (ert-deftest cooked-prompt-trailing-space-is-preserved ()
   "Trimming trailing blanks would put the input one column left of the prompt."
+  :tags '(pty)
   (cooked-tests--with-session '("/bin/sh" "-c" "printf 'ready$ '; exec cat")
     (should (cooked-tests--settle
              (lambda () (string-match-p "ready" (cooked-tests--text)))))
@@ -343,6 +360,7 @@ start on the cursor's row.  The screen still ends up read-only throughout."
 (ert-deftest cooked-redisplay-survives-a-protected-buffer ()
   "Regression: `let' ran the initialisers before `inhibit-read-only' was bound,
 so a drain touching protected text aborted the redisplay from inside the filter."
+  :tags '(pty)
   (cooked-tests--with-session '("/bin/sh" "-c" "printf 'banner\\n'; exec cat")
     (should (cooked-tests--settle
              (lambda () (string-match-p "banner" (cooked-tests--text)))))
@@ -355,6 +373,7 @@ so a drain touching protected text aborted the redisplay from inside the filter.
     (should (cooked--input-start-position))))
 
 (ert-deftest cooked-cursor-position-does-not-mutate ()
+  :tags '(pty)
   (cooked-tests--with-session '("/bin/cat")
     (should (cooked-tests--settle #'cooked--input-start-position))
     ;; Ask for a row far below the trimmed screen; it must not extend the buffer.
@@ -365,6 +384,7 @@ so a drain touching protected text aborted the redisplay from inside the filter.
 
 (ert-deftest cooked-resize-round-trip-keeps-the-transcript ()
   "Shrinking must absorb blank rows, not push the live screen into scrollback."
+  :tags '(pty)
   (cooked-tests--with-session '("/bin/sh" "-c" "printf 'alpha\\nbeta\\n'; exec cat")
     (should (cooked-tests--settle
              (lambda () (string-match-p "beta" (cooked-tests--text)))))
@@ -385,6 +405,7 @@ so a drain touching protected text aborted the redisplay from inside the filter.
   "The `ps' case: long lines that have not scrolled off yet live on the grid, not
 in the buffer, and narrowing used to cut every one of them to the new width.  The
 grid rewraps them instead, so the text is all still there — across more rows."
+  :tags '(pty)
   (cooked-tests--with-session
       '("/bin/sh" "-c" "printf '%s\\n' aaaaaaaaaabbbbbbbbbbcccccccccc; exec cat")
     (should (cooked-tests--settle
@@ -400,6 +421,7 @@ grid rewraps them instead, so the text is all still there — across more rows."
 
 (ert-deftest cooked-a-width-round-trip-restores-the-original-rows ()
   "Rewrapping keeps the wrap provenance, so widening back is not a lossy guess."
+  :tags '(pty)
   (cooked-tests--with-session
       '("/bin/sh" "-c" "printf '%s\\n' aaaaaaaaaabbbbbbbbbbcccccccccc; exec cat")
     (should (cooked-tests--settle
@@ -417,6 +439,7 @@ other's way: the rewrap makes more rows than the shorter screen can hold, so row
 leave for scrollback in their rewrapped form while the buffer still holds them in
 their old one.  Going back to the original size must give the original transcript
 back — the same text, and each row exactly once."
+  :tags '(pty)
   (cooked-tests--with-filled-screen
     (let ((original (cooked-tests--unwrapped)))
       (cooked-tests--resize 6 12)
@@ -435,6 +458,7 @@ back — the same text, and each row exactly once."
 survivors are re-rendered from row 0 down.  Nothing was removing the buffer lines
 below the new last row, so the live screen was left with a stale copy of itself
 underneath it — invisible until you scrolled, and duplicated text when you did."
+  :tags '(pty)
   (cooked-tests--with-filled-screen
     (cooked-tests--resize 6 20)
     (should (<= (count-lines (marker-position cooked--screen-start) (point-max)) 6))
@@ -446,6 +470,7 @@ underneath it — invisible until you scrolled, and duplicated text when you did
 (ert-deftest cooked-clearing-the-screen-keeps-the-transcript ()
   "`clear' and C-l wipe the grid, but the screen they wipe is history Emacs is
 holding: blanking those rows in place used to delete it from the buffer too."
+  :tags '(pty)
   (cooked-tests--with-session '("/bin/sh" "-c" "printf 'alpha\\nbeta\\n'; exec cat")
     (should (cooked-tests--settle
              (lambda () (string-match-p "beta" (cooked-tests--text)))))
@@ -459,6 +484,7 @@ holding: blanking those rows in place used to delete it from the buffer too."
   "Regression: `forward-line' reports success at an unterminated final line,
 so the next grid row was appended to the previous one — merging a command's
 output with the prompt that followed it."
+  :tags '(pty)
   (cooked-tests--with-session '("/bin/sh" "-c" "printf 'aaa\\nbbb\\nccc\\n'; sleep 5")
     (should (cooked-tests--settle
              (lambda () (string-match-p "ccc" (cooked-tests--text)))))
@@ -487,6 +513,7 @@ spanning it leaves it collapsed at the start of row 0, which is what makes this
 a sharp test rather than an approximate one.  The wire shape is asserted
 alongside it, because a Lisp-side test that only looked at the marker would
 still pass if the core stopped coalescing altogether."
+  :tags '(pty)
   (cooked-tests--with-session
       ;; `stty -echo\=' and a `read\=' rather than a sleep: the rewrite has to
       ;; land in a *later* drain than the text it rewrites, since the marker
@@ -543,7 +570,7 @@ still pass if the core stopped coalescing altogether."
         (should (member "ZZZ" lines))))))
 
 (ert-deftest cooked-prompt-lands-on-its-own-line-after-a-command ()
-  :tags '(zsh)
+  :tags '(zsh pty)
   (skip-unless (executable-find "zsh"))
   (cooked-tests--with-shell ("zsh" :settle (lambda () (eq cooked--semantic 'input)))
     (let ((prompt (string-trim (buffer-substring-no-properties
@@ -570,6 +597,7 @@ still pass if the core stopped coalescing altogether."
 (ert-deftest cooked-point-follows-the-cursor-after-falling-behind ()
   "Regression: output arriving in chunks let the cursor overtake point for one
 drain, after which point was stranded at column 0 of whatever line it was on."
+  :tags '(pty)
   (cooked-tests--with-session '("/bin/sh" "-c" "printf 'aaa\\nbbb\\n'; exec cat")
     (should (cooked-tests--settle
              (lambda () (string-match-p "bbb" (cooked-tests--text)))))
@@ -586,6 +614,7 @@ drain, after which point was stranded at column 0 of whatever line it was on."
 
 (ert-deftest cooked-point-stays-put-while-reading-scrollback ()
   "Following the cursor must not yank point away from someone reading history."
+  :tags '(pty)
   (cooked-tests--with-session
       '("/bin/sh" "-c" "for i in $(seq 60); do printf 'line%s\\n' $i; done; exec cat")
     (should (cooked-tests--settle
@@ -603,6 +632,7 @@ makes the claim false without making it look false: the mark stays on its
 character, but the characters around it are no longer the ones that were
 selected, and the highlight goes on covering them.  Every xterm-family terminal
 drops such a selection instead, and `cooked-clear-selection-on-output' is that."
+  :tags '(pty)
   (cooked-tests--with-session '("/bin/sh" "-c" "printf 'alpha\\n'; exec cat")
     (should (cooked-tests--settle
              (lambda () (string-match-p "alpha" (cooked-tests--text)))))
@@ -623,6 +653,7 @@ drops such a selection instead, and `cooked-clear-selection-on-output' is that."
 and cannot reach again, so a region up there means exactly what it did when it
 was drawn -- and copying out of the transcript while a program runs is what the
 distinction is worth having for."
+  :tags '(pty)
   (cooked-tests--with-session
       '("/bin/sh" "-c" "for i in $(seq 60); do printf 'line%s\\n' $i; done; exec cat")
     (should (cooked-tests--settle
@@ -641,6 +672,7 @@ distinction is worth having for."
 (ert-deftest cooked-clearing-a-selection-on-output-can-be-turned-off ()
   "The option is the whole of the behaviour: nil leaves the mark wherever the
 redraw put it, which is what cooked did before there was an option."
+  :tags '(pty)
   (let ((cooked-clear-selection-on-output nil))
     (cooked-tests--with-session '("/bin/sh" "-c" "printf 'alpha\\n'; exec cat")
       (should (cooked-tests--settle
@@ -705,6 +737,7 @@ it out of later drains while its cells still match.  An apply that signals has
 inserted nothing, so without forgetting the copy the child could repaint the
 row forever and Emacs would never be sent it.  Under `cooked-debug', which the
 test fixture binds, `cooked--on-wake' does not follow up with `cooked-refresh'."
+  :tags '(pty)
   (cooked-tests--with-rewritable-rows 3
     ;; Frozen while the bytes arrive, so the filter does not drain them first.
     (setq cooked--input-mode 'frozen)
@@ -732,6 +765,7 @@ a row about to be deleted.
 What the user is owed is the next \\[exchange-point-and-mark]: the mark is still
 the place they marked, and the child overwriting the characters there does not
 move the place."
+  :tags '(pty)
   (cooked-tests--with-rewritable-rows 3
     (goto-char (cooked--screen-start-position))
     (cooked--goto-screen-cell '(1 . 2))
@@ -755,6 +789,7 @@ move the place."
 keeping it somewhere else is not keeping it.  Before the floor existed the mark
 collapsed to column 0 of the row it was in, so the option delivered a region the
 user never drew -- visibly, since this one stays highlighted."
+  :tags '(pty)
   (let ((cooked-clear-selection-on-output nil))
     (cooked-tests--with-rewritable-rows 3
       ;; On the row about to be rewritten, which is the only row where there is
@@ -775,6 +810,7 @@ cooked coalesces contiguous damaged rows into one Block, so the region here is
 the whole screen in a single edit -- and the clamp would put a mark on row 1 at
 the last column of the last row of the run.  The run's row table is what makes
 the better answer cheap: the position keeps its row as well as its column."
+  :tags '(pty)
   (let ((cooked-clear-selection-on-output nil))
     (cooked-tests--with-rewritable-rows 3
       (cooked--goto-screen-cell '(1 . 2))
@@ -788,6 +824,7 @@ the better answer cheap: the position keeps its row as well as its column."
   "The half the clamp is still right for.  A row that came back shorter has no
 column 12 any more, and the nearest thing to where the user was pointing is the
 end of what the row now holds."
+  :tags '(pty)
   (let ((cooked-clear-selection-on-output nil))
     (cooked-tests--with-session '("/bin/sh" "-c" "stty raw -echo; cat")
       (should (cooked-tests--settle (lambda () (eq cooked--mode 'raw))))
@@ -811,6 +848,7 @@ touches none of them, and until the floor existed nothing else did either: the
 row rewrite dragged the window's point to the end of whatever was written over
 it, which is a second view of the terminal scrolling itself while the user is
 reading it."
+  :tags '(pty)
   (cooked-tests--with-rewritable-rows 3
     (let ((buffer (current-buffer))
           (main (selected-window)))
@@ -834,6 +872,7 @@ reading it."
 that is following wants the cursor, not the cell it was last pointed at.  The
 floor must not quietly turn `cooked-second-window-follows-new-output' into its
 opposite."
+  :tags '(pty)
   (cooked-tests--with-rewritable-rows 3
     (let ((buffer (current-buffer))
           (main (selected-window)))
@@ -854,6 +893,7 @@ opposite."
 (ert-deftest cooked-alt-screen-keeps-exactly-the-emulator-height ()
   "Trimming is disabled on the alt screen, so nothing else removes stale rows
 when the window shrinks — which looked like resize doing nothing."
+  :tags '(pty)
   (cooked-tests--with-session '("/bin/sh" "-c" "printf '\\033[?1049h'; printf 'top\\n'; sleep 5")
     (should (cooked-tests--settle (lambda () cooked--alt)))
     ;; The row `point-max' lands on, not a line count: the last row is left
@@ -880,6 +920,7 @@ runs.  Ordinary redisplay can spend that gap pushing `window-start' down to
 keep point on screen, and nothing used to undo that once the buffer caught
 up: the window kept showing the scroll a now-stale redisplay had chosen,
 clipping the top of the screen even though the buffer content was correct."
+  :tags '(pty)
   (cooked-tests--with-session '("/bin/sh" "-c" "printf '\\033[?1049h'; printf 'top\\n'; sleep 5")
     (should (cooked-tests--settle (lambda () cooked--alt)))
     (set-window-buffer (selected-window) (current-buffer))
@@ -899,6 +940,7 @@ by inserting the newline that ends the row above it.  The region was therefore
 HEIGHT newline-terminated lines plus an empty one at `point-max': a buffer line
 below the bottom of the screen, which point could be moved onto and which
 scrolled the whole picture up by one when it was."
+  :tags '(pty)
   (cooked-tests--with-session '("/bin/sh" "-c" "printf '\\033[?1049h'; printf 'top\\n'; sleep 5")
     (should (cooked-tests--settle (lambda () cooked--alt)))
     (let ((last-row (lambda () (car (cooked--screen-cell (point-max))))))
@@ -917,6 +959,7 @@ fired when the child spoke and never when the user did.  An idle full-screen
 program produces no output, so a wheel event reaching `mwheel-scroll' — which is
 what happens while the keyboard is suspended for a peek — scrolled the screen
 off the window with nothing left to put it back."
+  :tags '(pty)
   (cooked-tests--with-session '("/bin/sh" "-c" "printf '\\033[?1049h'; printf 'top\\n'; sleep 5")
     (should (cooked-tests--settle (lambda () cooked--alt)))
     (set-window-buffer (selected-window) (current-buffer))
@@ -947,6 +990,7 @@ What is deliberately no longer covered: a notch that lands in a *different*
 buffer entirely, which is where `post-command-hook' runs when the pointer is
 over an unselected terminal cooked does not hold the wheel for.  That window is
 repaired by the child's next output, or by the next command in its own buffer."
+  :tags '(pty)
   (cooked-tests--with-session '("/bin/sh" "-c" "printf '\033[?1049h'; printf 'top\n'; sleep 5")
     (should (cooked-tests--settle (lambda () cooked--alt)))
     (set-window-buffer (selected-window) (current-buffer))
@@ -970,6 +1014,7 @@ repaired by the child's next output, or by the next command in its own buffer."
 looked like it had done nothing at all: the transcript still filled the window.
 A real terminal's viewport moves instead, which here means the window.  The text
 above is untouched and one scroll away, exactly as scrollback is anywhere else."
+  :tags '(pty)
   (cooked-tests--with-session
       '("/bin/sh" "-c" "for i in $(seq 40); do printf 'line%s\\n' $i; done; \
                         sleep 1; printf '\\033[H\\033[2Jafter'; exec cat")
@@ -1097,6 +1142,7 @@ face asked for again is simply built again."
 that scrolled off into the buffer and the rows the grid is still holding.  Only
 the scrollback went before, which left the whole screen in place -- and a few
 commands into a session that is all of it, so the command looked inert."
+  :tags '(pty)
   (cooked-tests--with-session
       '("/bin/sh" "-c" "for i in $(seq 60); do printf 'line%s\\n' $i; done; \
                         printf 'PROMPT> '; exec cat")
@@ -1116,6 +1162,7 @@ would eat the line above it, which the shell believes it is still drawing on.
 
 Nothing here has scrolled off at all -- the whole transcript is on the grid,
 which is the state the old scrollback-only command could not touch."
+  :tags '(pty)
   (cooked-tests--with-session
       '("/bin/sh" "-c" "for i in $(seq 5); do printf 'line%s\\n' $i; done; \
                         printf '\\033]133;A\\033\\\\top-of-prompt\\n$ '; exec cat")
@@ -1126,6 +1173,7 @@ which is the state the old scrollback-only command could not touch."
     (should (string-prefix-p "top-of-prompt\n$" (cooked-tests--text)))))
 
 (ert-deftest cooked-title-renames-the-buffer-only-when-asked ()
+  :tags '(pty)
   (cooked-tests--with-session '("/bin/sh" "-c" "printf '\\033]2;running-thing\\007'; sleep 5")
     (let ((original (buffer-name)))
       (should (cooked-tests--settle (lambda () (equal cooked-title "running-thing"))))
@@ -1136,6 +1184,7 @@ which is the state the old scrollback-only command could not touch."
   "Emacs never re-syncs a window's point to the buffer's on its own, so a
 second, non-selected window on a busy cooked buffer must be moved explicitly
 to keep tracking new output the way the selected window already does."
+  :tags '(pty)
   (cooked-tests--with-session (list "/bin/sh" "-c" cooked-tests--two-stage-output-script)
     (should (cooked-tests--settle
              (lambda () (string-match-p "line40" (cooked-tests--text)))))
@@ -1158,6 +1207,7 @@ to keep tracking new output the way the selected window already does."
   "A window scrolled up into history is the user choosing to look elsewhere,
 not a window that fell behind -- later output must not yank it back to the
 cursor, the same restraint `follow' already shows for the buffer's own point."
+  :tags '(pty)
   (cooked-tests--with-session (list "/bin/sh" "-c" cooked-tests--two-stage-output-script)
     (should (cooked-tests--settle
              (lambda () (string-match-p "line40" (cooked-tests--text)))))
@@ -1183,6 +1233,7 @@ has to follow it down rather than be left where the last screenful put it.
 Asserted on `window-start' and `window-point' rather than on the pin firing:
 the pin is now a computed `set-window-start', so there is no call to count,
 and the rendered effect is the thing worth asserting anyway."
+  :tags '(pty)
   (cooked-tests--with-session (list "/bin/sh" "-c" cooked-tests--two-stage-output-script)
     (should (cooked-tests--settle
              (lambda () (string-match-p "line40" (cooked-tests--text)))))
@@ -1224,6 +1275,7 @@ and the rendered effect is the thing worth asserting anyway."
 screen anywhere -- whatever window happens to be selected at that moment is
 almost certainly showing something else, and scrolling it would move the
 user's actual work out from under them."
+  :tags '(pty)
   (cooked-tests--with-session (list "/bin/sh" "-c" cooked-tests--two-stage-output-script)
     (should (cooked-tests--settle
              (lambda () (string-match-p "line40" (cooked-tests--text)))))
@@ -1243,6 +1295,7 @@ run writes nothing.  Four writes to `window-start' per window per drain --
 `set-window-point', `recenter', and the whole-line corrections after it --
 each of which redisplay was then free to disagree with, is what the terminal
 was visibly jittering to."
+  :tags '(pty)
   (cooked-tests--with-session (list "/bin/sh" "-c" cooked-tests--two-stage-output-script)
     (should (cooked-tests--settle
              (lambda () (string-match-p "line40" (cooked-tests--text)))))
@@ -1264,6 +1317,7 @@ all.  Pinning the buffer's end to the foot of the window shifted the whole
 transcript up and down at drain rate for that.  Following the cursor's own row
 does not: the start is computed from the target, so the end of the buffer can
 move under it without the window going anywhere."
+  :tags '(pty)
   (cooked-tests--with-session (list "/bin/sh" "-c" cooked-tests--two-stage-output-script)
     (should (cooked-tests--settle
              (lambda () (string-match-p "line40" (cooked-tests--text)))))
@@ -1298,6 +1352,7 @@ ever answered from a redisplay behind rather than from the arithmetic
 `cooked--pin-transcript-bottom's docstring describes, the second pin would
 believe the window was still short of the true end and leave the blank lines
 in."
+  :tags '(pty)
   (cooked-tests--with-session (list "/bin/sh" "-c" cooked-tests--two-stage-output-script)
     (should (cooked-tests--settle
              (lambda () (string-match-p "line40" (cooked-tests--text)))))
@@ -1319,6 +1374,7 @@ in."
 (ert-deftest cooked-wrapped-lines-rejoin-in-scrollback ()
   "A line the terminal wrapped is one line again, so yanking history does not
 pick up newlines nobody typed, and a wider window re-wraps it for free."
+  :tags '(pty)
   (let ((buffer (generate-new-buffer "*cooked-wrap*")))
     (unwind-protect
         (with-current-buffer buffer
@@ -1388,6 +1444,7 @@ A marker two rows up from the bottom is a prompt marker, a command's start, a
 line of output the child printed, because the row it sat in was deleted and
 reinserted for holding text one row further up.  Now the row's text is *moved*,
 so the marker rides with it and still points at the same characters."
+  :tags '(pty)
   (cooked-tests--with-scrolling-screen "printf '\\nl6'"
     (let ((mark (cooked-tests--row-marker "l3")))
       (should (cooked-tests--settle
@@ -1403,6 +1460,7 @@ so the marker rides with it and still points at the same characters."
 An overlay over a scrolled row is a command decoration, a highlight, a
 `hl-line' -- and `delete-region' collapses one to a point rather than moving
 it, so a whole-region repaint destroys every overlay in the viewport."
+  :tags '(pty)
   (cooked-tests--with-scrolling-screen "printf '\\nl6'"
     (let* ((mark (cooked-tests--row-marker "l3"))
            (overlay (make-overlay mark (+ mark 2))))
@@ -1767,6 +1825,7 @@ The scroll region is the case worth having twice over.  cooked was already
 ahead of ghostel here, whose page-dirty flag turns a three-row status area into
 a whole-viewport repaint, and the rows *outside* the region must not move: that
 is what makes a shift two edits placed by index rather than a rotation."
+  :tags '(pty)
   ;; An ordinary scroll: `l0' leaves for scrollback, everything else moves up one.
   (cooked-tests--with-scrolling-screen "printf '\\nl6'"
     (should (cooked-tests--settle
@@ -1790,6 +1849,7 @@ is what makes a shift two edits placed by index rather than a rotation."
 the grid, so it is handed over without a newline and screen row 0 continues it.
 Rendering row 0 at the start of that buffer line instead of at `cooked--screen-start'
 deleted the head it was supposed to continue, losing a row per eviction."
+  :tags '(pty)
   (let ((buffer (generate-new-buffer "*cooked-seam*")))
     (unwind-protect
         (with-current-buffer buffer
@@ -1815,6 +1875,7 @@ the line where the buffer wraps it rather than starting a fresh one.  Widening
 to 30 must leave all 59 characters on a single buffer line — one logical line,
 which Emacs then wraps into two visual rows — and narrowing must give the text
 back unchanged."
+  :tags '(pty)
   (let ((whole (concat "00000000001111111111222222222233333333334444444444"
                        "555555555")))
     (cooked-tests--with-straddling-line
@@ -1834,6 +1895,7 @@ survive the trip into the buffer.  Trimming them as though they ended the line
 pulled the text after them forward, both losing the alignment and leaving the
 buffer holding fewer characters of the line than the emulator believes it handed
 over — which is the offset seam a later rewrap turns into a visible one."
+  :tags '(pty)
   (let ((whole (string-trim-right cooked-tests--padded-seam-line)))
     (cooked-tests--with-padded-straddling-line
       (cooked--check-seam)
@@ -1862,6 +1924,7 @@ column 4, so the line is `日本語abc' wherever it is read: rejoined into
 scrollback, and rewrapped nine columns wide, where it used to read `日本 語abc'
 from then on.  Both ends agreed about the blank, which is why no oracle case
 caught it."
+  :tags '(pty)
   (let ((buffer (generate-new-buffer "*cooked-wide-wrap*"))
         (cooked-debug t))
     (unwind-protect
@@ -1900,6 +1963,7 @@ Driven through `cooked--discard-scrollback' rather than through
 `cooked-clear-scrollback', which is about the seam bookkeeping alone: the
 command also drops the rows above the prompt, so it would take the screen this
 is watching with it.  The child's own `CSI 3 J' arrives here by the same route."
+  :tags '(pty)
   (cooked-tests--with-straddling-line
     (cooked--discard-scrollback (cooked--screen-start-position))
     (should (string-prefix-p "2222222222" (cooked-tests--text)))
@@ -1920,6 +1984,7 @@ its own rows through `cooked--clear-to-prompt', which drops the carry with them.
 
 No OSC 133 here, so the cut is at the cursor's row -- and the line straddling
 the seam is above it in every part but its tail."
+  :tags '(pty)
   (cooked-tests--with-straddling-line
     (cooked-clear-scrollback)
     (should (equal (string-trim (cooked-tests--text)) "555555555"))
@@ -1939,6 +2004,7 @@ buffer any more: alt's own row 0 is.  That row 0 must still start its own
 buffer line rather than being welded, without a newline, to the tail of
 scrollback that just arrived — the seam only closes correctly when whatever
 follows really is the continuation."
+  :tags '(pty)
   (let ((buffer (generate-new-buffer "*cooked-seam-alt*")))
     (unwind-protect
         (with-current-buffer buffer
@@ -1986,6 +2052,7 @@ the flag says -- so a test that reads the top of the buffer and finds
 passes with rejoining fully on.  What the flag decides is what happens to a row
 on its way *out* of the screen, so the assertion is about scrollback: each
 evicted row keeps its own newline instead of being joined onto the line above."
+  :tags '(pty)
   (let ((buffer (generate-new-buffer "*cooked-wrap2*"))
         ;; A `let\=', not a `setq\=': the flag is an ordinary global defcustom, so
         ;; setting it from inside a buffer leaves every later test in the batch
@@ -2534,6 +2601,7 @@ Read off a real drain rather than a hand-built plist, because what is being
 checked is the wire: `cooked--redraw' marks the whole grid damaged so every row
 comes back as a block, and each block's WIDTH is compared with `string-width' of
 that same block's own text."
+  :tags '(pty)
   (cooked-tests--with-session
       '("/bin/sh" "-c"
         "printf 'ascii only\\n漢字 CJK\\ne\\314\\201 combining\\n┌───┬───┐\\n%s\\n' done; sleep 5")
@@ -2583,6 +2651,7 @@ them resolved to the same place — the cursor as of the end of that drain — s
 two commands were recorded as regions ending in the same spot, and navigation
 could not tell them apart.  Driven by a bare printf rather than a real shell so
 that the whole burst is one write, and so lands in one drain deterministically."
+  :tags '(pty)
   (cooked-tests--with-session
       '("/bin/sh" "-c"
         "printf '\\033]133;C\\007first\\n\\033]133;D;0\\007\
@@ -2610,6 +2679,7 @@ that the whole burst is one write, and so lands in one drain deterministically."
 The command starts, then prints enough to push its own first row off the screen
 before Emacs ever sees it.  The mark has to resolve into the scrollback text
 this drain inserted, not to some row still on the grid."
+  :tags '(pty)
   (let ((buffer (generate-new-buffer "*cooked-anchor*")))
     (unwind-protect
         (with-current-buffer buffer
@@ -2637,6 +2707,7 @@ this drain inserted, not to some row still on the grid."
 
 `日本 ' is five columns and three characters, so a mark after it taken as a
 column landed two characters into the text that followed."
+  :tags '(pty)
   (cooked-tests--with-session
       '("/bin/sh" "-c"
         "printf '\\346\\227\\245\\346\\234\\254 \\033]133;C\\007marked\\033]133;D;0\\007'; sleep 5")
@@ -2648,6 +2719,7 @@ column landed two characters into the text that followed."
 
 (ert-deftest cooked-refresh-rebuilds-a-corrupted-screen ()
   "Resync throws the screen region away and has the emulator re-send it."
+  :tags '(pty)
   (cooked-tests--with-session '("/bin/sh" "-c" "printf 'alpha\\nbeta\\n'; sleep 5")
     (should (cooked-tests--settle
              (lambda () (string-match-p "beta" (cooked-tests--text)))))
@@ -2670,6 +2742,7 @@ that failed are never offered again: nothing short of asking the core to re-send
 the screen brings them back.  The test turns on that — the text carried by the
 failed drain has to be on screen afterwards, and it is only there because the
 resync went and got it."
+  :tags '(pty)
   (cooked-tests--with-session '("/bin/cat")
     (should (cooked-tests--settle (lambda () cooked--session)))
     ;; Fail exactly one `cooked--apply', from inside the filter where Emacs would
@@ -2716,6 +2789,7 @@ so \"stay where you are\" is not a position a *buffer position* can hold; the
 offset into the region is, because the text is reinserted verbatim.  Carrying
 that offset is what keeps the user where they were typing, and without it a
 repaint would drop them at the start of their own line."
+  :tags '(pty)
   (cooked-tests--with-session '("/bin/cat")
     (should (cooked-tests--settle
              (lambda () (and (cooked--input-state-p) (cooked--input-start-position)))))
@@ -2765,6 +2839,7 @@ repaint would drop them at the start of their own line."
   "Without a cap a session grows for as long as it runs.  The buffer is allowed
 to overshoot by `cooked--scrollback-slack', so this asserts a bound rather than
 an exact count."
+  :tags '(pty)
   (let ((cooked-scrollback-lines 50))
     (cooked-tests--with-session (cooked-tests--flood 600)
       (should (cooked-tests--settle
@@ -2778,6 +2853,7 @@ an exact count."
       (should-not (string-match-p "line0\n" (cooked-tests--text))))))
 
 (ert-deftest cooked-scrollback-cap-nil-keeps-everything ()
+  :tags '(pty)
   (let ((cooked-scrollback-lines nil))
     (cooked-tests--with-session (cooked-tests--flood 400)
       (should (cooked-tests--settle
@@ -2789,6 +2865,7 @@ an exact count."
   "A trim is a deletion above `cooked--screen-start', so it owes the emulator
 the news that its top row begins a line again.  Left unsaid, the desync is
 silent until the next resize -- which is what this drives."
+  :tags '(pty)
   (let ((cooked-scrollback-lines 40))
     (cooked-tests--with-session (cooked-tests--flood 500)
       (should (cooked-tests--settle
@@ -2802,6 +2879,7 @@ silent until the next resize -- which is what this drives."
 (ert-deftest cooked-scrollback-cap-trims-at-a-line-beginning ()
   "`cooked--discard-scrollback' hands the emulator a seam, and half a line is
 not one.  A flood of lines long enough to wrap makes the mid-line cut reachable."
+  :tags '(pty)
   (let ((cooked-scrollback-lines 30))
     (cooked-tests--with-session
         (list "/bin/sh" "-c"
@@ -2820,6 +2898,7 @@ not one.  A flood of lines long enough to wrap makes the mid-line cut reachable.
   "A record whose whole region is in the text being cut would survive as an empty
 region sitting at the cut, which is indistinguishable from a command that
 genuinely printed nothing."
+  :tags '(pty)
   (let ((cooked-scrollback-lines 40))
     (cooked-tests--with-session
         (list "/bin/sh" "-c"
@@ -2854,6 +2933,7 @@ drain under ten thousand 80-column lines.  So after one count of forty
 lines, three more are counted as three lines' worth of text: what the count
 may walk is measured as the distance from the start of its accessible region,
 or from `point-min' of the whole buffer when it is asked for an absolute line."
+  :tags '(pty)
   (let ((cooked-scrollback-lines 50))
     (cooked-tests--with-session '("/bin/sh" "-c" "echo ready; sleep 30")
       (should (cooked-tests--settle
@@ -2889,6 +2969,7 @@ forty-nine.  Ten of them are then deleted out of the middle, as deleting one
 command's output does, and nine more arrive: forty-seven lines, inside the
 slack.  Counted as though the ten were still there, the total would be
 fifty-seven and the trim would cut the transcript back to forty-five."
+  :tags '(pty)
   (let ((cooked-scrollback-lines 45))
     (cooked-tests--with-session '("/bin/sh" "-c" "echo ready; sleep 30")
       (should (cooked-tests--settle
@@ -3041,6 +3122,7 @@ though `cooked--ascii-fixed-pitch-p' exists precisely to notice one.  Nothing
 else observes it either: the window's pixel dimensions do not change, so
 neither `window-configuration-change-hook' nor
 `window-size-change-functions' fires."
+  :tags '(pty)
   (cooked-tests--with-session '("/bin/sh" "-c" "sleep 5")
     (should (cooked-tests--settle (lambda () cooked--session)))
     (let ((synced 0))
@@ -3062,6 +3144,7 @@ then shrink -- produces two prompt repaints for a gesture that never touched
 this window's width.  Deferred only where the width is unchanged, which is
 what makes it safe: a rewrap is what a child actually has to be told about, and
 the height reaches it at the next real resize."
+  :tags '(pty)
   (cooked-tests--with-session '("/bin/sh" "-c" "sleep 5")
     (should (cooked-tests--settle (lambda () cooked--session)))
     ;; Settle the cell first: `cooked--last-cell' starts nil, so the very first
@@ -3097,6 +3180,7 @@ the height reaches it at the next real resize."
 
 Deferring there would leave it drawing into rows that are no longer on the
 screen, which is worse than the repaint the deferral exists to avoid."
+  :tags '(pty)
   (cooked-tests--with-session '("/bin/sh" "-c" "sleep 5")
     (should (cooked-tests--settle (lambda () cooked--session)))
     (cooked--sync-size)
@@ -3210,6 +3294,7 @@ all -- here every one is reported twice its cell -- and scaling one character
 would replace its share of the picture with a shrunk glyph while the rest of the
 run went on drawing the whole four-cell image.  The CJK character after it is
 drawn from the font and is still scaled."
+  :tags '(pty)
   (cooked-tests--with-session
       '("/bin/sh" "-c"
         "printf '\\342\\224\\214\\342\\224\\200\\342\\224\\200\\342\\224\\220 \\346\\274\\242\\n'; sleep 5")
@@ -3444,6 +3529,7 @@ half that actually pins it, and this one is what a full-screen picture costs:
 Read the width back off the slice, which is what makes the merge observable from
 batch at all -- nothing here rasterizes, so the only evidence a run is drawn
 run-wide is that it says it is."
+  :tags '(pty)
   (cooked-tests--with-session '("/bin/sh" "-c" "sleep 300")
     (should (cooked-tests--settle (lambda () cooked--session)))
     (cooked-tests--cell)
@@ -3477,6 +3563,7 @@ cut them.
 Driven from the wire rather than through a child, because what is under test is
 where `cooked--apply-image-deco' breaks a run and that is a property of the
 records it is handed."
+  :tags '(pty)
   (cooked-tests--with-session '("/bin/sh" "-c" "sleep 300")
     (should (cooked-tests--settle (lambda () cooked--session)))
     (cooked-tests--cell)
@@ -3533,6 +3620,7 @@ the column -- which is exactly the comparison this pins.
 Merged, the second placement would be sliced as though it were columns 3-5 of
 the first: one six-cell run at `(slice 0 0 60 20)', drawing the left half of the
 picture stretched across both copies."
+  :tags '(pty)
   (cooked-tests--with-session '("/bin/sh" "-c" "sleep 300")
     (should (cooked-tests--settle (lambda () cooked--session)))
     (cooked-tests--cell)
@@ -3548,6 +3636,7 @@ picture stretched across both copies."
 
 (ert-deftest cooked-image-cells-share-one-decoded-spec ()
   "Every cell slices the same spec, so Emacs decodes the picture once."
+  :tags '(pty)
   (cooked-tests--with-session '("/bin/sh" "-c" "sleep 300")
     (should (cooked-tests--settle (lambda () cooked--session)))
     (cooked-tests--cell)
@@ -3559,6 +3648,7 @@ picture stretched across both copies."
 (ert-deftest cooked-image-bytes-cross-once-and-are-kept ()
   "The module sends a picture once however often it is placed, so a later
 placement naming the same id has to find the bytes still here."
+  :tags '(pty)
   (cooked-tests--with-session '("/bin/sh" "-c" "sleep 300")
     (should (cooked-tests--settle (lambda () cooked--session)))
     (cooked-tests--cell)
@@ -3575,6 +3665,7 @@ placement naming the same id has to find the bytes still here."
 (ert-deftest cooked-image-data-is-accounted-as-it-arrives ()
   "The running total has to match the table, or the cap bounds nothing.  Ids are
 content-addressed, so the same id arriving twice is one picture, not two."
+  :tags '(pty)
   (cooked-tests--with-session '("/bin/sh" "-c" "sleep 300")
     (should (cooked-tests--settle (lambda () cooked--session)))
     (let ((cooked-image-cache-size nil))
@@ -3592,6 +3683,7 @@ content-addressed, so the same id arriving twice is one picture, not two."
   "A session drawing a different picture every frame added an entry per frame and
 nothing ever took them away.  Oldest first, because that is the one that
 scrolled away longest ago."
+  :tags '(pty)
   (cooked-tests--with-session '("/bin/sh" "-c" "sleep 300")
     (should (cooked-tests--settle (lambda () cooked--session)))
     (let ((cooked-image-cache-size 1000))
@@ -3612,6 +3704,7 @@ id with no data, so the next resize -- which damages every row of the grid, and
 only the grid -- rebuilt the on-grid half of a picture as nothing while its
 scrollback half went on drawing.  The cap is soft now, on purpose.  What bounds
 an ordinary session is `cooked--collect-images', not this."
+  :tags '(pty)
   (cooked-tests--with-session '("/bin/sh" "-c" "sleep 300")
     (should (cooked-tests--settle (lambda () cooked--session)))
     (let ((cooked-image-cache-size 500))
@@ -3626,6 +3719,7 @@ an ordinary session is `cooked--collect-images', not this."
   "The eviction model: an image is a resource belonging to the rows that display
 it, so it goes when the last of those rows does and not before.  Same shape as
 the `cooked--commands' prune it sits beside in `cooked--discard-scrollback'."
+  :tags '(pty)
   (cooked-tests--with-session '("/bin/sh" "-c" "sleep 300")
     (should (cooked-tests--settle (lambda () cooked--session)))
     (cooked-tests--cell)
@@ -3648,6 +3742,7 @@ the `cooked--commands' prune it sits beside in `cooked--discard-scrollback'."
 (ert-deftest cooked-image-cache-spends-what-nothing-is-showing-first ()
   "Given a choice, evict the picture whose loss is invisible rather than the
 oldest one still on screen."
+  :tags '(pty)
   (cooked-tests--with-session '("/bin/sh" "-c" "sleep 300")
     (should (cooked-tests--settle (lambda () cooked--session)))
     (let ((cooked-image-cache-size nil))
@@ -3663,6 +3758,7 @@ oldest one still on screen."
 
 (ert-deftest cooked-image-cache-size-nil-keeps-everything ()
   "The opt-out has to actually opt out."
+  :tags '(pty)
   (cooked-tests--with-session '("/bin/sh" "-c" "sleep 300")
     (should (cooked-tests--settle (lambda () cooked--session)))
     (let ((cooked-image-cache-size nil))
@@ -3675,6 +3771,7 @@ oldest one still on screen."
   "`cooked--image-displayed-p' reads the weak spec table, which is the only free
 signal for \"something is still showing this\".  If it ever stopped answering yes
 for a picture on screen, eviction would quietly start preferring live images."
+  :tags '(pty)
   (cooked-tests--with-session '("/bin/sh" "-c" "sleep 300")
     (should (cooked-tests--settle (lambda () cooked--session)))
     (cooked-tests--cell)
@@ -3685,6 +3782,7 @@ for a picture on screen, eviction would quietly start preferring live images."
 (ert-deftest cooked-image-placement-without-data-renders-as-blanks ()
   "An id this buffer was never told about must not break the row: the cells are
 blanks on the grid, and they stay blanks here."
+  :tags '(pty)
   (cooked-tests--with-session '("/bin/sh" "-c" "sleep 300")
     (should (cooked-tests--settle (lambda () cooked--session)))
     (cooked-tests--cell)
@@ -3725,6 +3823,7 @@ is `cooked-image-placement-without-data-renders-as-blanks' seen from here, and
 it stays right for an id the buffer was never told about -- what must not
 happen is reaching that state for an id it was told about and dropped, which is
 `cooked-a-replayed-payload-draws-after-its-id-was-evicted'."
+  :tags '(pty)
   (cooked-tests--with-session '("/bin/sh" "-c" "sleep 300")
     (should (cooked-tests--settle (lambda () cooked--session)))
     (cooked-tests--cell)
@@ -3746,6 +3845,7 @@ round, whose data this buffer no longer had, and the cells drew nothing.
 Properties only -- batch Emacs draws no pixels, and none are needed: the
 failure is entirely in whether a cell that says it is part of a picture has a
 `display' property."
+  :tags '(pty)
   ;; `stty raw -echo\=' for the reason `cooked-tests--with-echoing-child\=' uses it:
   ;; in cooked mode the line discipline would hold an APC with no newline in it
   ;; until one arrived, and echo it a second time when it did.
@@ -3818,6 +3918,7 @@ replayed bytes are recognised and no payload crosses, the new placement is laid 
 the rectangle the new cell implies, and the row written before the change keeps the
 one it was written with.  Resizing rows and columns alone does not move a cell and
 is deliberately not this."
+  :tags '(pty)
   (cooked-tests--with-session '("/bin/sh" "-c" "stty raw -echo; exec cat")
     (should (cooked-tests--settle (lambda () (eq cooked--mode 'raw))))
     (cooked-tests--cell 10 20)
@@ -3856,6 +3957,7 @@ is deliberately not this."
         (should-not (cooked-tests--image-cells-without-display))))))
 
 (ert-deftest cooked-inline-images-disabled-leaves-the-cells-alone ()
+  :tags '(pty)
   (let ((cooked-inline-images nil))
     (cooked-tests--with-session '("/bin/sh" "-c" "sleep 300")
       (should (cooked-tests--settle (lambda () cooked--session)))
@@ -3873,6 +3975,7 @@ Read at the *second* cell of the three, which is a second claim riding along:
 the run's `display' value covers the whole run, so the middle cell answers with
 the run's slice -- 3 cells wide and one tall -- rather than with one of its own.
 Both numbers in it move with the cell size, which is what is under test here."
+  :tags '(pty)
   (cooked-tests--with-session '("/bin/sh" "-c" "sleep 300")
     (should (cooked-tests--settle (lambda () cooked--session)))
     (cooked-tests--cell)
@@ -3898,6 +4001,7 @@ pass putting back what it declined to spend.
 A drifted tail does not fail loudly.  It appends to a cons that is no longer in
 the list, so the id is recorded nowhere the eviction pass can see it, and the
 cap silently stops bounding anything."
+  :tags '(pty)
   (cooked-tests--with-session '("/bin/sh" "-c" "sleep 300")
     (should (cooked-tests--settle (lambda () cooked--session)))
     (cl-flet ((tail-is-true ()
@@ -3938,6 +4042,7 @@ cap silently stops bounding anything."
 event follows it and `cooked--sync-size' never hears.  The
 `text-scale-mode-amount' watcher is the other route in, and it is the only one
 for this case."
+  :tags '(pty)
   (cooked-tests--with-session '("/bin/sh" "-c" "sleep 300")
     (should (cooked-tests--settle (lambda () cooked--session)))
     (cooked-tests--cell)
@@ -3956,6 +4061,7 @@ the cell size used to come from `selected-window', i.e. from the minibuffer,
 whose `window-font-width' and `window-default-line-height' are its own and
 honour its own face remapping.  Half a picture was then written at one scale and
 half at another, permanently, because nothing re-renders scrollback."
+  :tags '(pty)
   (cooked-tests--with-session '("/bin/sh" "-c" "sleep 300")
     (should (cooked-tests--settle (lambda () cooked--session)))
     (cooked-tests--cell)
@@ -3975,6 +4081,7 @@ half at another, permanently, because nothing re-renders scrollback."
 has ever displayed -- means there is no honest size, and the decision is to
 decorate nothing rather than to guess or to blank the cells.  The `cooked-deco'
 record still goes on the text, which is the whole of what the repair pass needs."
+  :tags '(pty)
   (cooked-tests--with-session '("/bin/sh" "-c" "sleep 300")
     (should (cooked-tests--settle (lambda () cooked--session)))
     (setq cooked--last-cell '(nil . nil))
@@ -3991,6 +4098,7 @@ record still goes on the text, which is the whole of what the repair pass needs.
   "`cooked--sync-size' is the one place that notices the cell moving, so it is
 where the rescale hangs -- and the gate matters, because the rescale is a
 whole-buffer walk under `widen' and an ordinary reshape must not pay for one."
+  :tags '(pty)
   (cooked-tests--with-session '("/bin/sh" "-c" "sleep 300")
     (should (cooked-tests--settle (lambda () cooked--session)))
     (let ((calls 0))
@@ -4014,6 +4122,7 @@ whole-buffer walk under `widen' and an ordinary reshape must not pay for one."
   "The whole path, driven by a child through a real pty: APC out of the parser,
 the kitty command, the image store, the drain, and a `display' slice on a cell.
 Every other image test here starts partway along it."
+  :tags '(pty)
   (let ((b64 (base64-encode-string (cooked-tests--png) t)))
     (cooked-tests--with-session
         (list "/bin/sh" "-c"
@@ -4031,6 +4140,7 @@ Every other image test here starts partway along it."
 picture, scrolls it off the grid and into Emacs' scrollback, and clearing the
 scrollback is what spends it.  Nothing here is a sweep, a budget or a timer --
 the bytes go because the last row referring to them went."
+  :tags '(pty)
   (let ((b64 (base64-encode-string (cooked-tests--png) t)))
     (cooked-tests--with-session
         (list "/bin/sh" "-c"
@@ -4063,6 +4173,7 @@ buffer shows is the answer having reached the child, which is the claim.
 
 The frame is said to show images: a batch Emacs has only a terminal frame, and
 there the probe is refused -- see `cooked-graphics-answers-follow-inline-images'."
+  :tags '(pty)
   (cl-letf (((symbol-function 'cooked--frame-shows-images-p) #'always))
     (cooked-tests--with-session
         (list "/bin/sh" "-c"
@@ -4102,6 +4213,7 @@ Settles on the kitty reply, which is the last of the three to be sent."
   "Every answer that claims graphics withdraws the claim when images are turned
 off, and makes it again when they come back on -- through the variable watcher,
 with nothing but the toggle to set it off."
+  :tags '(pty)
   (let ((out (make-temp-file "cooked-graphics"))
         (cooked-inline-images t))
     (unwind-protect
@@ -4126,6 +4238,7 @@ with nothing but the toggle to set it off."
 
 The watcher is told `makunbound' with a NEWVAL of nil, which read as the new
 value would leave the child refused while the buffer shows pictures again."
+  :tags '(pty)
   (let ((out (make-temp-file "cooked-graphics-local"))
         (cooked-inline-images t))
     (unwind-protect
@@ -4150,6 +4263,7 @@ was told otherwise only after the spawn returned, so the same probe on a
 terminal frame could be told to send a sixel.  Also here: a build that shows
 images but has no PNG support keeps the kitty RGB probe, which arrives as
 `pbm', and loses the sixel claim, which arrives as PNG."
+  :tags '(pty)
   ;; Loaded first, so the definition `cl-letf' puts back is the module's rather
   ;; than the void one it would find in an Emacs that has not started a session.
   (cooked--load-module)
@@ -4194,6 +4308,7 @@ having only the one terminal frame, and the window hook is called rather than
 waited for: `window-buffer-change-functions' runs from redisplay, which a batch
 session does not do.  What this covers is the decision and its wiring to the
 core; that the hook fires on a real frame change is Emacs' own promise."
+  :tags '(pty)
   (let ((out (make-temp-file "cooked-graphics-tty"))
         (graphical t))
     (unwind-protect
@@ -4280,6 +4395,7 @@ each, rather than every frame once per cooked buffer."
 damaged row per drain -- so a layer that signals there signals continuously.
 The buffer has to go on rendering regardless, because the text was already
 correct before the layer was asked."
+  :tags '(pty)
   (cooked-tests--with-session '("/bin/cat")
     (should (cooked-tests--settle (lambda () cooked--session)))
     ;; Two entries, and the assertion is on the *second*: the drain surviving
@@ -4304,6 +4420,7 @@ correct before the layer was asked."
 (ert-deftest cooked-a-signalling-scan-layer-does-not-end-the-drain ()
   "The same for the scrollback scan, which is the seam an optional layer is
 allowed to touch the filesystem from."
+  :tags '(pty)
   (cooked-tests--with-session '("/bin/sh" "-c" "for i in $(seq 60); do echo line $i; done; sleep 5")
     ;; The second entry is the assertion, for the reason the row test gives:
     ;; the transcript arriving proves only that `cooked--on-wake' resynced.
@@ -4373,6 +4490,7 @@ the picture the caller is about to draw.  `cooked--image-spec' answers nil for a
 id with no data, so those cells get a `cooked-deco' and no `display' -- a blank
 rectangle of exactly the right size in exactly the right place, which is what a
 2MB-a-frame gif against a 64MB cap actually did."
+  :tags '(pty)
   (cooked-tests--with-session '("/bin/sh" "-c" "sleep 300")
     (should (cooked-tests--settle (lambda () cooked--session)))
     (cooked-tests--cell)
@@ -4395,6 +4513,7 @@ the drain, so the buffer text is never deleted and reinserted.  A marker in the
 middle of the row is the witness: a rewrite collapses it to the start of the
 row, and an untouched row keeps it where it was.  The write to row 2 afterwards
 is only there to say the rewrite has arrived."
+  :tags '(pty)
   (cooked-tests--with-session
       '("/bin/sh" "-c"
         "printf 'status'; sleep 0.3; printf '\\033[1;1H\\033[2Kstatus\\033[2;1Hdone'; sleep 5")
@@ -4412,6 +4531,7 @@ is only there to say the rewrite has arrived."
 
 The core would otherwise match a later repaint of the same cells against the
 text it sent, which is no longer what the buffer holds."
+  :tags '(pty)
   (cooked-tests--with-session '("/bin/sh" "-c" "printf 'one\\ntwo'; sleep 5")
     (cooked-tests--display-buffer)
     (should (cooked-tests--settle
@@ -4452,6 +4572,7 @@ follow at all.
 Two theme calls in a row still share the one deferred pass, and that pass finds
 nothing to redraw because nothing on this screen bakes a themed colour; see
 `cooked--bakes-an-indexed-color-p'."
+  :tags '(pty)
   (cooked-tests--with-session '("/bin/sh" "-c" "printf '\\033[31mred\\033[0m'; exec sleep 30")
     (should (cooked-tests--settle
              (lambda () (string-match-p "red" (cooked-tests--text)))))
@@ -4485,6 +4606,7 @@ palette index is resolved when the row is drawn and cannot follow a theme by
 itself.  `cooked--bakes-an-indexed-color-p' looks for exactly that, which is
 why an ordinary session pays nothing; here the child prints one and the deferred
 pass finds it."
+  :tags '(pty)
   (cooked-tests--with-session
       ;; Curly underline in ANSI red under plain text.
       '("/bin/sh" "-c" "printf '\\033[4:3;58:5:1munder\\033[0m'; exec sleep 30")
@@ -4506,6 +4628,7 @@ No theme hook fires for a face edited from an init file or while picking a
 colour interactively, so `cooked--notice-face-change' schedules the one thing
 that has to happen: `cooked-fg-1' following `ansi-color-red'.  What used to
 follow it was a flush and a redraw of every screen."
+  :tags '(pty)
   (cooked-tests--with-session
       '("/bin/sh" "-c" "printf '\\033[31mred\\033[0m'; exec sleep 30")
     (should (cooked-tests--settle
@@ -4531,6 +4654,7 @@ of a drain until its cells changed -- so a zoom that kept the grid size left
 the rows on screen scaled for the old font for as long as a program repainted
 the same frame.  The stamp moving is what says so, and nothing is sent while it
 stays put."
+  :tags '(pty)
   (cooked-tests--with-session '("/bin/sh" "-c" "printf 'one\\ntwo'; sleep 5")
     (cooked-tests--display-buffer)
     (should (cooked-tests--settle
@@ -4552,6 +4676,7 @@ A border already drawn as a bitmap stayed one after
 `cooked-box-drawing-images' was turned off, because nothing renders a row
 again until the child sends different cells for it.  Its `:set' redraws every
 running screen instead."
+  :tags '(pty)
   (cooked-tests--with-session
       '("/bin/sh" "-c" "printf '\\342\\224\\214\\342\\224\\200\\342\\224\\220\\n'; sleep 5")
     (cooked-tests--cell)
@@ -4586,6 +4711,7 @@ running screen instead."
 
 (ert-deftest cooked-an-edit-turns-a-spinner-without-rewriting-the-row ()
   "One changed cell is replaced in place, and a marker elsewhere on the row stays."
+  :tags '(pty)
   (cooked-tests--with-session
       '("/bin/sh" "-c"
         "printf 'working | on the build'; sleep 0.4; printf '\\033[1;9H/\\033[3;1Hsync'; sleep 5")
@@ -4599,6 +4725,7 @@ running screen instead."
 
 (ert-deftest cooked-an-edit-grows-the-tail-of-a-progress-bar ()
   "A bar\'s tail is replaced in place, and its label keeps its markers."
+  :tags '(pty)
   (cooked-tests--with-session
       '("/bin/sh" "-c"
         "printf 'downloading the thing  [##        ]'; sleep 0.4; printf '\\033[1;26H###\\033[3;1Hsync'; sleep 5")
@@ -4612,6 +4739,7 @@ running screen instead."
 
 (ert-deftest cooked-an-edit-beside-a-wide-character-counts-characters ()
   "The replaced text is found by characters, which a wide character is one of."
+  :tags '(pty)
   (cooked-tests--with-session
       '("/bin/sh" "-c"
         "printf '\\344\\270\\200\\344\\272\\214 x and some more text'; sleep 0.4; printf '\\033[1;6Hy\\033[3;1Hsync'; sleep 5")
@@ -4630,6 +4758,7 @@ Lisp draws a glyph run as one decoration over the whole run, so an edit that
 replaced part of one would leave the rest carrying a decoration drawn for a run
 that no longer exists.  Filling the gap between two borders joins them into one
 run, and every glyph of it has to carry the same decoration afterwards."
+  :tags '(pty)
   (cooked-tests--with-session
       '("/bin/sh" "-c"
         "printf 'status: \\342\\224\\200\\342\\224\\200\\342\\224\\200\\342\\224\\200 \\342\\224\\200\\342\\224\\200\\342\\224\\200\\342\\224\\200 old'; sleep 0.4; printf '\\033[1;13H\\342\\224\\200\\033[3;1Hsync'; sleep 5")
@@ -4651,6 +4780,7 @@ run, and every glyph of it has to carry the same decoration afterwards."
 
 (ert-deftest cooked-an-edit-before-the-cursor-keeps-the-prompts-padding ()
   "An edit inside a prompt leaves the space the cursor stands after in place."
+  :tags '(pty)
   (cooked-tests--with-session
       '("/bin/sh" "-c"
         "printf 'ready now$ '; sleep 0.4; printf '\\0337\\033[1;1HR\\0338'; exec cat")
@@ -4676,6 +4806,7 @@ The core announces each rendition id once, as a drain's `:styles', and a theme
 change must not need it to announce them again: the buffer keeps the renditions
 and forgets only the faces made from them, so the next repaint of the same text
 comes out in the new theme's colours from ids the core already sent."
+  :tags '(pty)
   (cooked-tests--with-session
       '("/bin/sh" "-c"
         "printf '\\033[31mred\\033[0m'; read _; printf '\\033[31mred\\033[0m'; sleep 5")

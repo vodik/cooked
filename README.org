@@ -563,8 +563,19 @@ password leaves no trace in Emacs' address space, and doesn't claim to.
 #+begin_src sh
 make test          # cargo test, the ERT suite, clippy, byte-compilation
 make lisp-test     # just the Emacs half
+make lisp-test-quick    # the same, minus what spawns a real child or hunts a race
+make lisp-test-stress   # only the race hunts, on their own
 make bench         # the acceptance gate for the render and write paths
 #+end_src
+
+=lisp-test-quick= is the inner loop: it excludes tests tagged =pty= (they depend
+on a real child's behaviour or timing), =stress= (they loop many times to hunt a
+race) and =tmux=, and it splits by file the way =lisp-test-parallel= does, so
+=make -j8 lisp-test-quick= uses the machine.  Neither =lisp-test= nor
+=lisp-test-parallel= excludes anything by default; =lisp-test-quick= is a faster
+subset for iterating, not a replacement.  =SELECTOR= narrows any of the ERT-based
+targets further, as an ERT selector -- =make lisp-test SELECTOR='(tag evil)'=
+runs just the evil layer.
 
 The suite drives real children — =cat= for the cooked path, =stty -echo= for secrets, a
 real zsh for the OSC 133 path — and each subject file also loads on its own, which is

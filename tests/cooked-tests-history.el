@@ -75,6 +75,7 @@ there.  The far host's `SHELL' is asked instead, over the same TRAMP connection
 the history command uses.  The mock connection is a local shell, so the
 variable is handed to it through `process-environment', which TRAMP passes on
 as it would to a real host."
+  :tags '(pty)
   (cooked-tests--with-mock-tramp remote
     (let ((cooked-history-shell nil)
           (cooked-shell "/bin/zsh")
@@ -91,6 +92,7 @@ as it would to a real host."
 Offering a list of past commands and running the chosen one on the spot is a
 one-way door over somebody's shell history, and the entry you meant is one line
 away from the entry you did not.  So: no newline, on either path."
+  :tags '(pty)
   (cooked-tests--with-session '("/bin/sh" "-c" "sleep 5")
     (should (cooked-tests--settle (lambda () cooked--session)))
     (let ((sent nil))
@@ -156,6 +158,7 @@ the one entry in the history."
 `shell-file-name' is an absolute path on this machine, and TRAMP runs a program
 by that path on the far host.  Here it names a shell that exists nowhere, which
 is what /opt/homebrew/bin/fish is to a Linux server."
+  :tags '(pty)
   (cooked-tests--with-mock-tramp remote
     (cooked-tests--with-history-command "printf 'remote\\n'"
       (let ((default-directory remote)
@@ -168,6 +171,7 @@ is what /opt/homebrew/bin/fish is to a Linux server."
 The refusal comes before the shell is run, so a slow rc file is not waited on
 for nothing, and again after the pick, since a command can start while the
 minibuffer is open."
+  :tags '(pty)
   (cooked-tests--with-session '("/bin/sh" "-c" "sleep 5")
     (should (cooked-tests--settle (lambda () cooked--session)))
     (let* ((asked nil)

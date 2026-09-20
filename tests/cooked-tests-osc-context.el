@@ -206,6 +206,7 @@ filled to the limit first does not keep it out.  An update that leaves out
   "End to end through the core, which passes OSC 3008 through untouched.
 RIS in the middle must not clear the stack -- the spec's safety rule -- and the
 `end=' after it must."
+  :tags '(pty)
   (cooked-tests--with-session
       `("/bin/sh" "-c"
         ,(concat "printf '\\033]3008;start=33333333333333333333333333333333"
@@ -222,6 +223,7 @@ RIS in the middle must not clear the stack -- the spec's safety rule -- and the
   "A `run0 bash' prompts inside its `elevate', so its OSC 133 marks leave the
 stack alone.  The child exiting ends every context, so a session started in the
 same buffer afterwards does not begin as root."
+  :tags '(pty)
   (let ((go (make-temp-name (expand-file-name "cooked-context-go" temporary-file-directory))))
     (unwind-protect
         (cooked-tests--with-session

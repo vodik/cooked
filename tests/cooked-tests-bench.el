@@ -97,6 +97,7 @@ for the whole suite for exactly this reason and states it in its docstring;
 `cooked-bench--with-session' does not, because the benchmark wants a drain to
 survive a cosmetic failure rather than stop for it.  So it is bound here, around
 the one call under test."
+  :tags '(pty)
   (cooked-bench--with-session '("/bin/sh" "-c" "sleep 300")
     (cooked-bench--settle-briefly)
     (let ((cooked-debug t))
@@ -124,6 +125,7 @@ Every row drawn with box glyphs is flagged `glyph' and carries one decoration
 record, since a vertical, its padding and the branch after it are one run.  And
 once applied, every box-drawing character is decorated while the names beside
 them are not, which is the check a byte-level assertion cannot make."
+  :tags '(pty)
   (pcase-let* ((rows (cooked-bench--tree-rows 24 80))
                (`((,first . (,text ,_styles ,decos ,table))) rows)
                (lines (split-string text "\n")))
@@ -202,6 +204,7 @@ coalescing means and says it about whichever rows survived.
 `cooked-debug' bound for the reason `cooked-bench-box-rows-decorate-every-cell-they-claim'
 binds it: `cooked--apply-deco' runs inside `cooked--protect-seam', which outside
 the flag swallows a malformed record and lets the row come back plausible."
+  :tags '(pty)
   (cooked-bench--with-session '("/bin/sh" "-c" "sleep 300")
     (cooked-bench--settle-briefly)
     (let ((cooked-debug t)
@@ -244,6 +247,7 @@ damaged, and one damaged row means a one-row screen, which `cooked--fit-screen'
 obeys by deleting the twenty-three the shift had just carefully preserved.  Both
 are asserted here as a screen that still has twenty-four rows after a frame, the
 last of which is the one the fixture wrote."
+  :tags '(pty)
   (cooked-bench--with-session '("/bin/sh" "-c" "sleep 300")
     (cooked-bench--settle-briefly)
     (let ((update (cooked-bench--update (cooked-bench--scrolled-row 23 40)
@@ -306,6 +310,7 @@ so too the tree listing's rows, whose padding the core absorbs into their
 glyph runs.  The style and decoration offsets are checked to land inside the row they were written for,
 since re-basing them onto the assembled text is the one thing
 `cooked-bench--run' does that a per-row fixture never had to."
+  :tags '(pty)
   (dolist (rows (list (cooked-bench--plain-rows 2 80)
                       (cooked-bench--styled-rows 2 80)
                       (cooked-bench--url-rows 2 80)
@@ -351,6 +356,7 @@ things as it starts.  In a fresh worktree, where the checkout can leave
 terminfo/cooked.ti newer than the compiled database beside it until `make
 terminfo' runs, the sessions say `cooked: could not install terminfo', and
 counting those made seventeen rows where there were eight."
+  :tags '(pty)
   (let (rows)
     (cl-letf (((symbol-function 'message)
                (lambda (format &rest args)
@@ -384,6 +390,7 @@ nothing for `cooked--scale-offenders' to find and nothing to wrap: measuring
 the font's glyph for a character the font never draws was nine tenths of what
 a box-drawing frame allocated.  With the bitmaps turned off the font draws the
 characters after all, and the same row has to be measured again."
+  :tags '(pty)
   (cooked-bench--with-session '("/bin/sh" "-c" "sleep 300")
     (cooked-bench--settle-briefly)
     (let ((update (cooked-bench--update (cooked-bench--box-rows 4 40) :alt t))
@@ -443,6 +450,7 @@ the applies were never charged.  Counted independently of the harness, the
 applies it charged must be all of them, and there must be several, or the
 count is not about the filter at all.  The child pauses between lines, longer
 than the harness waits and than the core paces wakeups, so there are."
+  :tags '(pty)
   (cooked-bench--with-session
       '("/bin/sh" "-c" "for i in 1 2 3 4; do echo line $i; sleep 0.05; done")
     (let ((applies (cooked-tests--count-calls
@@ -459,6 +467,7 @@ Its filter is switched off, so no drain is taken where it cannot be timed and
 no apply sneaks into a figure meant to exclude them.  Its loop condition once
 drained untimed on every pass, which a count of calls sees at once.  The child
 pauses between lines so that there is more than one drain to count."
+  :tags '(pty)
   (cooked-bench--with-session
       '("/bin/sh" "-c" "for i in 1 2 3 4; do echo line $i; sleep 0.05; done")
     (let (drains)
@@ -503,6 +512,7 @@ runs, and reported the floor.  So the proof a scan ran is what it left in the
 buffer: both rows report a non-zero count of link runs.  The file-name fixture
 also names four files in this tree and four that are not, and a rename in the
 tree would quietly make every name a miss."
+  :tags '(pty)
   (let ((root (cooked--root)))
     (should (cl-every (lambda (name) (file-exists-p (expand-file-name name root)))
                       '("src/session.rs" "src/emu/screen.rs" "lisp/cooked-render.el"
