@@ -40,7 +40,14 @@ that takes a keymap of its own -- see `cooked--build-meta-overlay'.
 
 `cooked-semi-map' is the exception, and deliberately so: it keeps ESC and the
 whole Meta space for Emacs, which is what makes evil's insert state a state you
-can leave.  See `cooked-semi-exceptions'.")
+can leave.  See `cooked-semi-exceptions'.
+
+A `defconst' where every other key cooked keeps back is a `defcustom', because
+this one is a prefix rather than a key.  Every command cooked has is spelled
+under it in `cooked-mode-map', so an option would have to rebuild that map and
+its menu's key echoes as well as the passthrough maps, and the one binding
+documented everywhere as the way back out would stop being a fact.  The
+exceptions lists are what a user changes instead.")
 
 ;;;; The maps the child is typed through
 ;;
@@ -231,6 +238,11 @@ where Meta chords arrive as two forwarded bytes, and is why
 `cooked--build-meta-overlay' exists for the frame where it is not.  Super and
 Hyper are bound through `cooked--kitty-chord', since only the kitty protocol can
 spell them, and a chord Emacs binds is left to Emacs."
+  ;; `define-key' throughout rather than `keymap-set', and not a modernisation
+  ;; someone has yet to do: every key here is an event computed by
+  ;; `event-convert-list' or a character code counted out, and `keymap-set'
+  ;; takes only a key string, which each would have to be turned into and
+  ;; parsed back out of.
   (let ((map (make-sparse-keymap))
         (kitty-only (cooked--kitty-only #'cooked-send-key)))
     ;; First, because `define-key' puts each new binding at the head of the list
@@ -643,13 +655,8 @@ exactly where the ghost cursor was pointing the whole time peek was frozen."
   (cooked--resume-forwarding)
   (cooked-send-key))
 
-(defvar cooked-peek-map
-  (let ((map (make-sparse-keymap)))
-    (define-key map [remap self-insert-command] #'cooked--peek-resume-and-send)
-    (define-key map (kbd "RET") #'cooked--peek-resume-and-send)
-    (define-key map (kbd "<return>") #'cooked--peek-resume-and-send)
-    map)
-  "Keymap while forwarding is suspended, in `still' or `frozen'.
+(defvar-keymap cooked-peek-map
+  :doc "Keymap while forwarding is suspended, in `still' or `frozen'.
 
 A child of `cooked-mode-map', not `cooked-mode-map' itself: binding the
 `self-insert-command' remap there would also reach `cooked-input-map', which
@@ -659,7 +666,10 @@ forwards the key that was pressed instead, same as `cooked-raw-map'/
 `cooked-alt-map' would have without the interruption -- see
 `cooked--peek-resume-and-send'.  Everything else -- motion, search, yanking a
 selection as a copy, `cooked-toggle-fold' -- falls through to `cooked-mode-map'
-and `comint-mode-map' beneath it exactly as it always did.")
+and `comint-mode-map' beneath it exactly as it always did."
+  "<remap> <self-insert-command>" #'cooked--peek-resume-and-send
+  "RET" #'cooked--peek-resume-and-send
+  "<return>" #'cooked--peek-resume-and-send)
 
 (defun cooked-send-literal-key ()
   "Send the next key to the child exactly, regardless of what it is bound to.
@@ -719,25 +729,27 @@ Spelled as a builder rather than a literal for the same reason
 time, and rebuilding is the only way to put back a key that was
 delegated.  Unbinding it instead would leave `TAB' bound to nothing rather
 than to `completion-at-point'."
-  (let ((map (make-sparse-keymap)))
-    (define-key map (kbd "RET") #'cooked-send-input)
-    (define-key map (kbd "<S-return>") #'cooked-newline)
-    ;; The spelling `evil-collection' binds beside `<S-return>', so the two
-    ;; answer the same at a prompt; see `cooked-evil--prompt-keys'.
-    (define-key map (kbd "S-RET") #'cooked-newline)
-    (define-key map (kbd "C-d") #'cooked-delete-char-or-eof)
-    (define-key map (kbd "TAB") #'completion-at-point)
-    (define-key map (kbd "M-p") #'cooked-previous-input)
-    (define-key map (kbd "M-n") #'cooked-next-input)
-    ;; The remap rather than `C-a' itself, so that whatever key a user has put
-    ;; start-of-line on reaches it, and so that nothing is claimed in the maps
-    ;; the child is being forwarded through -- `C-a' there is readline's own
-    ;; start-of-line, or tmux's prefix, and it must arrive untouched.
-    (define-key map [remap move-beginning-of-line] #'cooked-beginning-of-line)
+  (let ((map (define-keymap
+               "RET" #'cooked-send-input
+               "S-<return>" #'cooked-newline
+               ;; The spelling `evil-collection' binds beside `S-<return>', so
+               ;; the two answer the same at a prompt; see
+               ;; `cooked-evil--prompt-keys'.
+               "S-RET" #'cooked-newline
+               "C-d" #'cooked-delete-char-or-eof
+               "TAB" #'completion-at-point
+               "M-p" #'cooked-previous-input
+               "M-n" #'cooked-next-input
+               ;; The remap rather than `C-a' itself, so that whatever key a
+               ;; user has put start-of-line on reaches it, and so that nothing
+               ;; is claimed in the maps the child is being forwarded through --
+               ;; `C-a' there is readline's own start-of-line, or tmux's prefix,
+               ;; and it must arrive untouched.
+               "<remap> <move-beginning-of-line>" #'cooked-beginning-of-line)))
     ;; Last, so a delegated key wins over the binding it replaces -- which is the
     ;; point of naming it.
     (dolist (key delegated)
-      (define-key map (kbd key) #'cooked-delegate-this-key))
+      (keymap-set map key #'cooked-delegate-this-key))
     map))
 
 (defvar cooked-input-map

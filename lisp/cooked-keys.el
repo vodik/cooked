@@ -210,13 +210,9 @@ and it answers for symbols as well as characters."
          (event-apply-modifier last-command-event 'meta 27 "M-")))
     (cooked-send-key)))
 
-(defvar cooked-send-string-map
-  (let ((map (make-sparse-keymap)))
-    (set-keymap-parent map minibuffer-local-map)
-    (define-key map (kbd "S-<return>") #'newline)
-    (define-key map (kbd "M-RET") #'newline)
-    map)
-  "Minibuffer map for `cooked-send-string'.
+(defvar-keymap cooked-send-string-map
+  :parent minibuffer-local-map
+  :doc "Minibuffer map for `cooked-send-string'.
 
 `RET' sends what has been typed, so the newline a here-document or a
 multi-line send needs has nowhere else to come from; `S-RET' inserts one, the
@@ -231,7 +227,9 @@ only if it speaks a protocol that can, which is between Emacs and its own
 terminal.  So `M-RET' is bound alongside as the spelling that always
 survives.  `C-j' is not: `minibuffer-local-map' binds it to
 `exit-minibuffer', and taking that away would be a worse trade than the one
-it fixes.  `C-q C-j' inserts a newline anywhere and is unaffected by either.")
+it fixes.  `C-q C-j' inserts a newline anywhere and is unaffected by either."
+  "S-<return>" #'newline
+  "M-RET" #'newline)
 
 (defun cooked-send-string (string)
   "Send STRING to the child.

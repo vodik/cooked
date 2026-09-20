@@ -2278,6 +2278,142 @@ completion UI, the built-in one included, is on the far side of that same test."
       (completion-in-region-mode -1)
       (should (eq (key-binding (kbd "RET")) #'cooked-send-input)))))
 
+(defconst cooked-tests--mode-map-bindings
+  '(("<mouse-2>" . cooked-paste)
+    ("<remap> <comint-bol-or-process-mark>" . cooked-beginning-of-line)
+    ("<remap> <comint-continue-subjob>" . cooked-continue)
+    ("<remap> <comint-delchar-or-maybe-eof>" . cooked-delete-char-or-eof)
+    ("<remap> <comint-delete-output>" . cooked-delete-output)
+    ("<remap> <comint-interrupt-subjob>" . cooked-interrupt)
+    ("<remap> <comint-kill-input>" . cooked-kill-input)
+    ("<remap> <comint-kill-subjob>" . cooked-kill-session)
+    ("<remap> <comint-next-input>" . cooked-next-input)
+    ("<remap> <comint-next-prompt>" . cooked-next-command)
+    ("<remap> <comint-previous-input>" . cooked-previous-input)
+    ("<remap> <comint-previous-prompt>" . cooked-previous-command)
+    ("<remap> <comint-quit-subjob>" . cooked-quit)
+    ("<remap> <comint-send-eof>" . cooked-send-eof)
+    ("<remap> <comint-send-input>" . cooked-send-input)
+    ("<remap> <comint-show-output>" . cooked-show-output)
+    ("<remap> <comint-stop-subjob>" . cooked-suspend)
+    ("<remap> <comint-write-output>" . cooked-write-output)
+    ("<remap> <mouse-yank-primary>" . cooked-mouse-yank-primary)
+    ("<xterm-paste>" . cooked-xterm-paste)
+    ("C-c <escape>" . cooked-send-escape)
+    ("C-c C->" . cooked-goto-last-command)
+    ("C-c C-\\" . cooked-quit)
+    ("C-c C-c" . cooked-interrupt)
+    ("C-c C-d" . cooked-send-eof)
+    ("C-c C-e" . cooked-send-string)
+    ("C-c C-l" . cooked-refresh)
+    ("C-c C-n" . cooked-next-command)
+    ;; Added by cooked-command-decorations.el, which is a layer of its own and
+    ;; still binds into the map from the top level of the file.
+    ("C-c C-o" . cooked-command-decorations-menu)
+    ("C-c C-p" . cooked-previous-command)
+    ("C-c C-q" . cooked-send-literal-key)
+    ("C-c C-v" . cooked-toggle-peek)
+    ("C-c C-y" . cooked-paste)
+    ("C-c C-z" . cooked-suspend)
+    ("C-c ESC ESC" . cooked-send-escape)
+    ("C-c M-n" . cooked-next-link)
+    ("C-c M-o" . cooked-clear-scrollback)
+    ("C-c M-p" . cooked-previous-link)
+    ("C-c M-x" . execute-extended-command)
+    ("C-c RET" . cooked-follow-link-at-point)
+    ("C-c SPC" . cooked-newline)
+    ("C-c TAB" . cooked-toggle-fold))
+  "Every key `cooked-mode-map' binds itself, the menu bar aside.
+Taken from the map as it stood before it became one `defvar-keymap'; see
+`cooked-mode-map-binds-exactly-what-it-always-did'.")
+
+(defun cooked-tests--keymap-own (map)
+  "MAP's own bindings, without the parent it stores as its list's tail.
+`map-keymap' walks into the parent, and `cooked-mode-map' has had
+`comint-mode-map' as one since it became a `defvar-keymap'."
+  (let ((parent (keymap-parent map))
+        (tail (cdr map))
+        own)
+    (while (and (consp tail) (not (eq tail parent)))
+      (push (car tail) own)
+      (setq tail (cdr tail)))
+    (cons 'keymap (nreverse own))))
+
+(defun cooked-tests--map-bindings (map)
+  "Every key sequence MAP itself binds, as (KEY-DESCRIPTION . DEFINITION).
+Sorted, and without two things that are not bindings of MAP's own:
+`[menu-bar]', a menu, which cooked-tests-menu.el asserts on; and evil's
+auxiliary state maps, which cooked-evil.el hangs on this map under an
+`evil-<state>-state' prefix and which are only there when evil is installed."
+  (let (out)
+    (cl-labels ((walk (prefix map)
+                  (map-keymap
+                   (lambda (event definition)
+                     (let ((keys (vconcat prefix (vector event))))
+                       (cond
+                        ((eq event 'menu-bar))
+                        ((and (symbolp event)
+                              (string-suffix-p "-state" (symbol-name event))))
+                        ((keymapp definition) (walk keys definition))
+                        (t (push (cons (key-description keys) definition) out)))))
+                   map)))
+      (walk [] (cooked-tests--keymap-own map)))
+    (sort out (lambda (a b) (string< (car a) (car b))))))
+
+(ert-deftest cooked-mode-map-binds-exactly-what-it-always-did ()
+  "The map is spelled as one `defvar-keymap' of `keymap-set' strings, where it
+was thirty top-level `define-key' forms of `kbd' calls.  That is a mechanical
+change and has to stay one, so this pins every binding rather than a sample:
+`keymap-set' validates its key strings where `kbd' takes them on faith, and a
+typo it accepts would otherwise show up as a key that quietly does nothing."
+  (should (equal (cooked-tests--map-bindings cooked-mode-map)
+                 cooked-tests--mode-map-bindings))
+  ;; And through `kbd', which is how every other test here reaches them.
+  (pcase-dolist (`(,key . ,command) cooked-tests--mode-map-bindings)
+    (should (eq (lookup-key cooked-mode-map (kbd key)) command))))
+
+(ert-deftest cooked-the-literal-maps-bind-exactly-what-they-always-did ()
+  "The other three maps spelled out key by key rather than generated, pinned
+for the same reason and by the same snapshot as `cooked-mode-map'."
+  (should (equal (cooked-tests--map-bindings cooked-peek-map)
+                 '(("<remap> <self-insert-command>" . cooked--peek-resume-and-send)
+                   ("<return>" . cooked--peek-resume-and-send)
+                   ("RET" . cooked--peek-resume-and-send))))
+  (should (equal (cooked-tests--map-bindings
+                  (cooked--generated-keymap cooked-input-map))
+                 '(("<remap> <move-beginning-of-line>" . cooked-beginning-of-line)
+                   ("C-d" . cooked-delete-char-or-eof)
+                   ("C-r" . cooked-delegate-this-key)
+                   ("M-n" . cooked-next-input)
+                   ("M-p" . cooked-previous-input)
+                   ("RET" . cooked-send-input)
+                   ("S-<return>" . cooked-newline)
+                   ("S-RET" . cooked-newline)
+                   ("TAB" . completion-at-point))))
+  (should (equal (cooked-tests--map-bindings cooked-send-string-map)
+                 '(("M-RET" . newline)
+                   ("S-<return>" . newline))))
+  (should (eq (keymap-parent cooked-send-string-map) minibuffer-local-map)))
+
+(ert-deftest cooked-mode-map-survives-reloading-the-file ()
+  "`defvar' semantics are the point of the conversion: the map used to be filled
+in by top-level `define-key' forms, so re-evaluating cooked-mode.el -- a package
+upgrade in a running session -- put back every binding the user had removed."
+  (let ((map cooked-mode-map))
+    (unwind-protect
+        (progn
+          ;; Without REMOVE, so the nil shadows comint's own `C-c C-l' rather
+          ;; than revealing it -- which is what unsetting a key in a mode map
+          ;; with a parent means.
+          (keymap-unset cooked-mode-map "C-c C-l")
+          (load (locate-library "cooked-mode") nil t)
+          (should (eq cooked-mode-map map))
+          (should-not (lookup-key cooked-mode-map (kbd "C-c C-l")))
+          ;; And the rest of the map is still there, menu and all.
+          (should (eq (lookup-key cooked-mode-map (kbd "C-c C-c")) #'cooked-interrupt))
+          (should (keymapp (lookup-key cooked-mode-map [menu-bar cooked]))))
+      (keymap-set cooked-mode-map "C-c C-l" #'cooked-refresh))))
+
 (ert-deftest cooked-comint-commands-are-remapped ()
   :tags '(pty)
   (cooked-tests--with-session '("/bin/cat")

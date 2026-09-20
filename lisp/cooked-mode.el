@@ -242,8 +242,6 @@ from inside one of them."
   "Program run by \\[cooked]."
   :type 'string :group 'cooked)
 
-(defvar cooked-mode-map)                ; `define-derived-mode' below makes it
-
 ;;;; State transitions
 
 (defun cooked--resample-mode ()
@@ -1710,6 +1708,150 @@ What `find-file' offers as its `M-n' default and what ffap consults.  Empty
 unless cooked-file-link.el is loaded, naming a file being that layer's job."
   (run-hook-with-args-until-success 'cooked-file-name-at-point-functions))
 
+;; Cooked's own commands, on the shared parent rather than repeated in each of
+;; the state maps: the binding should not evaporate depending on what the child
+;; happens to be doing, or on whether the user has stepped out to peek --
+;; peeking installs this map directly, with none of the others' forwarding, so
+;; this is the one place all of them are guaranteed to reach.
+;;
+;; One `defvar-keymap' before `define-derived-mode', which then adopts it: the
+;; macro's own `defvar' leaves a bound variable alone and sets the parent only
+;; where there is none, so reloading this file after a package upgrade leaves
+;; the map -- and any binding the user removed from it -- exactly as it was.
+;; Thirty top-level `define-key' forms used to put every one of them back.
+;;
+;; Four things here are right and are not waiting to be modernised.  No
+;; `C-c LETTER' binding, which is reserved for the user.  The state maps bind
+;; each forwarded event explicitly rather than through a `[t]' default, because
+;; an exception has to fall through to the global map and an explicit nil does
+;; not stop a default from answering.  States are switched with `use-local-map'
+;; over maps parented on this one, which is what term.el does.  And the
+;; `[menu-bar ...]' removals below stay `define-key': `keymap-set' refuses a nil
+;; definition, and nil is what shadows a parent's menu.
+(defvar-keymap cooked-mode-map
+  :parent comint-mode-map
+  :doc "Keymap for `cooked-mode', and the parent of every state map.
+
+`cooked-raw-map' and the rest are installed with `use-local-map', which
+replaces the local map outright, so this is where a command belongs that should
+survive the child taking the keyboard.  See `cooked--state-keymap'."
+  "C-c C-c" #'cooked-interrupt
+  "C-c C-d" #'cooked-send-eof
+  "C-c C-e" #'cooked-send-string
+  "C-c M-x" #'execute-extended-command
+  "C-c C-z" #'cooked-suspend
+  "C-c C-y" #'cooked-paste
+  "C-c C-q" #'cooked-send-literal-key
+  ;; Both spellings: `<escape>' is the event a graphical frame sends, and the
+  ;; only one that does not collide with the `C-c M-' bindings below, which a
+  ;; terminal frame reads as `C-c ESC' plus a letter.
+  "C-c <escape>" #'cooked-send-escape
+  "C-c ESC ESC" #'cooked-send-escape
+  "C-c C-v" #'cooked-toggle-peek
+  "C-c C-p" #'cooked-previous-command
+  "C-c C-n" #'cooked-next-command
+  "C-c TAB" #'cooked-toggle-fold
+  "C-c C-l" #'cooked-refresh
+  ;; Reads the way \\`M->' does for the end of a buffer, and for the same reason:
+  ;; the newest command is the one end of the transcript that keeps moving.  The
+  ;; mode line's exit status is a click away from it too, but a keyboard cannot
+  ;; reach that and a terminal frame does not draw it.
+  "C-c C->" #'cooked-goto-last-command
+  ;; goto-addr's own advertised key, and the entry point that does not need point
+  ;; to be inside a highlighted span -- see `cooked-follow-link-at-point'.  Here
+  ;; rather than in a `keymap' text property because `C-c' is forwarded to the
+  ;; child as the interrupt character, and a `C-c' prefix in a property at point
+  ;; would make Emacs wait for a second key before letting SIGINT through.
+  "C-c RET" #'cooked-follow-link-at-point
+  ;; Next and previous as `C-c C-n' and `C-c C-p' are for commands, comint's
+  ;; prompts, so links take the Meta pair under the same prefix, which comint
+  ;; leaves free.  `cooked-link-repeat-map' makes a plain `n' and `p' enough
+  ;; after the first.
+  "C-c M-n" #'cooked-next-link
+  "C-c M-p" #'cooked-previous-link
+
+  ;; comint-shaped, cooked-implemented.  These keep comint's own positions,
+  ;; because the concept behind each is one a terminal genuinely has -- it is
+  ;; only comint's implementation, which reaches for a process that here is a
+  ;; wakeup pipe, that cannot be used.  See `cooked--input-mark' for why the rest
+  ;; of comint's C-c map needs nothing.
+  "C-c C-\\" #'cooked-quit
+  "C-c M-o" #'cooked-clear-scrollback
+  "C-c SPC" #'cooked-newline
+
+  ;; Middle-click pastes to the child, which is what it does in every other
+  ;; terminal.  comint binds it to `comint-insert-input', which looks for the
+  ;; input field under the click; cooked sets no `field' properties, so it fell
+  ;; through to the global `mouse-2' -- `mouse-yank-primary', which inserts the X
+  ;; selection into the buffer.  Text that goes nowhere, in a transcript that is
+  ;; read-only above the prompt, at a position the next repaint may overwrite.
+  ;;
+  ;; It composes with the two other claims on `mouse-2' by outranking neither,
+  ;; which is the correct order rather than an accident.  A link span carries
+  ;; `cooked-link-map' as a `keymap' text property, and a property keymap is
+  ;; consulted before any keymap here, so clicking a link still follows it --
+  ;; `cooked-follow-link' then makes the same decision this binding would have.
+  ;; `cooked--mouse-map' lives in `emulation-mode-map-alists', which outranks the
+  ;; local map, so a child that asked for the mouse gets the click and this is
+  ;; never reached.  `S-mouse-2' is left alone in both directions.
+  ;;
+  ;; No `down-mouse-2' to go with it: nothing binds it globally, so there is no
+  ;; earlier command to head off.
+  "<mouse-2>" #'cooked-paste
+
+  ;; A paste in a terminal frame's host terminal arrives as an event of its own,
+  ;; not as the key `yank' is bound to; see `cooked-xterm-paste'.  It is bound on
+  ;; the shared parent because the passthrough maps bind characters and function
+  ;; keys but never this event, so every state reaches it.
+  "<xterm-paste>" #'cooked-xterm-paste
+
+  ;; The primary selection is the other paste that does not come from the kill
+  ;; ring, and `mouse-yank-primary' inserts it into the buffer whoever owns the
+  ;; keyboard.  Remapped rather than bound, since `mouse-2' is `cooked-paste'
+  ;; here and the command is reached only from a key a user has put it on.
+  "<remap> <mouse-yank-primary>" #'cooked-mouse-yank-primary
+
+  ;; Whatever key a user has bound to comint's commands reaches ours, so
+  ;; `evil-collection-comint' (which binds `repl-submit' to `comint-send-input')
+  ;; works without knowing cooked exists.
+  "<remap> <comint-send-input>" #'cooked-send-input
+  "<remap> <comint-interrupt-subjob>" #'cooked-interrupt
+  "<remap> <comint-quit-subjob>" #'cooked-quit
+  "<remap> <comint-delete-output>" #'cooked-delete-output
+  "<remap> <comint-stop-subjob>" #'cooked-suspend
+  "<remap> <comint-delchar-or-maybe-eof>" #'cooked-delete-char-or-eof
+  ;; The three that were left out, and the reason this list is worth auditing
+  ;; rather than adding to as commands appear.  comint's own implementations do
+  ;; not fail here -- they *succeed*, against `cooked--wake':
+  ;; `comint-kill-subjob' kills the pipe the child rings when output is pending,
+  ;; and the buffer stops hearing from a child that is still running.
+  ;; `cooked-continue' exists for no other reason than to stand here; see its
+  ;; docstring for why a terminal has no continue of its own.
+  "<remap> <comint-send-eof>" #'cooked-send-eof
+  "<remap> <comint-kill-subjob>" #'cooked-kill-session
+  "<remap> <comint-continue-subjob>" #'cooked-continue
+  ;; And the two that read comint's input fields, which cooked does not set, so
+  ;; they answered from `point-min' and from nowhere respectively.
+  ;; `comint-append-output-to-file' is deliberately not here: it misreads
+  ;; positions like these two but touches no process, so it is wrong rather than
+  ;; dangerous, and the menu simply stops offering it.
+  "<remap> <comint-show-output>" #'cooked-show-output
+  "<remap> <comint-write-output>" #'cooked-write-output
+  "<remap> <comint-kill-input>" #'cooked-kill-input
+  "<remap> <comint-previous-input>" #'cooked-previous-input
+  "<remap> <comint-next-input>" #'cooked-next-input
+  "<remap> <comint-previous-prompt>" #'cooked-previous-command
+  "<remap> <comint-next-prompt>" #'cooked-next-command
+  ;; `C-c C-a', which cooked inherits live from `comint-mode-map'.  Left alone it
+  ;; half-works by coincidence: `comint-bol' reads comint's input fields, which
+  ;; cooked does not set -- it marks the prompt read-only instead -- so the first
+  ;; press lands at column 0 inside the prompt, and only the repeat reaches the
+  ;; command, that arm asking for the process mark and cooked's input mark being
+  ;; that same marker.  comint's two presses in the other order, in other words,
+  ;; and resting on a coincidence.  `cooked-beginning-of-line' gives both
+  ;; positions in comint's order and needs no repeat to be recognised.
+  "<remap> <comint-bol-or-process-mark>" #'cooked-beginning-of-line)
+
 (define-derived-mode cooked-mode comint-mode "cooked"
   "Major mode for a terminal that hands the keyboard back for line input.
 
@@ -2009,134 +2151,6 @@ to the child verbatim."
 (set-keymap-parent cooked-command-map cooked-mode-map)
 (set-keymap-parent cooked-alt-map cooked-mode-map)
 (set-keymap-parent cooked-peek-map cooked-mode-map)
-
-;; Cooked's own commands, on the shared parent rather than repeated in each of
-;; the three state maps above: the binding should not evaporate depending on
-;; what the child happens to be doing, or on whether the user has stepped out
-;; to peek -- peeking installs this map directly, with none of the others'
-;; forwarding, so this is the one place all of them are guaranteed to reach.
-(define-key cooked-mode-map (kbd "C-c C-c") #'cooked-interrupt)
-(define-key cooked-mode-map (kbd "C-c C-d") #'cooked-send-eof)
-(define-key cooked-mode-map (kbd "C-c C-e") #'cooked-send-string)
-(define-key cooked-mode-map (kbd "C-c M-x") #'execute-extended-command)
-(define-key cooked-mode-map (kbd "C-c C-z") #'cooked-suspend)
-(define-key cooked-mode-map (kbd "C-c C-y") #'cooked-paste)
-(define-key cooked-mode-map (kbd "C-c C-q") #'cooked-send-literal-key)
-;; Both spellings: `[escape]' is the event a graphical frame sends, and the only
-;; one that does not collide with the `C-c M-' bindings below, which a terminal
-;; frame reads as `C-c ESC' plus a letter.
-(define-key cooked-mode-map [?\C-c escape] #'cooked-send-escape)
-(define-key cooked-mode-map (kbd "C-c ESC ESC") #'cooked-send-escape)
-(define-key cooked-mode-map (kbd "C-c C-v") #'cooked-toggle-peek)
-(define-key cooked-mode-map (kbd "C-c C-p") #'cooked-previous-command)
-(define-key cooked-mode-map (kbd "C-c C-n") #'cooked-next-command)
-(define-key cooked-mode-map (kbd "C-c TAB") #'cooked-toggle-fold)
-(define-key cooked-mode-map (kbd "C-c C-l") #'cooked-refresh)
-;; Reads the way \\`M->' does for the end of a buffer, and for the same reason:
-;; the newest command is the one end of the transcript that keeps moving.  The mode
-;; line's exit status is a click away from it too, but a keyboard cannot reach that
-;; and a terminal frame does not draw it.
-(define-key cooked-mode-map (kbd "C-c C->") #'cooked-goto-last-command)
-;; goto-addr's own advertised key, and the entry point that does not need point to
-;; be inside a highlighted span -- see `cooked-follow-link-at-point'.  Here rather
-;; than in a `keymap' text property because `C-c' is forwarded to the child as the
-;; interrupt character, and a `C-c' prefix in a property at point would make Emacs
-;; wait for a second key before letting SIGINT through.
-(define-key cooked-mode-map (kbd "C-c RET") #'cooked-follow-link-at-point)
-;; Next and previous as `C-c C-n' and `C-c C-p' are for commands, comint's
-;; prompts, so links take the Meta pair under the same prefix, which comint
-;; leaves free.  `cooked-link-repeat-map' makes a plain `n' and `p' enough after
-;; the first.
-(define-key cooked-mode-map (kbd "C-c M-n") #'cooked-next-link)
-(define-key cooked-mode-map (kbd "C-c M-p") #'cooked-previous-link)
-
-;; comint-shaped, cooked-implemented.  These keep comint's own positions, because
-;; the concept behind each is one a terminal genuinely has -- it is only comint's
-;; implementation, which reaches for a process that here is a wakeup pipe, that
-;; cannot be used.  See `cooked--input-mark' for why the rest of comint's C-c map
-;; needs nothing.
-(define-key cooked-mode-map (kbd "C-c C-\\") #'cooked-quit)
-(define-key cooked-mode-map (kbd "C-c M-o") #'cooked-clear-scrollback)
-(define-key cooked-mode-map (kbd "C-c SPC") #'cooked-newline)
-
-;; Middle-click pastes to the child, which is what it does in every other
-;; terminal.  comint binds it to `comint-insert-input', which looks for the input
-;; field under the click; cooked sets no `field' properties, so it fell through to
-;; the global `mouse-2' -- `mouse-yank-primary', which inserts the X selection
-;; into the buffer.  Text that goes nowhere, in a transcript that is read-only
-;; above the prompt, at a position the next repaint may overwrite.
-;;
-;; It composes with the two other claims on `mouse-2' by outranking neither,
-;; which is the correct order rather than an accident.  A link span carries
-;; `cooked-link-map' as a `keymap' text property, and a property keymap is
-;; consulted before any keymap here, so clicking a link still follows it --
-;; `cooked-follow-link' then makes the same decision this binding would have.
-;; `cooked--mouse-map' lives in `emulation-mode-map-alists', which outranks the
-;; local map, so a child that asked for the mouse gets the click and this is
-;; never reached.  `S-mouse-2' is left alone in both directions.
-;;
-;; No `down-mouse-2' to go with it: nothing binds it globally, so there is no
-;; earlier command to head off.
-(define-key cooked-mode-map [mouse-2] #'cooked-paste)
-
-;; A paste in a terminal frame's host terminal arrives as an event of its own,
-;; not as the key `yank' is bound to; see `cooked-xterm-paste'.  It is bound on
-;; the shared parent because the passthrough maps bind characters and function
-;; keys but never this event, so every state reaches it.
-(define-key cooked-mode-map [xterm-paste] #'cooked-xterm-paste)
-
-;; The primary selection is the other paste that does not come from the kill
-;; ring, and `mouse-yank-primary' inserts it into the buffer whoever owns the
-;; keyboard.  Remapped rather than bound, since `mouse-2' is `cooked-paste' here
-;; and the command is reached only from a key a user has put it on.
-(define-key cooked-mode-map [remap mouse-yank-primary] #'cooked-mouse-yank-primary)
-
-;; Whatever key a user has bound to comint's commands reaches ours, so
-;; `evil-collection-comint' (which binds `repl-submit' to `comint-send-input')
-;; works without knowing cooked exists.
-(dolist (remap '((comint-send-input . cooked-send-input)
-                 (comint-interrupt-subjob . cooked-interrupt)
-                 (comint-quit-subjob . cooked-quit)
-                 (comint-delete-output . cooked-delete-output)
-                 (comint-stop-subjob . cooked-suspend)
-                 (comint-delchar-or-maybe-eof . cooked-delete-char-or-eof)
-                 ;; The three that were left out, and the reason this list is
-                 ;; worth auditing rather than adding to as commands appear.
-                 ;; comint's own implementations do not fail here -- they
-                 ;; *succeed*, against `cooked--wake': `comint-kill-subjob'
-                 ;; kills the pipe the child rings when output is pending, and
-                 ;; the buffer stops hearing from a child that is still
-                 ;; running.  `cooked-continue' exists for no other reason than
-                 ;; to stand here; see its docstring for why a terminal has no
-                 ;; continue of its own.
-                 (comint-send-eof . cooked-send-eof)
-                 (comint-kill-subjob . cooked-kill-session)
-                 (comint-continue-subjob . cooked-continue)
-                 ;; And the two that read comint's input fields, which cooked
-                 ;; does not set, so they answered from `point-min' and from
-                 ;; nowhere respectively.  `comint-append-output-to-file' is
-                 ;; deliberately not here: it misreads positions like these two
-                 ;; but touches no process, so it is wrong rather than
-                 ;; dangerous, and the menu simply stops offering it.
-                 (comint-show-output . cooked-show-output)
-                 (comint-write-output . cooked-write-output)
-                 (comint-kill-input . cooked-kill-input)
-                 (comint-previous-input . cooked-previous-input)
-                 (comint-next-input . cooked-next-input)
-                 (comint-previous-prompt . cooked-previous-command)
-                 (comint-next-prompt . cooked-next-command)
-                 ;; `C-c C-a', which cooked inherits live from `comint-mode-map'.
-                 ;; Left alone it half-works by coincidence: `comint-bol' reads
-                 ;; comint's input fields, which cooked does not set -- it marks
-                 ;; the prompt read-only instead -- so the first press lands at
-                 ;; column 0 inside the prompt, and only the repeat reaches the
-                 ;; command, that arm asking for the process mark and cooked's
-                 ;; input mark being that same marker.  comint's two presses in
-                 ;; the other order, in other words, and resting on a coincidence.
-                 ;; `cooked-beginning-of-line' gives both positions in comint's
-                 ;; order and needs no repeat to be recognised.
-                 (comint-bol-or-process-mark . cooked-beginning-of-line)))
-  (define-key cooked-mode-map (vector 'remap (car remap)) (cdr remap)))
 
 ;;;; The menu
 
