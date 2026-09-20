@@ -1216,11 +1216,11 @@ impl Term {
 
     /// Drop every grid row above the current prompt, returning how many went.
     ///
-    /// The grid's half of clearing the terminal. Which row the prompt is on is arithmetic
-    /// over state only the emulator keeps -- [`State::prompt_start`] against
-    /// [`State::evicted_total`] -- and rediscovering it from buffer positions would get a
-    /// two-line prompt wrong, cutting at the input row. Without OSC 133 the cursor row
-    /// stands in.
+    /// The grid's half of clearing the terminal. Which row the prompt is on is a question
+    /// only the emulator can answer -- it is the row still carrying
+    /// [`State::prompt_start`]'s mark -- and rediscovering it from buffer positions would
+    /// get a two-line prompt wrong, cutting at the input row. Without OSC 133, or once
+    /// the marked row has left the grid, the cursor row stands in.
     pub fn clear_to_prompt(&mut self) -> usize {
         self.state.clear_to_prompt()
     }
@@ -1687,13 +1687,16 @@ struct State {
     unrecognised: usize,
     /// The renditions the grids' cells name by id; see [`crate::emu::style`].
     styles: StyleStore,
-    /// Where the shell last said its prompt begins (OSC 133;A), in [`Anchor`] coordinates.
+    /// The mark the shell last said its prompt begins at (OSC 133;A).
     ///
     /// Emacs keeps markers for the *command* regions it renders; this keeps the one row
-    /// the grid itself needs an answer about, for [`Term::clear_to_prompt`]. Absolute, so
-    /// it survives the rows above it scrolling away, and rebased when rows are removed
-    /// from under it — the two ways row 0 can stop meaning what it meant.
-    prompt_start: Option<Anchor>,
+    /// the grid itself needs an answer about, for [`Term::clear_to_prompt`]. A name rather
+    /// than a position, because every way the prompt's row can move already moves the
+    /// mark on the cell: a scroll and a `remove_rows` carry the row's attachments with
+    /// the row, and a rewrap relocates the mark through [`Logical`](crate::emu::screen)
+    /// as it relocates every other. A second copy of the position would have to be
+    /// corrected on each of those paths, and the rewrap is the one where it was not.
+    prompt_start: Option<MarkId>,
     /// The next [`MarkId`] to hand out, so no two marks of a session share a name.
     ///
     /// Session-lifetime rather than per-drain: Emacs keeps a marker per id for as long as

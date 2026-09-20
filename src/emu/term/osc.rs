@@ -421,7 +421,7 @@ impl State {
         // `clear_to_prompt` must keep and the one Emacs files the command record under.
         // The command marks move the input modes; see [`State::take_back`].
         match mark {
-            Mark::PromptStart => self.prompt_start = Some(at),
+            Mark::PromptStart => self.prompt_start = Some(id),
             Mark::CommandStart(_) => self.hand_over(),
             Mark::CommandEnd(_) => self.take_back(),
             Mark::PromptContinuation | Mark::PromptEnd => {}

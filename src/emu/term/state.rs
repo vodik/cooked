@@ -234,7 +234,7 @@ impl State {
         let cursor = self.screens.primary.cursor().row;
         let keep = self
             .prompt_start
-            .and_then(|at| at.row.checked_sub(self.evicted_total))
+            .and_then(|id| self.screens.primary.mark_row(id))
             .filter(|row| *row <= cursor)
             .unwrap_or(cursor);
         if keep == 0 {
@@ -244,41 +244,18 @@ impl State {
         keep
     }
 
-    /// The single funnel for rows being removed from the grid, which is what keeps
-    /// [`State::prompt_start`] meaning what it says.
+    /// The single funnel for rows being removed from the grid, which is what keeps the
+    /// front buffer agreeing with it.
     ///
     /// Rows removed this way are discarded rather than archived, so `evicted_total` does
-    /// not move, but every row *below* the cut slides up and an anchor pointing at one has
-    /// to come down with it -- the same arithmetic [`Screen::remove_rows`] applies to the
-    /// cursor.
-    ///
-    /// Every removal must go through here rather than [`State::screen_mut`]. A stale
-    /// anchor after `cooked-delete-output` would make a later `clear_to_prompt` fall back
-    /// to cutting at the cursor, which is wrong for a multi-line prompt.
+    /// not move. Where the prompt has gone needs no repair here: [`State::prompt_start`]
+    /// names a mark rather than a row, and [`Screen::remove_rows`] slides the surviving
+    /// rows up whole, attachments included.
     pub(super) fn remove_rows(&mut self, first: usize, count: usize) {
         self.screen_mut().remove_rows(first, count);
         // The rows below the cut moved on the grid and not in the buffer, and they are all
         // damaged; forgetting them sends them, as it did before there was a copy to consult.
         self.front.forget_from(first);
-        // The alt grid holds a running program's frame, not a transcript; no anchor
-        // points into it, and the primary's rows have not moved.
-        if self.shown.is_alternate() {
-            return;
-        }
-        if let Some(at) = &mut self.prompt_start {
-            let Some(row) = at.row.checked_sub(self.evicted_total) else {
-                // Already below the screen's top edge, so nothing on the grid moved it.
-                return;
-            };
-            let moved = match row {
-                row if row >= first + count => row - count,
-                // The anchored row itself went. The nearest row it can still name is
-                // the one that closed the gap, exactly as the cursor is clamped.
-                row if row >= first => first,
-                row => row,
-            };
-            at.row = self.evicted_total + moved;
-        }
     }
 
     /// Where the cursor is now, in the coordinates an [`Anchor`] keeps.

@@ -420,9 +420,10 @@ fn clearing_to_the_prompt_falls_back_to_the_cursor_row() {
 
 #[test]
 fn clearing_to_the_prompt_twice_still_knows_where_the_prompt_is() {
-    // The mark is absolute, and rows removed this way are discarded rather than
-    // archived, so the count they are absolute against does not move: the anchor has
-    // to come down instead, or the second call cuts at the cursor and eats the prompt.
+    // Rows removed this way are discarded rather than archived, so `evicted_total` does
+    // not move and nothing outside the grid records the removal: it is the mark riding
+    // up with its own row that keeps the second call from cutting at the cursor and
+    // eating the prompt.
     let mut t = term(4, 8, b"one\r\ntwo\r\n\x1b]133;A\x1b\\$ ls");
     t.drain();
     t.clear_to_prompt();
@@ -436,10 +437,11 @@ fn clearing_to_the_prompt_twice_still_knows_where_the_prompt_is() {
 #[test]
 fn removing_rows_brings_the_prompt_mark_down_with_them() {
     // `cooked-delete-output' removes a finished command's rows, which sit above the
-    // prompt. The mark is absolute and these rows are discarded rather than archived,
-    // so nothing else moves it: left alone it names a row past the cursor, fails
-    // `clear_to_prompt's own sanity filter, and silently falls back to cutting at the
-    // cursor -- eating the first line of a two-line prompt.
+    // prompt. The rows below the cut slide up carrying their attachments, the prompt's
+    // mark among them, which is the whole of the repair: a position recorded elsewhere
+    // would name a row past the cursor, fail `clear_to_prompt's own sanity filter, and
+    // silently fall back to cutting at the cursor -- eating the first line of a
+    // two-line prompt.
     let mut t = term(6, 8, b"out1\r\nout2\r\n\x1b]133;A\x1b\\user\r\n$ ");
     t.drain();
     // The two output rows above the prompt.
@@ -454,14 +456,38 @@ fn removing_rows_brings_the_prompt_mark_down_with_them() {
 }
 
 #[test]
-fn removing_the_prompts_own_row_clamps_the_mark_rather_than_losing_it() {
+fn removing_the_prompts_own_row_falls_back_to_the_cursor() {
     let mut t = term(6, 8, b"out\r\n\x1b]133;A\x1b\\$ ls");
     t.drain();
     // Takes the output row and the prompt row with it.
     t.remove_rows(0, 2);
-    // The mark clamps to the row that closed the gap, exactly as the cursor does, so
-    // it stays a row on the grid rather than one past the end of it.
+    // The prompt's mark went with the row it was on, so there is no live prompt left to
+    // find and the cursor stands in -- and `Screen::remove_rows' has clamped that to the
+    // row which closed the gap, so there is nothing above it to clear.
     assert_eq!(t.clear_to_prompt(), 0);
+    assert_eq!(text(&t, 0), "", "both rows went, prompt included");
+}
+
+/// The other path a recorded row would have had to be corrected on, and never was: `CSI
+/// L` pushes every row below the cursor down without archiving anything, so the prompt
+/// changes rows while nothing outside the grid hears about it. Reading the row off the
+/// mark costs no correction here at all -- `Screen::insert_lines` moves the rows, and a
+/// row's attachments are part of the row.
+#[test]
+fn inserting_lines_above_the_prompt_carries_its_mark_down() {
+    let mut t = term(6, 8, b"out\r\n\x1b]133;A\x1b\\$ ls");
+    t.drain();
+    // Two blank lines at the top, then the cursor back below the prompt, where a shell
+    // redrawing this way would leave it.
+    t.feed(b"\x1b[H\x1b[2L\x1b[5;1H");
+    t.drain();
+    assert_eq!(text(&t, 3), "$ ls", "the prompt really is two rows lower");
+    assert_eq!(
+        t.clear_to_prompt(),
+        3,
+        "the blank rows and the output row above the prompt all go"
+    );
+    assert_eq!(text(&t, 0), "$ ls");
 }
 
 #[test]
@@ -718,27 +744,21 @@ fn marks_on_the_alternate_screen_leave_the_modes_alone() {
     assert!(!mode_set(&t, 2048));
 }
 
-/// REAL: found by the review3 split-brain probe (`cooked--clear-to-prompt` vs
-/// `cooked--prompt-start`; see FABEL.org, task "Check: two trackers of where the prompt
-/// is, and two statements of \"hidden\"").
+/// Found by the review3 split-brain probe (`cooked--clear-to-prompt` vs
+/// `cooked--prompt-start`), back when `State::prompt_start` was an absolute row snapshot
+/// taken as `133;A` was parsed. It was corrected in two places only: `State::remove_rows`
+/// slid it down when rows above it were explicitly deleted, and `State::archive` left it
+/// alone while advancing `evicted_total`, which is what the row was read relative to. A
+/// rewrap went through neither -- [`Screen::reflow`] rebuilds the live grid from the
+/// logical lines, and [`State::resize`] archives only the rows that overflowed off the
+/// top -- so a rewrap that changed how many rows the content *above* the prompt takes,
+/// without evicting enough to compensate, moved the prompt to a different live row while
+/// the snapshot stood still.
 ///
-/// `State::prompt_start` is an absolute row snapshot taken when `133;A` is parsed. It is
-/// corrected in two places only: [`State::remove_rows`] slides it down when rows above it
-/// are explicitly deleted, and [`State::archive`] leaves it alone but advances
-/// `evicted_total`, which is what the row is read relative to. A rewrap goes through
-/// neither: [`Screen::reflow`] rebuilds the live grid from the logical lines, and
-/// [`State::resize`] archives only the rows that overflowed off the top. A rewrap that
-/// changes how many rows the content *above* the prompt takes -- without evicting enough
-/// to compensate -- moves the prompt to a different live row while `prompt_start` and
-/// `evicted_total` both stand still, so `clear_to_prompt` computes the row from a mapping
-/// that no longer holds.
-///
-/// Lisp's own copy does not have this problem: `cooked--prompt-start` is a buffer marker
-/// keyed on the mark's id, and `State::take_marks`/`Delta::marks` report where that id's
-/// cell actually ended up after every rewrap (see `a_rewrap_reports_where_each_mark_moved_to`
-/// above) -- a completely different mechanism from the one `clear_to_prompt` reads. So a
-/// rewrap is exactly the case the ticket asked to construct: the two trackers name
-/// different rows.
+/// `prompt_start` now names the mark rather than the row, which is the mechanism Lisp's
+/// own copy always used: `cooked--prompt-start` is a buffer marker keyed on the mark's
+/// id, and `State::take_marks`/`Delta::marks` report where that id's cell ended up after
+/// every rewrap (see `a_rewrap_reports_where_each_mark_moved_to` above).
 ///
 /// Six rows at ten columns: two ten-character padding lines, then `133;A` and `PROMPT` on
 /// row 2 -- three rows of content, so `Screen::reflow`'s `used()` bound takes exactly
@@ -747,8 +767,6 @@ fn marks_on_the_alternate_screen_leave_the_modes_alone() {
 /// moves, and the divergence is not hidden behind the "no live prompt" fallback
 /// `clear_to_prompt` has for an evicted one (see `a_mark_evicted_by_a_rewrap_is_reported_in_the_batch`).
 #[test]
-#[ignore = "REAL: State::prompt_start is not corrected by a non-evicting rewrap -- \
-            see FABEL.org task \"Check: two trackers of where the prompt is...\""]
 fn a_non_evicting_rewrap_leaves_prompt_start_naming_the_wrong_row() {
     let mut t = term(6, 10, b"0123456789\r\nabcdefghij\r\n\x1b]133;A\x07PROMPT");
     t.drain();

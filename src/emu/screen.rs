@@ -555,6 +555,24 @@ impl Screen {
         }
     }
 
+    /// Which row carries the mark named ID, or nothing if no row does any longer.
+    ///
+    /// The row is the answer rather than the column because the callers ask about lines:
+    /// [`State::clear_to_prompt`](crate::emu::term::State::clear_to_prompt) wants the row
+    /// the prompt begins on. Nothing means the marked row has left the grid -- scrolled
+    /// into scrollback, removed by `cooked-delete-output`, or blanked by an erase that
+    /// ended the row rather than its drawing -- and the caller falls back.
+    ///
+    /// A walk of the grid, which is what an attachment table per row costs to search. The
+    /// callers are user commands, one per keystroke at the very most, and the walk skips a
+    /// row with no attachments on a null check.
+    pub fn mark_row(&self, id: MarkId) -> Option<usize> {
+        (0..self.height()).find(|&index| {
+            self.row(index)
+                .is_some_and(|row| row.marks().any(|(_, on_row)| on_row == id))
+        })
+    }
+
     fn touch(&mut self, index: usize) -> Option<RowMut<'_>> {
         *self.dirty.get_mut(index)? = true;
         self.touches += 1;
