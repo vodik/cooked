@@ -2154,7 +2154,21 @@ impl Shared {
             // answering yes for a buffer nothing would ever write to again.
             Ended::Aborted => {
                 let _ = self.pty.hangup();
-                Some(self.reap_or_kill().map_or(Exit::Lost, Exit::Status))
+                Some(
+                    self.reap_or_kill()
+                        // `Pty::reap` answers `None` the instant `Pty::reaped` is already
+                        // true, without looking at what the winner left behind -- the same
+                        // gap [`Shared::linger_for_exit`] and [`Shared::reap_after_hangup`]
+                        // close by reading [`Pty::collected`] once a reap comes back empty.
+                        // Skipping it here is what let an abort that lost the race -- the
+                        // ordinary end reaping the child first, in the comment below, or
+                        // another abort doing the same -- report `Exit::Lost` for a child
+                        // whose real status was sitting in `Pty::collected` the entire
+                        // time. `Ended::Aborted` is the only caller of `reap_or_kill`, so
+                        // it is the only one that needs this said again rather than shared.
+                        .or_else(|| self.pty.collected())
+                        .map_or(Exit::Lost, Exit::Status),
+                )
             }
         };
         let Some(status) = status else {
@@ -3938,6 +3952,37 @@ mod tests {
         assert_eq!(
             session.drain().exit,
             Some(Exit::Status(128 + Signal::SIGKILL as i32))
+        );
+    }
+
+    /// An abort that loses the reap race still reports the real status.
+    ///
+    /// The test above races the reader thread it never stops against its own direct
+    /// call to [`Shared::finish`], and about once in twenty full `cargo test` runs the
+    /// reader thread's own hangup detection reaps the child first: `Pty::reap` sees
+    /// `Pty::reaped` already true and answers `None` at once, without ever looking at
+    /// the status the winner left in `Pty::collected`. `Ended::Aborted` had no fallback
+    /// for that -- unlike [`Shared::linger_for_exit`] and [`Shared::reap_after_hangup`],
+    /// which both read `Pty::collected` once their own reap comes back empty -- so the
+    /// loser reported [`Exit::Lost`] for a child that had, in fact, exited by signal.
+    ///
+    /// Reproduced here without racing anything: run the child to a real exit first, so
+    /// `Pty::collected` holds a real status, then put `exited` back to `None` -- the
+    /// state `Ended::Aborted` finds itself in when it is the call that loses the race
+    /// -- and check what a fresh `finish(Ended::Aborted)` reports for an already-reaped
+    /// child.
+    #[test]
+    fn an_aborted_reader_that_loses_the_reap_still_reports_the_real_status() {
+        let (session, _read) = session(&["/bin/sh", "-c", "trap '' HUP; exec sleep 300"]);
+        session.shared.pty.kill().expect("kill");
+        let real_exit = wait_for(&session, |u| u.exit.is_some()).exit;
+        assert_eq!(real_exit, Some(Exit::Status(128 + Signal::SIGKILL as i32)));
+        *session.shared.exited.held() = None;
+        session.shared.finish(Ended::Aborted);
+        assert_eq!(
+            session.drain().exit,
+            real_exit,
+            "the status Pty::collected already had, not Exit::Lost"
         );
     }
 
