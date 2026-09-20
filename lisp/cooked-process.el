@@ -62,10 +62,15 @@
 ;; it back beside them.  So the text arrives clean and the colours arrive with
 ;; it, as `face' and `font-lock-face' on the string the filter is called with;
 ;; `cooked-process-styled' is the switch and `cooked-process--text' the whole of
-;; the mechanism.  What does not travel is the two things that would mean
-;; nothing where they landed -- glyph decorations, which are a terminal's answer
-;; to a screen column, and `OSC 8' links, whose ids resolve only in the session
-;; that issued them.  Both reasons are in `cooked-process--text'.
+;; the mechanism.
+;;
+;; An `OSC 8' link rides along the same way now that its destination sits on the
+;; text itself, as `cooked-link-uri', rather than behind an id only the hidden
+;; host could resolve: the consumer gets the highlight, the `help-echo' and the
+;; keymap that follows it, so a link a build tool printed is followable with no
+;; `cooked-mode' in the buffer at all.  What still does not travel is a glyph
+;; decoration, a terminal's answer to a screen column that a compilation buffer
+;; has none of.  See `cooked-process--text'.
 ;;
 ;; The consumer is not adapted to any of this.  `compilation-filter' is called
 ;; with a string, at `process-mark', exactly as it is now; `compilation-filter-start'
@@ -382,8 +387,8 @@ one `compilation-start' rather than advising every caller of it."
 
 ;;;; Rendering
 
-(defun cooked-process--text (block)
-  "BLOCK's text, carrying the child's colours when they are wanted.
+(defun cooked-process--text (block &optional unlinked)
+  "BLOCK's text, carrying the child's colours and links when they are wanted.
 
 BLOCK is what `cooked--drain' hands back for a run of rendered text, and what
 `cooked--screen-text' hands over for the live screen -- `(TEXT STYLE-SPANS
@@ -399,12 +404,23 @@ against the screen column it sits on.  A compilation buffer has no screen
 column, and text that displays as something other than itself is text a regexp
 matches and the eye does not.
 
-Links are dropped because nothing there would follow them.  The destination
-itself rides on the text now, as `cooked-link-uri', so it would survive the
-trip; but the keys, the mouse bindings and the `help-echo' that act on it are
-`cooked-mode''s, and the consumer is a compilation buffer with its own.  A link
-carried across would arrive as a `mouse-face' over text that does nothing when
-clicked.  Worse than no link.
+Links travel now, by default: the destination rides on the text as
+`cooked-link-uri', so `cooked--render-block' is called with its UNLINKED
+argument off, and `cooked-link--propertize' puts the same `keymap',
+`mouse-face' and `help-echo' on the span it would in a `cooked-mode' buffer.
+`RET' and `mouse-2' there both run `cooked-follow-link', which opens the
+destination through `cooked-link-browse' -- the same path a live session
+uses -- so a link a build tool printed is followable in a plain compilation
+buffer with no `cooked-mode' loaded at all.  Where a diagnostic and a link
+land on the same characters, `compilation-mode''s own parse runs after this
+text is inserted and overwrites `keymap', `mouse-face' and `help-echo' with
+its own -- see `compilation-error-properties' -- so `next-error' still wins
+there.
+
+UNLINKED is for `cooked-process--tail-text', which passes it non-nil.  Point
+cannot land inside an overlay's `after-string', only before or after it, so
+`RET' could never reach a link shown there; a link only `mouse-2' can follow
+is the same bad trade decorations already declined above.
 
 The styling is applied by rendering into the host buffer and lifting the result
 out again, rather than by building a propertized string: `cooked--render-block'
@@ -423,14 +439,16 @@ exactly this situation -- while a consumer with no font-lock at all, such as
 `async-shell-command's buffer, never installs the
 `char-property-alias-alist' entry that would make `font-lock-face' visible.
 The alias is consulted only where `face' is absent, so the pair is read as
-one face and not as two."
+one face and not as two -- and it is why a link's own `cooked-link' face,
+`cooked-link--propertize' puts on unstyled link text the same as it would in
+a `cooked-mode' buffer, reaches the consumer at all."
   (when block
     (if (not cooked-process-styled)
         (car block)
       (let ((start (point-max)))
         (save-excursion
           (goto-char start)
-          (cooked--render-block (list (car block) (cadr block) nil nil) nil nil t)
+          (cooked--render-block (list (car block) (cadr block) nil nil) nil nil unlinked)
           (let ((end (point)))
             (let ((pos start))
               (while (< pos end)
@@ -468,7 +486,12 @@ direction, of a nil CHAR-END and of LENGTH, with nothing pinning it.
 
 Trailing blank rows are dropped rather than shown.  The grid is a fixed eight
 rows and a child using one of them would otherwise be followed by seven blank
-lines, which is a worse answer than no tail at all."
+lines, which is a worse answer than no tail at all.
+
+Rendered unlinked, deliberately: see UNLINKED in `cooked-process--text'.  The
+tail is an overlay's `after-string', and point cannot land inside one, so a
+link here could only ever answer `mouse-2' and never `RET' -- an affordance
+this file would rather not offer than offer by half."
   (when-let* ((session cooked-process--session)
               ;; Right-trimmed because a bar is padded out to the terminal's width
               ;; with spaces, and an overlay is not a screen: the trailing run would
@@ -477,7 +500,7 @@ lines, which is a worse answer than no tail at all."
               ;; row as the child wrote it.
               (rows (mapcar #'string-trim-right
                             (split-string (cooked-process--text
-                                           (cooked--screen-text session))
+                                           (cooked--screen-text session) t)
                                           "\n")))
               (last (cl-position-if-not #'string-empty-p rows :from-end t)))
     (mapconcat #'identity (cl-subseq rows 0 (1+ last)) "\n")))
@@ -566,6 +589,11 @@ Errors are reported rather than swallowed: this runs from a process filter,
 where Emacs discards them, and the symptom would be a compilation buffer that
 simply stopped filling.
 
+`:links' is installed before `scrolled' is rendered, as
+`cooked--apply-resources' installs it before a live session's own render: a
+link a row names by id has to resolve before `cooked-process--text' reads it
+off the text.
+
 The drain is followed by `cooked--ready' however it went, as
 `cooked--drain-and-apply' follows its own, because that is what tells the core
 the drain's queries have been answered."
@@ -578,6 +606,7 @@ the drain's queries have been answered."
                        (scrolled (plist-get update :scrolled))
                        (exit (plist-get update :exit)))
                   (cooked-process--answer (plist-get update :events))
+                  (cooked--install-links (plist-get update :links))
                   (cooked--install-styles (plist-get update :styles))
                   (when scrolled
                     (cooked-process--emit (cooked-process--text scrolled)))
@@ -620,6 +649,7 @@ screen is the reading that does not depend on that."
       (cooked--resize session 1 cols)
       (let* ((update (cooked--drain session cooked-process--rejoin))
              (scrolled (progn
+                         (cooked--install-links (plist-get update :links))
                          (cooked--install-styles (plist-get update :styles))
                          (cooked-process--text (plist-get update :scrolled))))
              (head (plist-get update :head))
@@ -818,10 +848,11 @@ on the pty or the tree beneath it."
 
 Output reaches `compilation-filter' as text the emulator has finished with:
 carriage returns resolved, cursor addressing spent, the child's colours carried
-over as faces, and lines the child wrapped at COLUMNS rejoined so that
-`compilation-error-regexp-alist' can match them.  What the child is still
-rewriting in place -- a progress bar -- is shown below that as an overlay, and
-is never part of the buffer's text.
+over as faces, an `OSC 8' link followable with `RET' or `mouse-2' though
+nothing here turns on `cooked-mode', and lines the child wrapped at COLUMNS
+rejoined so that `compilation-error-regexp-alist' can match them.  What the
+child is still rewriting in place -- a progress bar -- is shown below that as
+an overlay, and is never part of the buffer's text.
 `grep', `rgrep' and `project-find-regexp' come along, all of them being
 `compilation-start' underneath.
 

@@ -14,6 +14,7 @@
 (require 'compile)
 (require 'cooked-tests-helpers)
 (require 'cooked-process)
+(require 'cooked-link)
 
 (defmacro cooked-tests-process--with (command &rest body)
   "Run COMMAND under `cooked-process-mode' and evaluate BODY in its buffer.
@@ -277,6 +278,120 @@ claim rather than a feature."
     (cooked-tests-process--with "printf '\\033[31merror\\033[0m: red\\n'"
       (should (equal (cooked-tests-process--body) "error: red"))
       (should-not (cooked-tests-process--face-at "error")))))
+
+;;;; Links
+
+(defun cooked-tests-process--link-at (string)
+  "Position of STRING in the body, as `cooked-tests-process--face-at' finds it."
+  (save-excursion
+    (goto-char (point-min))
+    (forward-line 4)
+    (when (search-forward string nil t)
+      (match-beginning 0))))
+
+(ert-deftest cooked-process-carries-a-link-to-the-consumer-buffer ()
+  "An `OSC 8' span a build tool printed arrives with its destination and keymap.
+
+Once the only obstacle -- an id resolvable only in the hidden host -- was gone,
+the rest is what `cooked-link--propertize' already puts on a span in a
+`cooked-mode' buffer: the destination as `cooked-link-uri', the highlight, the
+keymap that answers `RET' and `mouse-2', and a `help-echo' that reads it
+straight off the text rather than off any state of the buffer it landed in."
+  (cooked-tests-process--with
+      "printf 'see \\033]8;;https://example.com/\\033\\\\here\\033]8;;\\033\\\\ ok\\n'"
+    (should (equal (cooked-tests-process--body) "see here ok"))
+    (let ((in (cooked-tests-process--link-at "here"))
+          (out (cooked-tests-process--link-at "see")))
+      (should (equal (cooked-link-uri in) "https://example.com/"))
+      (should (eq (get-text-property in 'keymap) cooked-link-map))
+      (should (get-text-property in 'mouse-face))
+      (should (get-text-property in 'follow-link))
+      (should (functionp (get-text-property in 'help-echo)))
+      ;; And only the span the sequence covered.
+      (should-not (cooked-link-uri out)))))
+
+(ert-deftest cooked-process-follow-link-opens-through-the-shared-path ()
+  "`RET' on the carried span opens the destination the way `cooked-mode' does.
+
+The command bound in `cooked-link-map' is `cooked-follow-link', unchanged --
+this is not a second opener written for a buffer with no `cooked-mode', it is
+the same one, reached because the keymap travelled with the text.  The opener
+itself is mocked rather than actually browsed, the same way
+`cooked-a-link-follows-when-no-layer-claims-the-input' in cooked-tests-link.el
+checks it."
+  (cooked-tests-process--with
+      "printf 'go \\033]8;;https://example.com/\\033\\\\there\\033]8;;\\033\\\\\\n'"
+    (goto-char (cooked-tests-process--link-at "there"))
+    (let (browsed)
+      (cl-letf (((symbol-function 'browse-url)
+                 (lambda (uri &rest _) (setq browsed uri))))
+        (let ((last-input-event 'return))
+          (cooked-follow-link)))
+      (should (equal browsed "https://example.com/")))))
+
+(ert-deftest cooked-process-styled-nil-carries-no-link-properties ()
+  "With `cooked-process-styled' nil a link is bare text too, not half a link.
+
+The switch is documented as turning off colour; this is the check that it
+turns off the whole rendering path `cooked-process--text' takes, links
+included, rather than leaving a `keymap' and no visible affordance behind."
+  (let ((cooked-process-styled nil))
+    (cooked-tests-process--with
+        "printf 'see \\033]8;;https://example.com/\\033\\\\here\\033]8;;\\033\\\\ ok\\n'"
+      (should (equal (cooked-tests-process--body) "see here ok"))
+      (let ((at (cooked-tests-process--link-at "here")))
+        (should-not (cooked-link-uri at))
+        (should-not (get-text-property at 'keymap))
+        (should-not (get-text-property at 'mouse-face))
+        (should-not (get-text-property at 'font-lock-face))))))
+
+(ert-deftest cooked-process-next-error-keeps-its-own-keymap-over-a-link ()
+  "Where a diagnostic and a link land on the same characters, `next-error' wins.
+
+`compilation-mode''s own parse runs after this text is inserted, from
+`compilation--ensure-parse' at the end of `compilation-filter', and
+`compilation-error-properties' overwrites `keymap', `mouse-face' and
+`help-echo' on the span it recognised -- see `compile.el's
+`compilation--put-prop' callers.  So a link that happens to cover an error
+location loses the tug of war on purpose: the destination survives, because
+`cooked-link-uri' is not a property compilation-mode knows to touch, but
+`RET' there jumps to the error rather than opening the link."
+  (let ((file (make-temp-file "cooked-process-link-error" nil ".c")))
+    (with-temp-file file (dotimes (_ 20) (insert "\n")))
+    (unwind-protect
+        (cooked-tests-process--with
+            (format "printf '\\033]8;;https://example.com/\\033\\\\%s:12:5: error: boom\\033]8;;\\033\\\\\\n'; exit 1"
+                    file)
+          (let ((start (cooked-tests-process--link-at file))
+                (message (cooked-tests-process--link-at "error: boom")))
+            (should start)
+            (should message)
+            ;; `compile.el' puts the bare symbol on the property, not its value --
+            ;; `compilation-button-map' is `fset' to the keymap it names, in
+            ;; `compile.el', for exactly this use.
+            (should (eq (get-text-property message 'keymap) 'compilation-button-map))
+            (should-not (eq (get-text-property message 'keymap) cooked-link-map))
+            (should (equal (cooked-link-uri start) "https://example.com/"))
+            (should (equal (cooked-link-uri message) "https://example.com/"))))
+      (delete-file file))))
+
+(ert-deftest cooked-process-tail-declines-links ()
+  "The live tail shows a link's text but not its keymap.
+
+`cooked-process--tail-text' renders UNLINKED, and the reason is the overlay it
+becomes: point cannot land inside an `after-string', only before or after it,
+so a `RET' bound there could never be reached, and this file would rather show
+no link than one only `mouse-2' can follow.  See `cooked-process--text'."
+  (cooked-tests-process--while
+      "printf '\\033]8;;https://example.com/\\033\\\\link\\033]8;;\\033\\\\'; sleep 30"
+    (should (cooked-tests--settle
+             (lambda () (string-match-p "link" (or (cooked-tests-process--tail) "")))
+             5))
+    (let* ((tail (cooked-tests-process--tail))
+           (at (string-match "link" tail)))
+      (should-not (get-text-property at 'keymap tail))
+      (should-not (get-text-property at 'cooked-link-uri tail))
+      (should-not (get-text-property at 'mouse-face tail)))))
 
 (ert-deftest cooked-process-rejoins-a-line-the-child-wrapped ()
   "A diagnostic wider than COLUMNS is one line by the time a regexp sees it.
