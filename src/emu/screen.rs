@@ -8,6 +8,126 @@ use super::image::{CellSize, ImageId, Placement};
 use super::style::StyleId;
 use super::units::{Chars, Cols};
 use super::utf8::PrintableAscii;
+use std::cell::Cell as Memo;
+
+/// Which rows have changed since the last drain, and how far down the grid text reaches.
+///
+/// The two are one type because the same calls move both: a row can only come to hold text
+/// by being written, and a write damages it, so there is no way to put text on a row
+/// without the reach being widened over it. That is the whole invariant behind
+/// [`Damage::last_text`], and it is carried by the methods rather than left to each of the
+/// twenty writers in this file to remember.
+#[derive(Debug, Clone)]
+struct Damage {
+    /// One flag per row, raised by a write and cleared by the drain that reports it.
+    dirty: Vec<bool>,
+    /// How many rows have been marked damaged over the screen's life; see
+    /// [`Screen::touches`].
+    touches: u64,
+    /// No row below this one holds text.
+    ///
+    /// An upper bound, not the answer, and a cache in one direction only: a write pushes it
+    /// down to the row written, and only [`Damage::last_text`] pulls it back up, tightening
+    /// it to the truth as it scans. Nothing has to invalidate it -- an erase, a scroll or a
+    /// row removal can only leave it loose, and the next scan tightens it again -- so it is
+    /// never wrong, only sometimes pessimistic, and the scan it guards is never longer than
+    /// the unconditional one from the bottom row that it replaces.
+    ///
+    /// What it is worth: a spinner on a screen using five of its fifty rows asks
+    /// [`Screen::used`] twice a drain, and each ask was forty-five `has_text` calls over
+    /// blank rows -- about 9,000 cell reads, most of that drain's cost.
+    reach: Memo<usize>,
+}
+
+impl Damage {
+    fn new(rows: usize) -> Self {
+        Self {
+            dirty: vec![true; rows],
+            touches: 0,
+            reach: Memo::new(rows.saturating_sub(1)),
+        }
+    }
+
+    /// Damage row INDEX, which may now hold text, and say whether the grid has such a row.
+    fn wrote(&mut self, index: usize) -> bool {
+        let Some(dirty) = self.dirty.get_mut(index) else {
+            return false;
+        };
+        *dirty = true;
+        self.touches += 1;
+        self.reach.set(self.reach.get().max(index));
+        true
+    }
+
+    /// Damage every row of an inclusive range, any of which may now hold text.
+    ///
+    /// A slice fill rather than a loop of [`Damage::wrote`]: `scroll_up` calls this on every
+    /// scrolled line, and clamping once lets it be a memset.
+    fn wrote_range(&mut self, range: std::ops::RangeInclusive<usize>) {
+        let (first, last) = range.into_inner();
+        let end = (last + 1).min(self.dirty.len());
+        if let Some(span) = self.dirty.get_mut(first..end) {
+            span.fill(true);
+            self.touches += 1;
+            self.reach.set(self.reach.get().max(end.saturating_sub(1)));
+        }
+    }
+
+    /// Damage every row, for a caller that has replaced or re-laid the grid.
+    fn wrote_all(&mut self) {
+        self.dirty.fill(true);
+        self.touches += 1;
+        self.reach.set(self.dirty.len().saturating_sub(1));
+    }
+
+    /// A grid of ROWS rows, every one of them damaged; see [`Screen::resize`].
+    fn reshaped(&mut self, rows: usize) {
+        *self = Self::new(rows);
+    }
+
+    /// Move the flags of rows `top..=bottom` by N as their rows have just moved, so that the
+    /// damage is reported in the coordinates the move leaves behind.
+    ///
+    /// A move is the one way a row comes to hold text without being written, so the reach
+    /// travels with it. Upwards it can only fall, and a bound that is merely loose is
+    /// allowed; downwards it has to rise, or a `CSI L` on the last used row of a short
+    /// screen would leave the row it pushed down below the reach and unaccounted for.
+    fn rotate(&mut self, top: usize, bottom: usize, n: usize, direction: Direction) {
+        match direction {
+            Direction::Up => self.dirty[top..=bottom].rotate_left(n),
+            Direction::Down => {
+                self.dirty[top..=bottom].rotate_right(n);
+                let reach = self.reach.get();
+                if reach <= bottom {
+                    self.reach.set((reach + n).min(bottom));
+                }
+            }
+        }
+    }
+
+    /// Indices of the damaged rows, clearing them.
+    fn take(&mut self) -> Vec<usize> {
+        let changed = self
+            .dirty
+            .iter()
+            .enumerate()
+            .filter(|(_, d)| **d)
+            .map(|(i, _)| i)
+            .collect();
+        self.dirty.fill(false);
+        changed
+    }
+
+    /// Index of the last row for which HAS_TEXT holds, or 0, tightening the reach to it.
+    fn last_text(&self, has_text: impl Fn(usize) -> bool) -> usize {
+        let mut index = self.reach.get().min(self.dirty.len().saturating_sub(1));
+        while index > 0 && !has_text(index) {
+            index -= 1;
+        }
+        self.reach.set(index);
+        index
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct Cursor {
@@ -414,7 +534,8 @@ pub struct Screen {
     region: Region,
     /// What DECSC saved, for DECRC to put back.
     saved: Option<Cursor>,
-    dirty: Vec<bool>,
+    /// The damaged rows and how far down the grid text reaches; see [`Damage`].
+    damage: Damage,
     /// Row moves since the last drain, in the order they happened; see [`Shift`] and
     /// [`Shifts`].
     ///
@@ -423,8 +544,6 @@ pub struct Screen {
     /// order. Consecutive moves of the same rows the same way coalesce, so a thousand-line
     /// `cat` is not a thousand pairs of buffer edits.
     shifts: Shifts,
-    /// How many times a row has been marked damaged; see [`Screen::touches`].
-    touches: u64,
     tabs: Vec<bool>,
     /// Rows of row 0's logical line that have already left the grid for Emacs.
     ///
@@ -486,9 +605,8 @@ impl Screen {
             cursor: Cursor::default(),
             region: Region::full(rows),
             saved: None,
-            dirty: vec![true; rows],
+            damage: Damage::new(rows),
             shifts: Shifts::default(),
-            touches: 0,
             tabs: default_tabs(cols),
             carried: Cols::ZERO,
             carried_chars: Chars::ZERO,
@@ -632,8 +750,9 @@ impl Screen {
     }
 
     fn touch(&mut self, index: usize) -> Option<RowMut<'_>> {
-        *self.dirty.get_mut(index)? = true;
-        self.touches += 1;
+        if !self.damage.wrote(index) {
+            return None;
+        }
         self.row_mut(index)
     }
 
@@ -668,28 +787,16 @@ impl Screen {
 
     /// Mark row INDEX damaged without touching it, for a caller that has already written.
     fn damage(&mut self, index: usize) {
-        if let Some(dirty) = self.dirty.get_mut(index) {
-            *dirty = true;
-        }
-        self.touches += 1;
+        self.damage.wrote(index);
     }
 
     /// Mark every row in an inclusive range damaged.
-    ///
-    /// A slice fill rather than a loop of `dirty.get_mut(i)`: `scroll_up` calls this on
-    /// every scrolled line, and clamping once lets it be a memset.
     fn touch_range(&mut self, range: std::ops::RangeInclusive<usize>) {
-        let (first, last) = range.into_inner();
-        let end = (last + 1).min(self.dirty.len());
-        if let Some(span) = self.dirty.get_mut(first..end) {
-            span.fill(true);
-            self.touches += 1;
-        }
+        self.damage.wrote_range(range);
     }
 
     pub fn touch_all(&mut self) {
-        self.dirty.fill(true);
-        self.touches += 1;
+        self.damage.wrote_all();
         // Every row is about to be sent whole, so pending shifts can go -- and must, after
         // a resize, since a shift naming a `bottom` the grid no longer has cannot be
         // applied.
@@ -734,8 +841,7 @@ impl Screen {
             Recorded::Kept => true,
             Recorded::Saturated | Recorded::Redundant => false,
             Recorded::JustDropped => {
-                self.dirty.fill(true);
-                self.touches += 1;
+                self.damage.wrote_all();
                 false
             }
         }
@@ -757,20 +863,12 @@ impl Screen {
     /// so for a program repainting flat out the flag would say `true` on both sides of a
     /// read and the read would look like it did nothing.
     pub fn touches(&self) -> u64 {
-        self.touches
+        self.damage.touches
     }
 
     /// Indices of rows changed since the last drain.
     pub fn drain_damage(&mut self) -> Vec<usize> {
-        let changed = self
-            .dirty
-            .iter()
-            .enumerate()
-            .filter(|(_, d)| **d)
-            .map(|(i, _)| i)
-            .collect();
-        self.dirty.fill(false);
-        changed
+        self.damage.take()
     }
 
     /// Print one character at the width a width table gives it.
@@ -1163,7 +1261,7 @@ impl Screen {
         // The dirty flags rotate with their rows, so the damage reported is in post-shift
         // coordinates; otherwise a row written before the scroll would be repainted at the
         // index it used to have.
-        self.dirty[top..=bottom].rotate_left(n);
+        self.damage.rotate(top, bottom, n, Direction::Up);
         self.grid
             .fill_recycled(recycled, pen.blank(), RowMeta::default);
         // The rows above the recycled ones hold the text they already held at another
@@ -1252,7 +1350,7 @@ impl Screen {
         }
         let recycled = self.grid.rotate(top, bottom, n, Direction::Down);
         // With the rows, for the reason spelled out in `scroll_up`.
-        self.dirty[top..=bottom].rotate_right(n);
+        self.damage.rotate(top, bottom, n, Direction::Down);
         self.grid
             .fill_recycled(recycled, pen.blank(), RowMeta::default);
         if self.shift(top, bottom, n, Direction::Down) {
@@ -1522,7 +1620,21 @@ impl Screen {
     ///
     /// The last row worth archiving. Keyed on text, not on styling: a `bce` background
     /// wash below the last written line is not transcript.
+    ///
+    /// Scanned back from [`Damage`]'s reach rather than from the bottom row, which is what
+    /// keeps a screen using five of its fifty rows from reading forty-five blank rows on
+    /// every drain. [`Screen::last_used_row_by_scan`] is the same answer the slow way, and
+    /// the property test holds the two together.
     fn last_used_row(&self) -> usize {
+        self.damage
+            .last_text(|index| self.row(index).is_some_and(|row| row.has_text()))
+    }
+
+    /// [`Screen::last_used_row`] with no cache in it: every row from the bottom up.
+    ///
+    /// The oracle the cache is pinned against; see `the_used_row_cache_tracks_the_scan`.
+    #[cfg(test)]
+    pub fn last_used_row_by_scan(&self) -> usize {
         (0..self.height())
             .rev()
             .find(|&index| self.row(index).is_some_and(|row| row.has_text()))
@@ -1602,7 +1714,7 @@ impl Screen {
             .saturating_sub(evicted.len())
             .min(rows.saturating_sub(1));
         self.cursor.col = self.cursor.col.min(cols.saturating_sub(1));
-        self.dirty = vec![true; rows];
+        self.damage.reshaped(rows);
         // Every row is damaged, and the row count has just changed under any pending
         // shift's indices; see `Screen::touch_all`, which drops the log for the same
         // two reasons.
@@ -1713,7 +1825,7 @@ impl Screen {
                 .min(rows.saturating_sub(1)),
             ..cursor
         };
-        self.dirty = vec![true; rows];
+        self.damage.reshaped(rows);
         // Every row is damaged, and the row count has just changed under any pending
         // shift's indices; see `Screen::touch_all`, which drops the log for the same
         // two reasons.
@@ -1916,6 +2028,7 @@ impl Logical {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use proptest::prelude::*;
 
     fn write(screen: &mut Screen, text: &str) {
         for ch in text.chars() {
@@ -2745,5 +2858,133 @@ mod tests {
             "a move recorded after a drop would be replayed in Lisp over rows the same \
              drain sends whole"
         );
+    }
+
+    // ---------------------------------------------------------------------------
+    // The cached last-used row against the scan it replaces
+    // ---------------------------------------------------------------------------
+
+    /// One thing done to a screen, in the order the generated script does them.
+    ///
+    /// Everything that can move text on or off a row: the writers, the erasers, both
+    /// scrolls, a row removal, a region change that puts the scrolls somewhere else, and
+    /// the two resizes. A wide character is in `Write` because its padding cell is a
+    /// continuation and not text, and an image because a blank cell carrying one *is*
+    /// text; those are the two ways `Row::has_text` disagrees with "a visible character".
+    #[derive(Debug, Clone)]
+    enum Poke {
+        Goto(usize, usize),
+        Write(String),
+        Image,
+        EraseLine(Erase),
+        EraseDisplay(Erase),
+        ScrollUp(usize),
+        ScrollDown(usize),
+        InsertLines(usize),
+        DeleteLines(usize),
+        RemoveRows(usize, usize),
+        Region(usize, usize),
+        ResetRegion,
+        Resize(usize, usize, Resize),
+    }
+
+    fn poke_strategy() -> impl Strategy<Value = Poke> {
+        prop_oneof![
+            (0usize..8, 0usize..8).prop_map(|(r, c)| Poke::Goto(r, c)),
+            // Blanks and a wide character among the text: a row of spaces holds no text,
+            // and a wide character's continuation cell is not text on its own.
+            proptest::collection::vec(prop_oneof![Just('a'), Just(' '), Just('日')], 0..6)
+                .prop_map(|cs| Poke::Write(cs.into_iter().collect())),
+            Just(Poke::Image),
+            prop_oneof![Just(Erase::ToEnd), Just(Erase::ToStart), Just(Erase::All)]
+                .prop_map(Poke::EraseLine),
+            prop_oneof![Just(Erase::ToEnd), Just(Erase::ToStart), Just(Erase::All)]
+                .prop_map(Poke::EraseDisplay),
+            (1usize..4).prop_map(Poke::ScrollUp),
+            (1usize..4).prop_map(Poke::ScrollDown),
+            (1usize..4).prop_map(Poke::InsertLines),
+            (1usize..4).prop_map(Poke::DeleteLines),
+            (0usize..8, 1usize..4).prop_map(|(f, n)| Poke::RemoveRows(f, n)),
+            (0usize..7, 0usize..8).prop_map(|(t, b)| Poke::Region(t, b)),
+            Just(Poke::ResetRegion),
+            (1usize..8, 1usize..10).prop_map(|(r, c)| Poke::Resize(r, c, Resize::Rewrap)),
+            (1usize..8, 1usize..10).prop_map(|(r, c)| Poke::Resize(r, c, Resize::Clamp)),
+        ]
+    }
+
+    fn apply(screen: &mut Screen, poke: &Poke) {
+        let pen = Pen::default();
+        match poke {
+            Poke::Goto(row, col) => screen.goto(*row, *col),
+            Poke::Write(text) => write(screen, text),
+            Poke::Image => {
+                screen.place_image_row(
+                    ImageId::from_index(0),
+                    0,
+                    CellSize { rows: 1, cols: 1 },
+                    StyleId::DEFAULT,
+                );
+            }
+            Poke::EraseLine(how) => screen.erase_line(*how, pen),
+            Poke::EraseDisplay(how) => screen.erase_display(*how, pen).discard(),
+            Poke::ScrollUp(n) => screen.scroll_up(*n, pen).discard(),
+            Poke::ScrollDown(n) => screen.scroll_down(*n, pen),
+            Poke::InsertLines(n) => screen.insert_lines(*n, pen),
+            Poke::DeleteLines(n) => screen.delete_lines(*n, pen),
+            Poke::RemoveRows(first, count) => screen.remove_rows(*first, *count),
+            Poke::Region(top, bottom) => screen.set_region(*top, *bottom),
+            Poke::ResetRegion => screen.reset_region(),
+            Poke::Resize(rows, cols, mode) => screen.resize(*rows, *cols, *mode).discard(),
+        }
+    }
+
+    /// The case the property found first, kept by name: `CSI L` moves text *down*.
+    ///
+    /// A wide character on row 0 of a two-row screen, rewrapped to three rows by two, then
+    /// one line inserted. The text is on row 1 afterwards, and a reach left at row 0 would
+    /// have `used` report one row where the grid uses two.
+    #[test]
+    fn a_line_insert_carries_the_used_row_down_with_the_text() {
+        let mut screen = Screen::new(2, 4);
+        write(&mut screen, "\u{65e5}");
+        screen.resize(3, 2, Resize::Rewrap).discard();
+        assert_eq!(screen.last_used_row(), 0);
+
+        screen.scroll_down(1, Pen::default());
+
+        assert_eq!(screen.last_used_row(), screen.last_used_row_by_scan());
+        assert_eq!(screen.last_used_row(), 1);
+    }
+
+    proptest! {
+        /// The cached reach is a cache and nothing else: every script, every step.
+        ///
+        /// `used` shapes Emacs' screen region, so an over- or under-count is a visible
+        /// bug -- rows rendered that the grid has stopped having, or a prompt below the
+        /// region's end. The scan is the definition and [`Damage`] is the optimisation,
+        /// so the property is that they never disagree.
+        #[test]
+        fn the_used_row_cache_tracks_the_scan(
+            (rows, cols) in (1usize..8, 1usize..10),
+            pokes in proptest::collection::vec(poke_strategy(), 1..40),
+        ) {
+            let mut screen = Screen::new(rows, cols);
+            // The screen starts fully damaged, so the first reading is the full scan; the
+            // interesting readings are the ones after it, where the reach has been
+            // tightened and the pokes have to widen it again.
+            prop_assert_eq!(screen.last_used_row(), screen.last_used_row_by_scan());
+            for poke in &pokes {
+                apply(&mut screen, poke);
+                prop_assert_eq!(
+                    screen.last_used_row(),
+                    screen.last_used_row_by_scan(),
+                    "after {:?}",
+                    poke
+                );
+                // Twice, because a drain asks twice and the second ask reads a reach the
+                // first one moved.
+                prop_assert_eq!(screen.last_used_row(), screen.last_used_row_by_scan());
+            }
+        }
     }
 }

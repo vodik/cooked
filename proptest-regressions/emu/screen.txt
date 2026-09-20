@@ -1,0 +1,7 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc 7ef646a9c3c5e0247a061363f3094fb4ee9ae91aec1208f83f86db0e673c6d53 # shrinks to (rows, cols) = (2, 4), pokes = [Write("日"), Resize(3, 2, Rewrap), ScrollDown(1)]
