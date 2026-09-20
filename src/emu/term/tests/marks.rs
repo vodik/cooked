@@ -752,7 +752,11 @@ fn marks_on_the_alternate_screen_leave_the_modes_alone() {
 fn a_non_evicting_rewrap_leaves_prompt_start_naming_the_wrong_row() {
     let mut t = term(6, 10, b"0123456789\r\nabcdefghij\r\n\x1b]133;A\x07PROMPT");
     t.drain();
-    assert_eq!(text(&t, 2), "PROMPT", "the prompt sits at grid row 2 before the resize");
+    assert_eq!(
+        text(&t, 2),
+        "PROMPT",
+        "the prompt sits at grid row 2 before the resize"
+    );
 
     // Narrower still holds the three logical lines exactly: two rows apiece, six in
     // total, so nothing is evicted and `evicted_total` does not move.
@@ -775,4 +779,3 @@ fn a_non_evicting_rewrap_leaves_prompt_start_naming_the_wrong_row() {
         "the prompt should now be the top two rows of the grid"
     );
 }
-
