@@ -3,6 +3,7 @@
 use super::cell::{
     CONTINUATION, Cell, Extra, MarkId, Pen, Row, RowMeta, RowMut, RowRef, Runs, Wrap,
 };
+use super::grid::Grid;
 use super::image::{CellSize, ImageId, Placement};
 use super::style::StyleId;
 use super::units::{Chars, Cols};
@@ -403,20 +404,9 @@ impl IntoIterator for Evicted {
 
 #[derive(Debug, Clone)]
 pub struct Screen {
-    /// Every cell of the grid, `cols` to a slot, in one contiguous buffer.
-    ///
-    /// A slot is a row's storage and not its position: [`Screen::order`] says which slot
-    /// is shown at each screen row. Keeping the cells flat puts a whole screen in one
-    /// allocation that is read and compared sequentially, and keeping the order separate
-    /// is what lets a scroll stay cheap. Rotating `order` moves a row whatever the width,
-    /// where moving the cells of a 400-column scroll region would copy all of them on
-    /// every linefeed.
-    cells: Vec<Cell>,
-    /// What each slot's row carries besides its cells, indexed by slot like `cells`.
-    meta: Vec<RowMeta>,
-    /// The slot shown at each screen row, top to bottom. Its length is the grid's height.
-    order: Vec<u32>,
-    cols: usize,
+    /// The cells and each row's attachments and wrap flag; see [`Grid`], which the copy of
+    /// what Emacs shows is the other of.
+    grid: Grid<RowMeta>,
     /// Private so that every move goes through a method that keeps [`Cursor::wrap_pending`]
     /// honest: a pending wrap only means something on the last column, and a caller
     /// writing `col` directly could leave one armed anywhere.
@@ -492,10 +482,7 @@ impl Screen {
         let rows = rows.max(1);
         let cols = cols.max(1);
         Self {
-            cells: vec![Cell::default(); rows * cols],
-            meta: vec![RowMeta::default(); rows],
-            order: identity(rows),
-            cols,
+            grid: Grid::new(rows, cols),
             cursor: Cursor::default(),
             region: Region::full(rows),
             saved: None,
@@ -579,29 +566,21 @@ impl Screen {
     }
 
     pub fn height(&self) -> usize {
-        self.order.len()
+        self.grid.height()
     }
 
     pub fn width(&self) -> usize {
-        self.cols
+        self.grid.width()
     }
 
     pub fn row(&self, index: usize) -> Option<RowRef<'_>> {
-        let slot = *self.order.get(index)? as usize;
-        let start = slot * self.cols;
-        Some(RowRef::from_slices(
-            &self.cells[start..start + self.cols],
-            &self.meta[slot],
-        ))
+        let (cells, meta) = self.grid.row(index)?;
+        Some(RowRef::from_slices(cells, meta))
     }
 
     fn row_mut(&mut self, index: usize) -> Option<RowMut<'_>> {
-        let slot = *self.order.get(index)? as usize;
-        let start = slot * self.cols;
-        Some(RowMut::from_slices(
-            &mut self.cells[start..start + self.cols],
-            &mut self.meta[slot],
-        ))
+        let (cells, meta) = self.grid.row_mut(index)?;
+        Some(RowMut::from_slices(cells, meta))
     }
 
     pub fn rows(&self) -> impl Iterator<Item = RowRef<'_>> {
@@ -611,34 +590,17 @@ impl Screen {
     /// Every row, top to bottom, as owned rows, leaving the grid empty -- for a resize,
     /// which lays the rows out again and stores them back with [`Screen::store_rows`].
     fn take_rows(&mut self) -> Vec<Row> {
-        let cols = self.cols;
-        let order = std::mem::take(&mut self.order);
-        let cells = std::mem::take(&mut self.cells);
-        let mut meta = std::mem::take(&mut self.meta);
-        order
-            .iter()
-            .map(|&slot| {
-                let slot = slot as usize;
-                Row::from_meta(
-                    cells[slot * cols..(slot + 1) * cols].to_vec(),
-                    std::mem::take(&mut meta[slot]),
-                )
-            })
+        self.grid
+            .take_rows()
+            .into_iter()
+            .map(|(cells, meta)| Row::from_meta(cells, meta))
             .collect()
     }
 
     /// Store ROWS as the grid, each `cols` wide, in screen order.
     fn store_rows(&mut self, rows: Vec<Row>, cols: usize) {
-        self.cols = cols;
-        self.order = identity(rows.len());
-        self.cells = Vec::with_capacity(rows.len() * cols);
-        self.meta = Vec::with_capacity(rows.len());
-        for row in rows {
-            let (cells, meta) = row.into_parts();
-            debug_assert_eq!(cells.len(), cols, "a grid row is exactly the grid's width");
-            self.cells.extend_from_slice(&cells);
-            self.meta.push(meta);
-        }
+        self.grid
+            .store_rows(rows.into_iter().map(Row::into_parts), cols);
     }
 
     /// Put an OSC 133 mark on the cell at (`row`, `col`), if the grid has one.
@@ -783,7 +745,7 @@ impl Screen {
     /// Every cell of the grid, slots in storage order rather than screen order, for a walk
     /// that only needs to see each cell once -- collecting rendition ids no cell names.
     pub(crate) fn all_cells(&self) -> &[Cell] {
-        &self.cells
+        self.grid.all_cells()
     }
 
     /// How many times a row has been marked damaged over this screen's life.
@@ -847,7 +809,7 @@ impl Screen {
     /// widening was declined. The caller records it, because from then on it is that
     /// number and not the measurement that says where the cell begins.
     pub fn join(&mut self, mark: char, before: Cols, after: Cols) -> Cols {
-        let (row, cols) = (self.cursor.row, self.cols);
+        let (row, cols) = (self.cursor.row, self.width());
         let (before, after) = (before.get(), after.get());
         let lead = if self.cursor.wrap_pending {
             cols.saturating_sub(before.max(1))
@@ -901,7 +863,7 @@ impl Screen {
     /// deferred wrap, DECAWM, the scroll a wrap can trigger, the continuation cells, the
     /// insert-mode shift — is unchanged and is the only copy of it.
     pub fn place(&mut self, ch: char, width: Cols, pen: Pen) -> Evicted {
-        let (cols, width) = (self.cols, width.get());
+        let (cols, width) = (self.width(), width.get());
         // Read before `touch` borrows `self` mutably below.
         let insert_mode = self.insert_mode;
         let mut evicted = Evicted::none();
@@ -966,8 +928,8 @@ impl Screen {
     /// wrap is the subtlest thing in this file and `OSC 66` clients detect support by
     /// reading the cursor back.
     fn settle_cursor(&mut self, end: usize) {
-        if end >= self.cols {
-            self.cursor.col = self.cols - 1;
+        if end >= self.width() {
+            self.cursor.col = self.width() - 1;
             // Only arm the deferred wrap when there is a wrap to defer.
             self.cursor.wrap_pending = self.autowrap;
         } else {
@@ -1027,7 +989,7 @@ impl Screen {
             return Cols::ZERO;
         }
         let (row, col) = (self.cursor.row, self.cursor.col);
-        let room = self.cols.saturating_sub(col + 1);
+        let room = self.width().saturating_sub(col + 1);
         let text = run.as_str();
         let n = text.len().min(room);
         if n == 0 {
@@ -1065,7 +1027,7 @@ impl Screen {
     pub fn put_cursor(&mut self, cursor: Cursor) {
         let wrap_pending = cursor.wrap_pending;
         self.goto(cursor.row, cursor.col);
-        self.cursor.wrap_pending = wrap_pending && self.cursor.col + 1 == self.cols;
+        self.cursor.wrap_pending = wrap_pending && self.cursor.col + 1 == self.width();
     }
 
     /// DECSC's half of the cursor: remember where it is.
@@ -1116,7 +1078,7 @@ impl Screen {
         style: StyleId,
     ) -> u16 {
         let (row, start) = (self.cursor.row, self.cursor.col);
-        let width = usize::from(cells.cols).min(self.cols.saturating_sub(start));
+        let width = usize::from(cells.cols).min(self.width().saturating_sub(start));
         if let Some(mut r) = self.touch(row) {
             for i in 0..width {
                 r.place(
@@ -1198,12 +1160,13 @@ impl Screen {
         } else {
             Evicted::none()
         };
-        self.order[top..=bottom].rotate_left(n);
+        let recycled = self.grid.rotate(top, bottom, n, Direction::Up);
         // The dirty flags rotate with their rows, so the damage reported is in post-shift
         // coordinates; otherwise a row written before the scroll would be repainted at the
         // index it used to have.
         self.dirty[top..=bottom].rotate_left(n);
-        self.clear_recycled(bottom + 1 - n..=bottom, pen);
+        self.grid
+            .fill_recycled(recycled, pen.blank(), RowMeta::default);
         // The rows above the recycled ones hold the text they already held at another
         // index, which Emacs can move cheaply while keeping its markers and overlays; only
         // the blanks rotated in are new. The `else` is the region having turned over
@@ -1264,8 +1227,9 @@ impl Screen {
         // correct by moving. A shift logged earlier in the drain is still right to apply.
         // The removed rows' slots go to the bottom and are blanked there, which is the
         // same grid as removing them and appending blanks.
-        self.order[first..].rotate_left(count);
-        self.clear_recycled(height - count..=height - 1, Pen::default());
+        let recycled = self.grid.rotate(first, height - 1, count, Direction::Up);
+        self.grid
+            .fill_recycled(recycled, Cell::default(), RowMeta::default);
         if first == 0 {
             self.forget_carry();
         }
@@ -1287,10 +1251,11 @@ impl Screen {
         if n == 0 {
             return;
         }
-        self.order[top..=bottom].rotate_right(n);
+        let recycled = self.grid.rotate(top, bottom, n, Direction::Down);
         // With the rows, for the reason spelled out in `scroll_up`.
         self.dirty[top..=bottom].rotate_right(n);
-        self.clear_recycled(top..=top + n - 1, pen);
+        self.grid
+            .fill_recycled(recycled, pen.blank(), RowMeta::default);
         if self.shift(top, bottom, n, Direction::Down) {
             self.touch_range(top..=top + n - 1);
         } else {
@@ -1318,7 +1283,7 @@ impl Screen {
     /// Absolute positioning, clamped to the screen.
     pub fn goto(&mut self, row: usize, col: usize) {
         self.cursor.row = row.min(self.height().saturating_sub(1));
-        self.cursor.col = col.min(self.cols.saturating_sub(1));
+        self.cursor.col = col.min(self.width().saturating_sub(1));
         self.cursor.wrap_pending = false;
     }
 
@@ -1335,7 +1300,7 @@ impl Screen {
     }
 
     pub fn erase_line(&mut self, how: Erase, pen: Pen) {
-        let (col, cols) = (self.cursor.col, self.cols);
+        let (col, cols) = (self.cursor.col, self.width());
         let row = self.cursor.row;
         let style = pen.erase;
         self.edit(row, |r| match how {
@@ -1414,19 +1379,8 @@ impl Screen {
         }
     }
 
-    /// Blank the rows in RANGE for reuse, without damaging them: a scroll that recycles
-    /// rows damages them itself, with the shift it reports.
-    fn clear_recycled(&mut self, range: std::ops::RangeInclusive<usize>, pen: Pen) {
-        let style = pen.erase;
-        for index in range {
-            if let Some(mut row) = self.row_mut(index) {
-                row.clear(style);
-            }
-        }
-    }
-
     pub fn erase_chars(&mut self, n: usize, pen: Pen) {
-        let (row, col, cols) = (self.cursor.row, self.cursor.col, self.cols);
+        let (row, col, cols) = (self.cursor.row, self.cursor.col, self.width());
         let style = pen.erase;
         self.edit(row, |r| r.fill(col..(col + n).min(cols), style));
     }
@@ -1490,16 +1444,16 @@ impl Screen {
     /// I` took a 24x200 grid from 45.8 MB/s to 0.29 MB/s -- a denial of service in five
     /// bytes.
     pub fn tab(&mut self, count: usize) {
-        let count = count.min(self.cols);
+        let count = count.min(self.width());
         let col = (0..count).fold(self.cursor.col, |col, _| {
             self.tabs
                 .iter()
                 .enumerate()
                 .skip(col + 1)
                 .find_map(|(i, stop)| stop.then_some(i))
-                .unwrap_or(self.cols - 1)
+                .unwrap_or(self.width() - 1)
         });
-        self.cursor.col = col.min(self.cols - 1);
+        self.cursor.col = col.min(self.width() - 1);
         self.cursor.wrap_pending = false;
     }
 
@@ -1509,7 +1463,7 @@ impl Screen {
     /// in the other direction: the cursor cannot move left of column 0, so a count past
     /// `cols` is asking for work whose answer is already settled.
     pub fn back_tab(&mut self, count: usize) {
-        let count = count.min(self.cols);
+        let count = count.min(self.width());
         let col = (0..count).fold(self.cursor.col, |col, _| {
             self.tabs
                 .iter()
@@ -1543,7 +1497,7 @@ impl Screen {
 
     /// DECST8C: back to a stop every eighth column, the table a screen powers on with.
     pub fn reset_tabs(&mut self) {
-        self.tabs = default_tabs(self.cols);
+        self.tabs = default_tabs(self.width());
     }
 
     /// DECALN: the margins reset, the cursor home and every cell an `E`.
@@ -1552,7 +1506,7 @@ impl Screen {
     /// through the `CSI 2J` path, so a primary screen's contents go to history. The cells
     /// go down in the default rendition whatever the pen holds, as in xterm.
     pub fn align(&mut self) {
-        let pattern = "E".repeat(self.cols);
+        let pattern = "E".repeat(self.width());
         for i in 0..self.height() {
             self.edit(i, |row| row.fill_run(0, &pattern, Pen::default()));
         }
@@ -1611,7 +1565,7 @@ impl Screen {
         // the first character printed to it.
         let rows = rows.max(1);
         let cols = cols.max(1);
-        if mode == Resize::Rewrap && cols != self.cols && self.archives() {
+        if mode == Resize::Rewrap && cols != self.width() && self.archives() {
             return self.reflow(rows, cols);
         }
 
@@ -1619,7 +1573,7 @@ impl Screen {
         // change width, so there is nothing to gain from editing the flat buffer in place.
         let keep = self.used();
         let mut grid = self.take_rows();
-        if cols != self.cols {
+        if cols != self.width() {
             self.tabs = default_tabs(cols);
             for row in &mut grid {
                 row.resize(cols, StyleId::DEFAULT);
@@ -1781,11 +1735,6 @@ impl Screen {
             .map(|row| row.to_text())
             .find(|t| !t.trim().is_empty())
     }
-}
-
-/// The order a freshly laid-out grid shows its slots in: slot N at row N.
-fn identity(rows: usize) -> Vec<u32> {
-    (0..rows as u32).collect()
 }
 
 fn default_tabs(cols: usize) -> Vec<bool> {
@@ -1991,8 +1940,8 @@ mod tests {
             write(&mut screen, text);
         }
         screen.set_region(1, 4);
-        let before = screen.cells.clone();
-        let recycled = screen.order[1] as usize;
+        let before = screen.grid.all_cells().to_vec();
+        let recycled = screen.grid.slot(1).unwrap();
         screen.scroll_up(1, Pen::default()).discard();
 
         let texts: Vec<String> = screen.rows().map(|row| row.to_text()).collect();
@@ -2000,12 +1949,13 @@ mod tests {
         for slot in (0..6).filter(|&slot| slot != recycled) {
             let span = slot * 40..(slot + 1) * 40;
             assert_eq!(
-                Cell::bytes(&screen.cells[span.clone()]),
+                Cell::bytes(&screen.grid.all_cells()[span.clone()]),
                 Cell::bytes(&before[span]),
                 "slot {slot} was rewritten"
             );
         }
-        assert_eq!(screen.order, [0, 2, 3, 4, 1, 5]);
+        let order: Vec<usize> = (0..6).map(|row| screen.grid.slot(row).unwrap()).collect();
+        assert_eq!(order, [0, 2, 3, 4, 1, 5]);
     }
 
     #[test]
