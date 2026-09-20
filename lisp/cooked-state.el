@@ -858,6 +858,15 @@ file below the one that installs the keymap.  Those files run this hook through
 `cooked--request-refresh' rather than naming that function, and
 cooked-mode.el puts `cooked--refresh-keymap' on it.")
 
+(defvar-local cooked--foreground-name nil
+  "Cached (PID . NAME) for the child's foreground process group.
+
+`process-attributes' is not free, so this is read again only when the pid
+changes or `cooked--request-refresh' drops it -- a pid alone is not enough to
+answer for a program's name, since `exec' can change what a still-live pid
+answers to `process-attributes' without changing the pid itself.  See
+`cooked--foreground-program', the one reader.")
+
 (defun cooked--request-refresh ()
   "Have this buffer's keymap and input mode derived again.
 
@@ -963,14 +972,6 @@ the reader and the narrowing all arrived together."
 
 (defvar-local cooked--last-size nil
   "The (ROWS . COLS) last reported to the emulator, or nil.")
-
-(defvar-local cooked--foreground-name nil
-  "Cached (PID . NAME) for the child's foreground process group.
-
-`process-attributes' is not free, so this is read again only when the pid
-changes or `cooked--request-refresh' drops it -- a pid alone is not enough to
-answer for a program's name, since `exec' can change what a still-live pid
-answers to `process-attributes' without changing the pid itself.")
 
 (defun cooked--foreground-program ()
   "Name of the program in the child's foreground process group, or nil.
