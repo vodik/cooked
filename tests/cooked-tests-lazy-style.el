@@ -10,9 +10,20 @@
 ;; at all -- no `face' on scrollback that nobody has displayed -- because
 ;; everything else here would also pass if the faces were simply applied
 ;; eagerly.  The second asserts that it cannot be seen: the same bytes rendered
-;; with the deferral on and off leave the same face at every position.  The
-;; rest are the paths where a debt could be lost or paid twice: a trim, a
-;; discard out of the middle, a rendition id reused, a theme changed, a copy.
+;; with the deferral on and off leave the same face at every position, however
+;; they were split into drains on the way in.  The rest are the paths where a
+;; debt could be lost or paid twice: a trim, a discard out of the middle, a
+;; rendition id reused, a theme changed, a copy.
+;;
+;; How many drains a flood arrives in is the thing to be careful of here, and
+;; `cooked-tests--owed-red' is where that is written down.  A flood that
+;; arrives whole is deferred whole; the same flood in several drains has its
+;; first rows on the screen before the later ones push them off, and
+;; `cooked--promote-rows' keeps those where they stand, coloured already.  A
+;; test that reaches for the first red run in scrollback and calls it owing is
+;; therefore asserting about the machine's load, which is what four tests here
+;; were doing.  Either drive the flood with `cooked--feed', which pins the
+;; drains, or ask the buffer where the debt actually is.
 
 ;;; Code:
 
@@ -40,6 +51,29 @@ is scrollback and not the live screen, which is never deferred.")
     (let ((pos (match-beginning 0)))
       (should (< pos screen))
       pos)))
+
+(defun cooked-tests--owed-red ()
+  "The position of a red run in scrollback whose colours are still owed.
+
+Not the first red run in scrollback, which is what a test asserting about the
+deferral wants but not what it gets.  A row the live screen was already holding
+when it scrolled off is promoted where it stands -- `cooked--promote-rows'
+moves `cooked--screen-start' past it rather than inserting it again -- so it
+wears the face it was drawn with and owes nothing.  A flood arriving in one
+drain never reaches the screen at all and so is deferred whole; the same flood
+arriving in several drains, which is what a loaded machine makes of it, opens
+the transcript with a stretch of promoted rows instead.  Three tests here read
+that stretch as the deferral having failed, about one run in four at a load
+average above twenty."
+  (let ((screen (cooked--screen-start-position))
+        (found nil))
+    (goto-char (point-min))
+    (while (and (not found) (search-forward "red" screen t))
+      (let ((pos (match-beginning 0)))
+        (when (get-text-property pos 'cooked-pending-style)
+          (setq found pos))))
+    (should found)
+    found))
 
 (defun cooked-tests--red ()
   "The foreground `\\033[31m' resolves to in this buffer."
@@ -100,7 +134,7 @@ begins."
   :tags '(pty)
   (cooked-tests--with-session (list "/bin/sh" "-c" cooked-tests--red-flood)
     (cooked-tests--settled-flood)
-    (let ((pos (cooked-tests--scrollback-red)))
+    (let ((pos (cooked-tests--owed-red)))
       (should (get-text-property pos 'cooked-pending-style))
       (should-not (get-text-property pos 'face))
       (should (> cooked--pending-styles 0))
@@ -119,29 +153,76 @@ begins."
       (should (= 0 cooked--pending-styles))
       (should-not (cooked-tests--pending-style-positions)))))
 
-(ert-deftest cooked-deferred-and-eager-styling-agree-at-every-position ()
+(defconst cooked-tests--split-flood
+  (concat "\033[31mred\033[0m one\r\n"
+          "\033[32mgreen wrapping past the edge\033[0m\r\n"
+          "\033[34mblue\r\nstill blue\033[0m\r\n"
+          "plain last\r\n")
+  "A small flood holding every shape a style run can be cut in half by.
+
+Fed to a three by twelve screen, so more of it is scrollback than is ever on
+the screen at once.  A run inside one row, a run wrapped across three rows of
+one logical line -- which `cooked-rejoin-wrapped-lines' joins back up on the
+way into the transcript -- a run that outlives its own line and carries into
+the next, a reset at the end of a line, and a line with no styling on it at
+all.  Ninety-six bytes, which is what makes cutting it at every one of them
+affordable.")
+
+(defun cooked-tests--split-render (cut lazy spans)
+  "Render `cooked-tests--split-flood' cut into two drains at byte CUT.
+
+LAZY is what `cooked-lazy-scrollback-styles' is bound to and SPANS what
+`cooked--style-piece-spans' is, so that a handful of style records already
+makes several pieces.  The answer is (TEXT . RUNS) once everything owed has
+been paid, ready to be compared with another arm's.
+
+A CUT at either end feeds the flood in one drain, which is the shape an idle
+machine produces; every CUT between is a drain boundary falling inside a
+sequence, inside a styled run, inside a row, or inside a wrapped line."
+  (let ((cooked-lazy-scrollback-styles lazy)
+        (cooked--style-piece-spans spans))
+    (cooked-tests--with-fed-screen 3 12
+      (if (or (<= cut 0) (>= cut (length cooked-tests--split-flood)))
+          (cooked-tests--fed cooked-tests--split-flood)
+        (cooked-tests--fed (substring cooked-tests--split-flood 0 cut))
+        (cooked-tests--fed (substring cooked-tests--split-flood cut)))
+      (cooked--settle-all-styles)
+      (cons (buffer-substring-no-properties (point-min) (point-max))
+            (cooked-tests--face-runs)))))
+
+(ert-deftest cooked-deferred-and-eager-styling-agree-however-the-flood-is-split ()
   "The deferral cannot be seen: the same bytes leave the same faces either way.
 
-Rendered twice, once with `cooked-lazy-scrollback-styles' off, and compared run
-for run over the whole buffer -- which is the assertion that covers the runs no
-other test here names, the reset at the end of a line and the blanks between."
-  :tags '(pty)
-  (let (eager lazy text)
-    (let ((cooked-lazy-scrollback-styles nil))
-      (cooked-tests--with-session (list "/bin/sh" "-c" cooked-tests--red-flood)
-        (cooked-tests--settled-flood)
-        (should (= 0 cooked--pending-styles))
-        (cooked-tests--fontify)
-        (setq eager (cooked-tests--face-runs)
-              text (cooked-tests--text))))
-    (cooked-tests--with-session (list "/bin/sh" "-c" cooked-tests--red-flood)
-      (cooked-tests--settled-flood)
-      (cooked-tests--fontify)
-      (setq lazy (cooked-tests--face-runs))
-      (should (equal (cooked-tests--text) text)))
-    (should (equal lazy eager))
-    ;; And the comparison is worth something: there were faces to compare.
-    (should (seq-find (lambda (run) (nth 2 run)) eager))))
+However the child's output is split into drains, which is the part that used to
+be left to chance.  This was two real children racing the same flood, each
+waited for by its text and then compared run for run, and it failed about one
+run in four at a load average above twenty -- not on a colour but on the
+trailing newline after the last line, which one session had drained and the
+other had not.  `cooked-tests--text' trims that away, so the text check the
+test made first could not see the very difference the face runs then tripped
+over.  Nothing about the deferral was wrong.
+
+So both arms are fed instead, the same bytes cut at the same byte, and the only
+thing that differs between them is `cooked-lazy-scrollback-styles'.  Every byte
+offset of the flood is tried as the drain boundary, at three piece sizes, which
+between them cover a boundary landing inside an SGR sequence, inside a styled
+run, inside a wrapped line -- so the second drain
+opens mid-row and the batch begins at a `:head' seam -- and on the rows the
+first drain left on the screen, which the second promotes into scrollback where
+they stand rather than deferring them.
+
+Piece sizes of one, two and three: one puts a cut at every span boundary there
+is, and the other two put a drain boundary inside a piece holding more than one
+span.  The real value is two thousand, which no flood this size would reach."
+  (let ((cuts 0))
+    (dotimes (cut (1+ (length cooked-tests--split-flood)))
+      (let ((eager (cooked-tests--split-render cut nil 1)))
+        ;; Worth comparing: there are faces in the answer, and text under them.
+        (should (seq-find (lambda (run) (nth 2 run)) (cdr eager)))
+        (dolist (spans '(1 2 3))
+          (setq cuts (1+ cuts))
+          (should (equal (cooked-tests--split-render cut t spans) eager)))))
+    (should (> cuts 200))))
 
 (ert-deftest cooked-trimming-scrollback-leaves-no-unpaid-batch-behind ()
   "A trim throws away what it cuts and pays for the part of a batch it keeps."
@@ -303,7 +384,7 @@ coloured, and it differs in the direction of being more right."
   :tags '(pty)
   (cooked-tests--with-session (list "/bin/sh" "-c" cooked-tests--red-flood)
     (cooked-tests--settled-flood)
-    (let ((pos (cooked-tests--scrollback-red)))
+    (let ((pos (cooked-tests--owed-red)))
       (should (get-text-property pos 'cooked-pending-style))
       (cooked--flush-face-cache)
       (should (get-text-property pos 'cooked-pending-style))
@@ -424,16 +505,22 @@ One drain's scrollback is one block, and under a flood that is thousands of
 rows: the whole batch owed its colours as a unit once, so the first jit-lock
 chunk to touch a flooded coloured transcript paid for the flood rather than for
 the window.  `cooked--style-piece-spans' is bound down to a handful here so
-that ninety short lines make several pieces, which a real flood would take
+that forty short lines make several pieces, which a real flood would take
 tens of thousands of lines to do.
 
 The count dropping by exactly the number of pieces the chunk overlapped is the
-assertion: settling one piece must leave the rest of the batch owing."
-  :tags '(pty)
+assertion: settling one piece must leave the rest of the batch owing.
+
+Fed through `cooked--feed' and drained once rather than driven by a real child,
+so that the flood is one batch whatever the machine is doing.  It was a real
+child, and it read the first red run in scrollback as owing: under load the
+flood arrives as several drains and the transcript then opens with rows the
+screen already held, promoted where they stand and coloured already, so
+settling a chunk there paid nothing and the count did not move."
   (let ((cooked--style-piece-spans 8))
-    (cooked-tests--with-session (list "/bin/sh" "-c" cooked-tests--red-flood)
-      (cooked-tests--settled-flood)
-      (let* ((pos (cooked-tests--scrollback-red))
+    (cooked-tests--with-fed-screen 5 20
+      (cooked-tests--fed (cooked-tests--red-lines 0 39))
+      (let* ((pos (cooked-tests--owed-red))
              (owing (cooked-tests--pending-style-positions))
              (before cooked--pending-styles)
              (bounds (cooked--pending-style-bounds pos)))
@@ -465,7 +552,115 @@ assertion: settling one piece must leave the rest of the batch owing."
                             (get-text-property (match-beginning 0) 'face)
                             :foreground)
                            (cooked-tests--red))))
-          (should (> seen 40)))))))
+          (should (= seen 40)))))))
+
+(ert-deftest cooked-a-promoted-row-is-coloured-already-and-owes-nothing ()
+  "Rows the screen was holding are promoted with their faces on them.
+
+`cooked--promote-rows' moves `cooked--screen-start' past rows the buffer
+already holds rather than rendering them again, so they keep the faces they
+were drawn with on the live screen and there is nothing left to defer.  A batch
+deferred immediately below such a stretch has to settle from its own start all
+the same, which is the second half of this: the promoted rows and the deferred
+batch abut with no seam between them, and a piece's base is read off its own
+`cooked-pending-style' interval rather than off the top of the transcript.
+
+This is the shape three tests here used to trip over.  Each asked for the first
+red run in scrollback and assumed it was owing; under load a flood arrives as
+several drains, so the rows of the first ones are on the screen by the time the
+later ones scroll them off, and the transcript opens with promoted rows."
+  (let ((cooked--style-piece-spans 6))
+    (cooked-tests--with-fed-screen 5 20
+      ;; Less than a screenful: nothing is scrollback yet, so the next feed has
+      ;; rows to promote rather than rows to render.
+      (cooked-tests--fed (cooked-tests--red-lines 0 3))
+      (should (= 0 cooked--pending-styles))
+      (cooked-tests--fed (cooked-tests--red-lines 4 23))
+      (let ((screen (cooked--screen-start-position)))
+        ;; The promoted rows: scrollback, coloured, owing nothing.
+        (should (> screen (point-min)))
+        (should-not (get-text-property (point-min) 'cooked-pending-style))
+        (should (equal (cooked--face-color (get-text-property (point-min) 'face)
+                                           :foreground)
+                       (cooked-tests--red)))
+        ;; And the batch below them, which is owing and has no colour yet.
+        (let ((owed (cooked-tests--first-pending (point-min) screen)))
+          (should owed)
+          (should (> cooked--pending-styles 0))
+          (should-not (get-text-property owed 'face))
+          (cooked-tests--fontify)
+          (should (= 0 cooked--pending-styles))
+          (goto-char (point-min))
+          (let ((seen 0))
+            (while (search-forward "red" nil t)
+              (setq seen (1+ seen))
+              (should (equal (cooked--face-color
+                              (get-text-property (match-beginning 0) 'face)
+                              :foreground)
+                             (cooked-tests--red))))
+            (should (= seen 24))))))))
+
+(ert-deftest cooked-a-trim-landing-inside-a-piece-pays-what-it-leaves-behind ()
+  "The cap cutting a piece in half colours the half that stays.
+
+`cooked--trim-scrollback' goes through `cooked--settle-styles' with DOOMED, so
+a piece wholly above the cap is thrown away uncoloured -- which is what makes a
+trim free under a flood -- and the one the cap falls inside pays for its tail
+before losing its head.  `cooked-scrollback-lines' is small and
+`cooked--style-piece-spans' smaller still, so the cap is reached several times
+over and lands inside a piece rather than between two."
+  (let ((cooked--style-piece-spans 6)
+        (cooked-scrollback-lines 9))
+    (cooked-tests--with-fed-screen 5 20
+      (cooked-tests--fed (cooked-tests--red-lines 0 29))
+      ;; The cap was reached and enforced: most of the flood is gone.
+      (should (< (line-number-at-pos (point-max)) 20))
+      (cooked-tests--fontify)
+      (should (= 0 cooked--pending-styles))
+      (should-not (cooked-tests--pending-style-positions))
+      (goto-char (point-min))
+      (let ((seen 0))
+        (while (search-forward "red" nil t)
+          (setq seen (1+ seen))
+          (should (equal (cooked--face-color (get-text-property (match-beginning 0) 'face)
+                                             :foreground)
+                         (cooked-tests--red))))
+        (should (> seen 5))))))
+
+(ert-deftest cooked-redefining-a-rendition-pays-every-batch-that-named-it ()
+  "An id about to mean something else settles more than the newest batch.
+
+`cooked--install-styles' calls `cooked--settle-all-styles', so every batch in
+the buffer that still names the old rendition is coloured while the id still
+means it -- not only the one the drain that redefined it appended.  Two feeds,
+each drained, leave two batches owing, and the redefinition has to find both."
+  (let ((cooked--style-piece-spans 6))
+    (cooked-tests--with-fed-screen 5 20
+      (cooked-tests--fed (cooked-tests--red-lines 0 19))
+      (let ((first-batch-end (cooked--screen-start-position)))
+        (cooked-tests--fed (cooked-tests--red-lines 20 39))
+        (should (> cooked--pending-styles 1))
+        ;; Both batches are owing something before the redefinition lands.
+        (should (cooked-tests--first-pending (point-min) first-batch-end))
+        (should (cooked-tests--first-pending first-batch-end
+                                             (cooked--screen-start-position)))
+        (let ((id nil))
+          (dotimes (i (length cooked--style-specs))
+            (when (and (null id) (aref cooked--style-specs i))
+              (setq id i)))
+          (should id)
+          (cooked--install-styles (list (list id 4 nil nil cooked--attr-bold))))
+        (should (= 0 cooked--pending-styles))
+        (should-not (cooked-tests--pending-style-positions))
+        (goto-char (point-min))
+        (let ((seen 0))
+          (while (search-forward "red" nil t)
+            (setq seen (1+ seen))
+            (should (equal (cooked--face-color
+                            (get-text-property (match-beginning 0) 'face)
+                            :foreground)
+                           (cooked-tests--red))))
+          (should (= seen 40)))))))
 
 (ert-deftest cooked-scrollback-follows-a-theme-whether-it-was-coloured-or-not ()
   "Rows in the scrollback do not keep the colours they were drawn in any more.

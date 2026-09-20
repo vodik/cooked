@@ -742,7 +742,8 @@ screen to the jit-lock pass that runs when the text is first displayed; nil
 puts them on as the text is inserted, which is what every version before the
 deferral did.  The user-visible answer is identical either way, and there is no
 reason to turn this off outside a test that wants to compare the two -- see
-`cooked-deferred-and-eager-styling-agree-at-every-position'.
+`cooked-deferred-and-eager-styling-agree-however-the-flood-is-split', which
+feeds one small flood both ways with the drain boundary at every byte of it.
 
 The live screen is not affected: it is on its way to being displayed by
 definition, and deferring a row the cursor is on would only pay the walk twice.")
