@@ -136,7 +136,8 @@ pub(crate) use cell::{Color, MarkId, Style};
 pub(crate) use image::{CellMetrics, ImageData, ImageFormat, PixelSize, ShownFormats};
 pub(crate) use term::{
     Anchor, Assumed, Button, ColorScheme, CursorShape, Event, FrameSize, Key, KeyEncoding, Mark,
-    Modifiers, NamedKey, Palette, Rgb, StackOp, Terminator, osc_reply, strip_paste_controls,
+    Modifiers, NamedKey, Palette, PasteOutcome, Rgb, StackOp, Terminator, osc_reply,
+    strip_paste_controls,
 };
 
 // What the integration tests are allowed to see, and no more. `tests/throughput.rs` needs

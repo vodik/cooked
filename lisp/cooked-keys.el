@@ -267,9 +267,8 @@ point of the protocol."
 ;; `cooked--send-paste-text' and `cooked--send-line'.  What is stripped is
 ;; security-relevant and what brackets is mode-dependent, and both were spelled
 ;; out here while the mode they answer to lived there -- one list to keep in step
-;; across two languages, and a window between reading the mode and writing the
-;; bytes.  This file keeps the parts that are questions about Emacs: which parts
-;; of a line were pasted, and whether to ask the user first.
+;; across two languages.  This file keeps the parts that are questions about
+;; Emacs: which parts of a line were pasted, and whether to ask the user first.
 
 (defun cooked--strip-pasted-controls (text)
   "TEXT with control bytes stripped from the parts that were pasted.
@@ -298,34 +297,31 @@ The result carries no properties, since it is on its way to the child."
 (defun cooked--send-paste (text)
   "Hand TEXT to the child as a paste.
 
-The stripping, the bracketing and the choice between them are
-`cooked--send-paste-text's, made together against the mode the child holds at
-the moment of the write.  What is left here is the one question the core cannot
-answer: whether to paste at all.
+The stripping, the mode read and the choice it makes -- bracket, turn
+newlines into carriage returns, or refuse -- are all `cooked--send-paste-text's,
+made together under the lock the mode lives behind.  What is left here is the
+one question the core cannot answer: whether to paste at all.
 
 A child that has not asked for bracketed paste cannot tell a paste from typing,
 so a line editor reads every embedded newline as Enter and runs the lines one
 after another with no chance to read them first.  That is a question for the
-user, and `cooked-paste-confirm-lines' is where the answer is configured.  The
-line count is taken before the strip because the strip leaves newlines alone,
-which is what makes a paste worth confirming in the first place.
-
-The mode is asked twice -- here, and again under the lock when the bytes are
-written -- and the second answer is the one that decides how the text is
-framed.  A child that turns bracketing off in between gets an unbracketed paste
-the user was not asked about, which is the same small window this had when the
-framing was on this side too; a child that turns it on gets a bracketed paste
-that was confirmed unnecessarily, which costs a question and nothing else."
-  (if (and cooked-paste-confirm-lines
-           (not (cooked--bracketed-paste-p (cooked--require-session)))
-           (string-search "\n" text)
-           (not (y-or-n-p
-                 (format "Paste %d lines, which %s will run as each arrives?"
-                         (1+ (cl-count ?\n text))
-                         (or cooked-title "The child")))))
-      (message "Paste cancelled")
-    (cooked--snap-to-cursor)
-    (cooked--send-paste-text (cooked--require-session) text)))
+user, and `cooked-paste-confirm-lines' is where the answer is configured: nil
+skips it and passes CONFIRMED t up front.  Otherwise the first call passes
+CONFIRMED nil, and only when it comes back `unbracketed' -- a non-bracketing
+child and a stripped text of more than one line, the same two facts the core
+just read under its lock -- is the user asked and, on yes, the call repeated
+with CONFIRMED t.  A bracketing child, or a one-line paste, is sent to on the
+first call and never asks."
+  (cooked--snap-to-cursor)
+  (let ((session (cooked--require-session)))
+    (when (eq (cooked--send-paste-text session text (not cooked-paste-confirm-lines))
+              'unbracketed)
+      (if (y-or-n-p
+           (format "Paste %d lines, which %s will run as each arrives?"
+                   (1+ (cl-count ?\n text))
+                   (or cooked-title "The child")))
+          (cooked--send-paste-text session text t)
+        (message "Paste cancelled")))))
 
 (defun cooked-paste ()
   "Paste the most recent kill.

@@ -806,6 +806,41 @@ confirmation must send nothing at all."
       (should (cooked-tests--settle
                (lambda () (string-search "one^Mtwo" (cooked-tests--text))))))))
 
+(ert-deftest cooked-send-paste-text-refuses-an-unconfirmed-multi-line-paste ()
+  "`cooked--send-paste-text' is the one place the mode is read, so this drives
+it directly rather than through `cooked-paste', with `cooked--feed' standing
+in for a child that has not asked for bracketed paste."
+  :tags '(pty)
+  (cooked-tests--with-echoing-child ""
+    (should-not (cooked--bracketed-paste-p cooked--session))
+    (should (eq (cooked--send-paste-text cooked--session "one\ntwo" nil)
+                'unbracketed))
+    (cooked-tests--settle (lambda () nil) 0.2)
+    (should-not (string-search "one" (cooked-tests--text)))))
+
+(ert-deftest cooked-send-paste-text-sends-once-confirmed ()
+  "The same call, CONFIRMED t, sends what the unconfirmed call above refused."
+  :tags '(pty)
+  (cooked-tests--with-echoing-child ""
+    (should-not (cooked--bracketed-paste-p cooked--session))
+    (should (eq (cooked--send-paste-text cooked--session "one\ntwo" t) t))
+    (should (cooked-tests--settle
+             (lambda () (string-search "one^Mtwo" (cooked-tests--text)))))))
+
+(ert-deftest cooked-send-paste-text-asks-a-bracketing-child-nothing ()
+  "A child that has asked for bracketed paste is written to on the first,
+unconfirmed call: it can see for itself where the paste ends, so there is
+nothing to confirm."
+  :tags '(pty)
+  (cooked-tests--with-echoing-child ""
+    (cooked-tests--negotiate "\e[?2004h")
+    (should (cooked--bracketed-paste-p cooked--session))
+    (should (eq (cooked--send-paste-text cooked--session "one\ntwo" nil) t))
+    (should (cooked-tests--settle
+             (lambda ()
+               (and (string-search "^[[200~one" (cooked-tests--text))
+                    (string-search "two^[[201~" (cooked-tests--text))))))))
+
 (ert-deftest cooked-paste-at-a-prompt-yanks-into-the-pending-line ()
   "At a prompt the line is being edited in the buffer, so a paste belongs there
 — where it can be corrected before it is submitted — not at the child."

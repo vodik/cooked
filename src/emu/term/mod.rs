@@ -23,6 +23,7 @@ pub(crate) use keypress::{Assumed, Key, Modifiers, NamedKey};
 pub(crate) use keys::{KeyEncoding, KittyFlags, ModifyOtherKeys};
 use keys::{KittySetMode, KittyStack};
 pub(crate) use mouse::Button;
+pub(crate) use paste::PasteOutcome;
 pub(crate) use paste::strip_controls as strip_paste_controls;
 use pen::PenState;
 use reply::{Framing, color_scheme_report, size_report};

@@ -5,8 +5,11 @@
 //! the framing is not, and a caller that reads the mode, then strips, then frames, is
 //! reading a mode that can have changed by the time it writes -- so a paste could be
 //! bracketed for a child that had just turned bracketing off, which reads the markers as
-//! keystrokes, or left unbracketed for one that had just turned it on. Lisp asks for a
-//! paste and the answer is composed here, under the lock the mode lives behind.
+//! keystrokes, or left unbracketed for one that had just turned it on. Lisp still asks
+//! whether to send an unbracketed multi-line paste at all, but the mode itself is read
+//! exactly once, here, under the lock it lives behind -- [`Term::paste`] hands back
+//! [`PasteOutcome::Unbracketed`] instead of sending when that question is still open,
+//! rather than answering it from a second, separately-read mode.
 
 use super::Term;
 
@@ -37,8 +40,20 @@ const PASTE_START: &[u8] = b"\x1b[200~";
 /// the middle; see [`bracket`].
 const PASTE_END: &[u8] = b"\x1b[201~";
 
+/// What [`Term::paste`] decided, against the mode it read under its caller's lock.
+pub(crate) enum PasteOutcome {
+    /// The child is not bracketing, the text holds more than one line, and the caller
+    /// passed `confirmed: false`: nothing was sent. A line editor with no bracket would
+    /// run each line the moment it arrived, which is a question for the user, and the
+    /// answer was not yet in hand -- see `cooked--send-paste' in cooked-keys.el.
+    Unbracketed,
+    /// The bytes to write, already stripped and framed for the mode read at the call.
+    Framed(Vec<u8>),
+}
+
 impl Term {
-    /// TEXT as this child should receive a paste of it, right now.
+    /// TEXT as this child should receive a paste of it, right now, or the reason it
+    /// should not be sent yet.
     ///
     /// Stripped unconditionally, and in particular not conditionally on bracketed paste,
     /// which is xterm's posture as well. Bracketing tells a *cooperating* reader where
@@ -48,15 +63,22 @@ impl Term {
     /// shell can arrive as key presses, a copied C-c can kill the command the user meant
     /// to paste into, and neither is visible in the text they copied.
     ///
-    /// A child that asked for mode 2004 then gets the paste bracketed. One that did not
-    /// gets its newlines as carriage returns, because CR is what the Return key
-    /// transmits and a line editor bound to CR is what is reading them.
-    pub(crate) fn paste(&self, text: &str) -> Vec<u8> {
+    /// A child that asked for mode 2004 gets the paste bracketed, confirmed or not: it
+    /// can see for itself where the paste ends, so this is not a question. One that did
+    /// not ask gets its newlines as carriage returns, because CR is what the Return key
+    /// transmits and a line editor bound to CR is what is reading them -- but only once
+    /// CONFIRMED is true or the text is one line: an unbracketed child cannot tell a
+    /// multi-line paste from fast typing, and running each line as it lands is a
+    /// question for the user, asked by `cooked--send-paste' against the
+    /// [`PasteOutcome::Unbracketed`] this returns instead of sending.
+    pub(crate) fn paste(&self, text: &str, confirmed: bool) -> PasteOutcome {
         let text = strip_controls(text);
         if self.bracketed_paste() {
-            bracket(&text).into_bytes()
+            PasteOutcome::Framed(bracket(&text).into_bytes())
+        } else if !confirmed && text.contains('\n') {
+            PasteOutcome::Unbracketed
         } else {
-            text.replace('\n', "\r").into_bytes()
+            PasteOutcome::Framed(text.replace('\n', "\r").into_bytes())
         }
     }
 
@@ -152,6 +174,16 @@ mod tests {
         Term::new(4, 20)
     }
 
+    /// The bytes of a [`PasteOutcome`] that was expected to send, panicking on
+    /// [`PasteOutcome::Unbracketed`] so a test that gets one fails loudly rather than
+    /// comparing against nothing.
+    fn sent(outcome: PasteOutcome) -> Vec<u8> {
+        match outcome {
+            PasteOutcome::Framed(bytes) => bytes,
+            PasteOutcome::Unbracketed => panic!("expected a framed paste, got Unbracketed"),
+        }
+    }
+
     #[test]
     fn the_stripped_bytes_are_xterms_list_and_no_more() {
         let strip = "\0\x08\x05\x04\x1b\x7f\x03\x1c\x15\x1a\x11\x13\x17\x16\x12\x0f";
@@ -189,7 +221,8 @@ mod tests {
         let mut t = term();
         t.feed(b"\x1b[?2004h");
         assert_eq!(
-            t.paste("ls\nrm\x1b[201~ -rf /"),
+            // Not confirmed, and not asked: a bracketing child gets no question at all.
+            sent(t.paste("ls\nrm\x1b[201~ -rf /", false)),
             // The ESC became a space before the bracket was ever built, so what is
             // left of the marker is inert text.
             b"\x1b[200~ls\nrm [201~ -rf /\x1b[201~".as_slice()
@@ -199,9 +232,24 @@ mod tests {
     #[test]
     fn a_child_that_did_not_ask_reads_newlines_as_returns() {
         let t = term();
-        assert_eq!(t.paste("one\ntwo\n"), b"one\rtwo\r".as_slice());
+        assert_eq!(sent(t.paste("one\ntwo\n", true)), b"one\rtwo\r".as_slice());
         // And is stripped just the same: bracketing is not what makes a paste safe.
-        assert_eq!(t.paste("rm\x03 -rf"), b"rm  -rf".as_slice());
+        assert_eq!(sent(t.paste("rm\x03 -rf", true)), b"rm  -rf".as_slice());
+    }
+
+    #[test]
+    fn an_unconfirmed_multi_line_paste_to_a_non_bracketing_child_is_not_sent() {
+        let t = term();
+        assert!(matches!(
+            t.paste("one\ntwo", false),
+            PasteOutcome::Unbracketed
+        ));
+    }
+
+    #[test]
+    fn an_unconfirmed_single_line_paste_needs_no_question() {
+        let t = term();
+        assert_eq!(sent(t.paste("one", false)), b"one".as_slice());
     }
 
     #[test]

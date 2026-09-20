@@ -26,7 +26,7 @@ mod wire;
 
 use emu::{
     Assumed, Button, CellMetrics, ColorScheme, FrameSize, ImageFormat, ImageId, Key, Modifiers,
-    NamedKey, PixelSize, ShownFormats,
+    NamedKey, PasteOutcome, PixelSize, ShownFormats,
 };
 use env::{Env, FromLisp, IntoLisp, Result, Runtime, UserPtr, Value, plist, sym};
 use nix::sys::signal::Signal;
@@ -332,7 +332,7 @@ pub unsafe extern "C" fn emacs_module_init(runtime: *mut Runtime) -> std::ffi::c
         /// is loaded; the two are held against each other by a test.
         "cooked--key-table" 0..=0 => key_table;
 
-        /// Hand TEXT to SESSION's child as a paste.
+        /// Hand TEXT to SESSION's child as a paste, or refuse to.
         ///
         /// Control bytes are taken out of it, the child's DEC mode 2004 is read, and the
         /// text is bracketed or its newlines turned into carriage returns accordingly --
@@ -340,10 +340,15 @@ pub unsafe extern "C" fn emacs_module_init(runtime: *mut Runtime) -> std::ffi::c
         /// and being acted on. See `cooked--strip-paste-controls' for what is taken out
         /// and why it is taken out whether or not the paste is bracketed.
         ///
-        /// Whether to paste at all is still Lisp's: `cooked--send-paste' confirms a
-        /// multi-line paste that an unbracketing child would run a line at a time, which
-        /// is a question for the user rather than for the terminal.
-        "cooked--send-paste-text" 2..=2 => send_paste_text;
+        /// Whether to paste at all is still Lisp's, and CONFIRMED is how it says so: a
+        /// child that is not bracketing cannot tell a multi-line paste from fast typing,
+        /// so with CONFIRMED nil and the stripped text still holding more than one line,
+        /// nothing is sent and `unbracketed' is returned instead. `cooked--send-paste'
+        /// asks the user on that answer and calls again with CONFIRMED t, which is also
+        /// what `cooked-paste-confirm-lines' being nil passes up front. Sending returns
+        /// t. A bracketing child is written to either way, since it can see for itself
+        /// where the paste ends and there is nothing to ask about.
+        "cooked--send-paste-text" 2..=3 => send_paste_text;
 
         /// TEXT with the control bytes a paste may not carry turned into spaces.
         ///
@@ -747,6 +752,12 @@ pub unsafe extern "C" fn emacs_module_init(runtime: *mut Runtime) -> std::ffi::c
         "cooked--sample-mode" => Session::sample_mode;
 
         /// Whether SESSION requested bracketed paste.
+        ///
+        /// Not read by `cooked--send-paste' any more -- `cooked--send-paste-text' reads
+        /// the mode itself, once, under its own lock -- but kept for the tests that
+        /// assert the mode a child has set, independent of any paste: see
+        /// `cooked-paste-brackets-when-the-child-asked-for-it' and its neighbours in
+        /// tests/cooked-tests-input.el.
         "cooked--bracketed-paste-p" => |s| s.term().bracketed_paste();
 
         /// Whether SESSION asked to be told when the window gains or loses focus.
@@ -1202,11 +1213,19 @@ fn wire_layout<'e>(env: Env<'e>, _args: &[Value<'e>]) -> Result<Value<'e>> {
 /// Compose a paste against the mode the child holds now; see `cooked--send-paste-text'.
 fn send_paste_text<'e>(env: Env<'e>, args: &[Value<'e>]) -> Result<Value<'e>> {
     let mut text = env.from_lisp::<String>(args[1])?;
-    let mut bytes = {
+    let confirmed = args.get(2).is_some_and(|v| !env.is_nil(*v));
+    let outcome = {
         let session = env.from_lisp::<&Session>(args[0])?;
         // The lock covers the strip, the mode and the framing, and is let go before the
         // write, which can wait out a child that is not reading.
-        session.term().paste(&text)
+        session.term().paste(&text, confirmed)
+    };
+    let mut bytes = match outcome {
+        PasteOutcome::Unbracketed => {
+            zero_text(&mut text);
+            return sym!(env, "unbracketed");
+        }
+        PasteOutcome::Framed(bytes) => bytes,
     };
     // A paste is one write, however it was asked for, so the echo exemption cannot cost
     // more than the single early frame it is meant to buy -- and the user who pressed
@@ -1221,7 +1240,7 @@ fn send_paste_text<'e>(env: Env<'e>, args: &[Value<'e>]) -> Result<Value<'e>> {
     // it either.
     zero_text(&mut text);
     result?;
-    Ok(env.nil())
+    env.into_lisp(true)
 }
 
 fn strip_paste_controls<'e>(env: Env<'e>, args: &[Value<'e>]) -> Result<Value<'e>> {

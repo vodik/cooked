@@ -422,6 +422,9 @@ symbols! {
     PaletteDefaults => ":palette-defaults",
     PaletteColors => ":palette-colors",
     FrameSize => ":frame-size",
+    // What `send_paste_text' returns instead of sending, for the one case a multi-line
+    // paste to a non-bracketing child needs Lisp to ask about first.
+    Unbracketed => "unbracketed",
 }
 
 /// `a == b` for `&str`, in a const context.
