@@ -675,7 +675,7 @@ pub unsafe extern "C" fn emacs_module_init(runtime: *mut Runtime) -> std::ffi::c
         /// side. Everything named here is written a second time by hand somewhere in
         /// lisp/: the `Attrs' bit values (`cooked-face.el'), the style record
         /// `Block::push_style' packs and its four field offsets, the glyph-run and
-        /// image-placement records `Deco::packed' writes, the box-glyph bit layout
+        /// image-placement records `Deco::pack_into' writes, the box-glyph bit layout
         /// (`cooked-glyph.el'), and the two tuning defaults `Options::default' falls back
         /// to when `cooked--spawn' gets no interval or limit. `cooked--key-table' is the
         /// precedent for holding a second copy against the core by way of a test rather

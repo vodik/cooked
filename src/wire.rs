@@ -374,6 +374,9 @@ pub(crate) struct Block<'a, 'e> {
     /// Leave the LINK field of every record zero, for an encoding whose consumer has no
     /// table to resolve an id through.
     unlinked: bool,
+    /// Scratch space for [`Deco::pack_into`], reused across every decorated run in the
+    /// block instead of a fresh `Vec` per run; see [`Block::push_deco`].
+    deco_scratch: Vec<u8>,
     /// Columns `text` occupies on the grid, summed from [`RunRef::cols`].
     ///
     /// `cooked--guard-row-width' needs to know how wide a row *should* be, and asking
@@ -599,7 +602,7 @@ impl<'a, 'e> Block<'a, 'e> {
     /// constants exist so `cooked--wire-layout' can hand the same numbers to Lisp rather
     /// than have `cooked--style-start' &c. retype them.
     ///
-    /// A packed string rather than a list of lists, for the reason [`Deco::packed`] gives:
+    /// A packed string rather than a list of lists, for the reason [`Deco::pack_into`] gives:
     /// the Emacs apply path is the bottleneck, and a list costs conses a span on every
     /// damaged row of every frame. And ids rather than colours, so that resolving a span's
     /// face is an `aref' into a vector Lisp keeps per session, rather than a decode of
@@ -642,12 +645,45 @@ impl<'a, 'e> Block<'a, 'e> {
     fn push_runs(&mut self, env: Env<'e>, runs: &Runs) -> Result<()> {
         for run in runs {
             // Taken before `push_run` advances the offset it is measured from.
-            if run.deco.is_some() {
-                let deco = env.into_lisp(run.deco)?;
-                self.decos.push(list!(env, [self.offset, deco])?);
+            if let Some(deco) = run.deco {
+                self.push_deco(env, deco)?;
             }
             self.push_run(run);
         }
+        Ok(())
+    }
+
+    /// `nil`, or `(KIND . PACKED)` — what a run's characters display instead of
+    /// themselves — pushed onto `decos` as `(START . (KIND . PACKED))`.
+    ///
+    /// KIND is an interned symbol naming the decoration, and PACKED is a unibyte string of
+    /// fixed-width little-endian records covering the run's text. The kind is carried once
+    /// for the run rather than per character because a run is homogeneous in it — see
+    /// [`Deco`] — which is what keeps the record narrow:
+    ///
+    ///   `glyph`   four bytes per *run of identical shapes*: a `BoxGlyph` bit pattern and
+    ///             the number of consecutive characters drawing it, both `u16`. A border
+    ///             row is one record, not eighty.
+    ///   `image`   twelve bytes per *character*: a `u32` image id, then the cell's row and
+    ///             column within that image, then the rectangle that placement was laid at,
+    ///             as `u16`s.
+    ///
+    /// The two kinds count differently on purpose; [`Deco::pack_into`] explains why. The
+    /// rectangle is repeated on every image cell because it belongs to the placement (see
+    /// [`Placement`](emu::image::Placement)), four bytes a cell against a picture's megabytes.
+    ///
+    /// A method rather than an `IntoLisp` impl because the packing needs somewhere to
+    /// keep its scratch buffer between calls, and a trait impl has nowhere to put one: see
+    /// `deco_scratch`.
+    fn push_deco(&mut self, env: Env<'e>, deco: &Deco) -> Result<()> {
+        self.deco_scratch.clear();
+        deco.pack_into(&mut self.deco_scratch);
+        let packed = env.into_lisp(self.deco_scratch.as_slice())?;
+        let tagged = match deco {
+            Deco::Glyphs(_) => env.cons(sym!(env, "glyph")?, packed)?,
+            Deco::Images(_) => env.cons(sym!(env, "image")?, packed)?,
+        };
+        self.decos.push(list!(env, [self.offset, tagged])?);
         Ok(())
     }
 
@@ -925,41 +961,6 @@ fn styles_to_lisp<'e>(env: Env<'e>, styles: &[(StyleId, Style)]) -> Result<Vec<V
             )
         })
         .collect()
-}
-
-/// `nil`, or `(KIND . PACKED)` — what a run's characters display instead of themselves.
-///
-/// KIND is an interned symbol naming the decoration, and PACKED is a unibyte string of
-/// fixed-width little-endian records covering the run's text. The kind is carried once
-/// for the run rather than per character because a run is homogeneous in it — see
-/// [`Deco`] — which is what keeps the record narrow:
-///
-///   `glyph`   four bytes per *run of identical shapes*: a `BoxGlyph` bit pattern and
-///             the number of consecutive characters drawing it, both `u16`. A border
-///             row is one record, not eighty.
-///   `image`   twelve bytes per *character*: a `u32` image id, then the cell's row and
-///             column within that image, then the rectangle that placement was laid at,
-///             as `u16`s.
-///
-/// The two kinds count differently on purpose; [`Deco::packed`] explains why. The
-/// rectangle is repeated on every image cell because it belongs to the placement (see
-/// [`Placement`](emu::image::Placement)), four bytes a cell against a picture's megabytes.
-///
-/// A packed string rather than a list because a list would cons per character of every
-/// damaged row of every frame of box drawing. One unibyte allocation per run instead.
-impl<'e> env::IntoLisp<'e> for Option<&Deco> {
-    fn into_lisp(self, env: &Env<'e>) -> Result<Value<'e>> {
-        let Some(deco) = self else {
-            return Ok(env.nil());
-        };
-        // The bytes are [`Deco::packed`]'s; only the kind tag is spelled here, because
-        // `sym!' needs its literal at the call site.
-        let packed = env.into_lisp(deco.packed().as_slice())?;
-        match deco {
-            Deco::Glyphs(_) => env.cons(sym!(env, "glyph")?, packed),
-            Deco::Images(_) => env.cons(sym!(env, "image")?, packed),
-        }
-    }
 }
 
 /// A single event, with any anchor it carries already resolved against `update`.

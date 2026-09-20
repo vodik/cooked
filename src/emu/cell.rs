@@ -106,7 +106,7 @@ impl Not for Attrs {
 
 /// This module's half of `cooked--wire-layout': the [`Attrs`] bit values, mirrored by
 /// `cooked--attr-*' in lisp/cooked-face.el, and the glyph and image record layouts
-/// [`Deco::packed`] writes, mirrored in lisp/cooked-deco.el. `wire::wire_layout` in
+/// [`Deco::pack_into`] writes, mirrored in lisp/cooked-deco.el. `wire::wire_layout` in
 /// wire.rs carries the style-record half, and `glyph::wire_layout` in glyph.rs the
 /// box-glyph bit layout; `cooked--wire-layout' in lib.rs concatenates all three.
 ///
@@ -529,7 +529,7 @@ fn decoration(cell: &Cell, marks: Option<&str>, placed: Option<Placement>) -> Op
 /// A run is homogeneous in its kind: [`Row::build_runs`] will not merge characters
 /// decorated differently into one run. That is what lets the wire format carry a single
 /// kind tag plus fixed-width records, instead of tagging every character — see
-/// [`Deco::packed`] for what those records are.
+/// [`Deco::pack_into`] for what those records are.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Deco {
     Glyphs(Vec<BoxGlyph>),
@@ -552,7 +552,7 @@ impl DecoCell {
 }
 
 impl Deco {
-    /// Bytes in one packed glyph-run record. See [`Deco::packed`] for the layout and
+    /// Bytes in one packed glyph-run record. See [`Deco::pack_into`] for the layout and
     /// `cooked--glyph-record' in lisp/cooked-deco.el for the mirror.
     const GLYPH_RECORD: usize = 4;
     /// Byte offset of the bit pattern within a glyph record; `cooked--glyph-bits'.
@@ -609,13 +609,17 @@ impl Deco {
         self.len() == 0
     }
 
-    /// The run's decoration as the unibyte string Lisp decodes, little-endian
-    /// throughout. `cooked--apply-deco' in lisp/cooked-deco.el is the only reader.
+    /// Append the run's decoration to OUT as the unibyte string Lisp decodes,
+    /// little-endian throughout. `cooked--apply-deco' in lisp/cooked-deco.el is the only
+    /// reader.
     ///
     /// Packed rather than a list of Lisp objects because every damaged row of every frame
     /// takes this path, and box drawing is what full-screen programs are made of. Emacs is
     /// the bottleneck -- the parser runs at 74-422 MB/s, the apply path at roughly 21 MB/s
-    /// -- so nothing Rust already knows should be left for Lisp to rediscover.
+    /// -- so nothing Rust already knows should be left for Lisp to rediscover. Appended
+    /// rather than returned so that [`Block::push_deco`](crate::wire::Block::push_deco)
+    /// can pack every decorated run of a frame into one reused buffer instead of
+    /// allocating per run.
     ///
     /// **Glyphs** are `(bits: u16, count: u16)` per *run of identical shapes*: four bytes
     /// for a whole border row. The records of one run are its pattern, and Lisp bakes one
@@ -639,19 +643,19 @@ impl Deco {
     ///
     /// A glyph count is capped at [`u16::MAX`] by splitting the record, which no terminal
     /// width reaches, so the format is total.
-    pub fn packed(&self) -> Vec<u8> {
+    pub fn pack_into(&self, out: &mut Vec<u8>) {
         match self {
             Self::Glyphs(glyphs) => {
-                let mut packed = Vec::with_capacity(glyphs.len().min(8) * Self::GLYPH_RECORD);
+                out.reserve(glyphs.len().min(8) * Self::GLYPH_RECORD);
                 let mut run: Option<(u16, u16)> = None;
                 // Fields go in at [`Self::GLYPH_BITS`] then [`Self::GLYPH_COUNT`], which is
                 // simply push order here; the offsets exist to be read back by
                 // `cooked--wire-layout', not to steer this write.
-                let flush = |packed: &mut Vec<u8>, bits: u16, count: u16| {
-                    packed.extend_from_slice(&bits.to_le_bytes());
-                    packed.extend_from_slice(&count.to_le_bytes());
+                let flush = |out: &mut Vec<u8>, bits: u16, count: u16| {
+                    out.extend_from_slice(&bits.to_le_bytes());
+                    out.extend_from_slice(&count.to_le_bytes());
                     debug_assert_eq!(
-                        packed.len() % Self::GLYPH_RECORD,
+                        out.len() % Self::GLYPH_RECORD,
                         0,
                         "a glyph record must be exactly {} bytes",
                         Self::GLYPH_RECORD
@@ -662,38 +666,45 @@ impl Deco {
                     run = match run {
                         Some((b, count)) if b == bits && count < u16::MAX => Some((b, count + 1)),
                         Some((b, count)) => {
-                            flush(&mut packed, b, count);
+                            flush(out, b, count);
                             Some((bits, 1))
                         }
                         None => Some((bits, 1)),
                     };
                 }
                 if let Some((bits, count)) = run {
-                    flush(&mut packed, bits, count);
+                    flush(out, bits, count);
                 }
-                packed
             }
             Self::Images(places) => {
-                let mut packed = Vec::with_capacity(places.len() * Self::IMAGE_RECORD);
+                out.reserve(places.len() * Self::IMAGE_RECORD);
                 // Fields go in at [`Self::IMAGE_ID`], [`Self::IMAGE_ROW`],
                 // [`Self::IMAGE_COL`], [`Self::IMAGE_COLS`] then [`Self::IMAGE_ROWS`], again
                 // push order; see the glyph arm above.
                 for place in places {
-                    packed.extend_from_slice(&place.id.get().to_le_bytes());
-                    packed.extend_from_slice(&place.cell_row.to_le_bytes());
-                    packed.extend_from_slice(&place.cell_col.to_le_bytes());
-                    packed.extend_from_slice(&place.cols.to_le_bytes());
-                    packed.extend_from_slice(&place.rows.to_le_bytes());
+                    out.extend_from_slice(&place.id.get().to_le_bytes());
+                    out.extend_from_slice(&place.cell_row.to_le_bytes());
+                    out.extend_from_slice(&place.cell_col.to_le_bytes());
+                    out.extend_from_slice(&place.cols.to_le_bytes());
+                    out.extend_from_slice(&place.rows.to_le_bytes());
                     debug_assert_eq!(
-                        packed.len() % Self::IMAGE_RECORD,
+                        out.len() % Self::IMAGE_RECORD,
                         0,
                         "an image record must be exactly {} bytes",
                         Self::IMAGE_RECORD
                     );
                 }
-                packed
             }
         }
+    }
+
+    /// [`Self::pack_into`], returned as an owned buffer for a test that wants to inspect
+    /// or compare the bytes without a `Block` to hold the scratch space.
+    #[cfg(test)]
+    pub(crate) fn packed(&self) -> Vec<u8> {
+        let mut out = Vec::new();
+        self.pack_into(&mut out);
+        out
     }
 
     /// A description of the decoration on character INDEX, for a test that compares what

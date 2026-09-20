@@ -838,7 +838,7 @@ fn a_run_of_differing_glyphs_packs_one_record_per_distinct_shape() {
 /// rebuild the `display' value per cell however the wire arrived. That is deliberately
 /// *not* said in the record: the shapes are identical, so they collapse like any other
 /// repeat, and `cooked--box-shade-p' asks once per record rather than once per cell.
-/// Adding a flag bit would have saved one `logand' per run — see [`Deco::packed`].
+/// Adding a flag bit would have saved one `logand' per run — see [`Deco::pack_into`].
 #[test]
 fn a_run_of_shades_collapses_like_any_other_repeat_and_is_not_flagged() {
     let mut t = term(2, 10, "\u{2592}\u{2592}\u{2592}".as_bytes());
