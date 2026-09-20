@@ -524,7 +524,11 @@ fn a_wrapped_blank_row_the_screen_grows_back_over_is_sent() {
     // Down onto the row itself, which damages nothing.
     t.feed(b"\x1b[3;1H");
     let delta = t.drain();
-    let wrapped: Vec<(usize, bool)> = delta.rows.iter().map(|r| (r.index, r.wrapped)).collect();
+    let wrapped: Vec<(usize, bool)> = delta
+        .rows
+        .iter()
+        .map(|r| (r.index, r.wrap.wraps()))
+        .collect();
     assert_eq!(wrapped, [(2, true)]);
 }
 

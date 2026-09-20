@@ -3,7 +3,7 @@
 //! Scrollback deliberately lives in the Emacs buffer, not here. Rows that fall off the
 //! top of the primary screen are handed over once, in [`Delta::scrolled`], and forgotten.
 
-use super::cell::{Deco, Extra, MarkId, Pen, RowRef, Runs, Style};
+use super::cell::{Deco, Extra, MarkId, Pen, RowRef, Runs, Style, Wrap};
 use super::image::{
     CellMetrics, CellSize, ImageData, ImageFormat, ImageId, ImageStore, Interned, PixelSize,
     ShownFormats,
@@ -624,13 +624,16 @@ pub struct Levels {
 /// One damaged row as a drain reports it: where it is, whether its logical line
 /// continues onto the row below, and the styled runs to rewrite it from.
 ///
-/// `wrapped` is [`Row::wrapped`](crate::emu::cell::Row::wrapped). Emacs needs it on the
-/// live grid as well as in scrollback, so that a URL broken across a row boundary can be
-/// matched as one string rather than only as far as the break.
+/// `wrap` is [`Row::wrap`](crate::emu::cell::Row::wrap). Emacs needs it on the live grid
+/// as well as in scrollback, so that a URL broken across a row boundary can be matched as
+/// one string rather than only as far as the break. Its three states rather than a bare
+/// flag, because Emacs puts back the blanks a wrapped row's text stops short of, and the
+/// columns a wide character left when it moved down whole are not among them; see
+/// [`Wrap`] and `cooked--mark-row-wrap'.
 #[derive(Clone, Debug)]
 pub struct DamagedRow {
     pub index: usize,
-    pub wrapped: bool,
+    pub wrap: Wrap,
     /// The whole row, which is what the row table is measured from even when only part
     /// of it is sent.
     pub runs: Runs,

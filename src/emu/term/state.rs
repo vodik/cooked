@@ -824,7 +824,7 @@ impl State {
                 front.record(index, row, at(index));
                 Some(DamagedRow {
                     index,
-                    wrapped: row.wrapped(),
+                    wrap: row.wrap(),
                     runs: row.runs(),
                     edit,
                 })

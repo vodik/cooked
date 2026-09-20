@@ -1829,6 +1829,43 @@ over — which is the offset seam a later rewrap turns into a visible one."
       (should (string-match-p whole (cooked-tests--unwrapped)))
       (cooked--check-seam))))
 
+(ert-deftest cooked-a-wide-character-that-wrapped-whole-leaves-no-blank-behind-it ()
+  "A wide character that will not fit in the columns left moves down whole and
+leaves them blank, and that blank is padding rather than a space the child
+wrote.  `日本語abc' at five columns puts `語' on the row below and never touches
+column 4, so the line is `日本語abc' wherever it is read: rejoined into
+scrollback, and rewrapped nine columns wide, where it used to read `日本 語abc'
+from then on.  Both ends agreed about the blank, which is why no oracle case
+caught it."
+  (let ((buffer (generate-new-buffer "*cooked-wide-wrap*"))
+        (cooked-debug t))
+    (unwind-protect
+        (with-current-buffer buffer
+          (cooked-mode)
+          (setq cooked--rows 3 cooked--cols 5 cooked--last-size '(3 . 5))
+          ;; Two rows of the wide line, then three short ones, so the pair has
+          ;; been rejoined into scrollback by the time the last one lands.
+          (cooked--start '("/bin/sh" "-c"
+                           "printf '%s\\n' 日本語abc one two three; sleep 5"))
+          (cooked--refresh-keymap)
+          (should (cooked-tests--settle
+                   (lambda () (string-match-p "three" (cooked-tests--text)))))
+          (should (member "日本語abc" (split-string (cooked-tests--text) "\n")))
+          (cooked--check-seam)
+
+          ;; Wide enough for the whole line, then back: the rewrap reads the line
+          ;; out of the buffer and chunks it again, which is where an invented
+          ;; space would settle in for good.
+          (cooked-tests--resize 3 9)
+          (should (member "日本語abc" (split-string (cooked-tests--text) "\n")))
+          (cooked--check-seam)
+
+          (cooked-tests--resize 3 5)
+          (should (member "日本語abc" (split-string (cooked-tests--text) "\n")))
+          (cooked--check-seam))
+      (with-current-buffer buffer (cooked--cleanup))
+      (kill-buffer buffer))))
+
 (ert-deftest cooked-clearing-scrollback-across-the-seam-keeps-the-screen ()
   "Discarding scrollback can cut a line in half: its head is scrollback and its
 tail is the top of the screen.  The screen must survive intact, and the emulator

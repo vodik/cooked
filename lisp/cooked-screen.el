@@ -210,7 +210,8 @@ rows joined by newlines -- see `cooked--render-rows' -- so START is where that
 row's text begins in TEXT, WIDTH how many grid cells it occupies, UNIFORM t
 when every character of it is one byte on one cell, `glyph' when the ones that
 are not are box glyphs, and nil otherwise, WRAPPED whether the row below
-continues this row's logical line, and HASH a key for its layout.  All four
+continues this row's logical line -- t, or `blank' when blanks of that line
+stand between the two -- and HASH a key for its layout.  All four
 are by-products of the core building the row; WIDTH, UNIFORM and HASH are
 `cooked--guard-row-width's and WRAPPED is `cooked--mark-row-wrap's, and
 all four are read by `cooked--render-rows' rather than here.  START is read
@@ -1159,7 +1160,9 @@ Nonzero only for a newline marked `blank': the row was written without the
 blanks the child left at its end, and a rewrap puts those cells back inside
 the line.  On a five-column screen `ab' wrapped with three blanks after it,
 and at ten columns the line reads `ab   cd', so a position on `c' is five
-characters into it rather than two."
+characters into it rather than two.  A row a wide character wrapped early is
+marked t and counts none, since the columns it stops short of are that
+character's room rather than cells of the line; see `cooked--mark-row-wrap'."
   (if (eq (get-text-property newline 'cooked-wrap) 'blank)
       (let ((start (max (save-excursion (goto-char newline)
                                         (line-beginning-position))
@@ -1248,17 +1251,19 @@ rewrap pushed its character up into history."
         (or (cooked--screen-cell position)
             (progn (goto-char position) nil))))))
 
-(defun cooked--mark-row-wrap (eol wrapped &optional width)
+(defun cooked--mark-row-wrap (eol wrap)
   "Record on the newline at EOL whether the row it ends was soft-wrapped.
 
-The `cooked-wrap' property, and this is the only place it is written: WRAPPED
-non-nil means the emulator's `Row::wrapped' was set, so the row below carries
-the rest of a logical line the child never broke.  The buffer has no other way
-to know that.  A screen row is one buffer line, so a line the child ended and a
-line the terminal ran out of columns for are the same two characters of text --
-and everything that reads the buffer as language rather than as a grid then gets
-the wrong answer.  cooked's one documented link-detection gap is exactly this:
-a URL split across a row boundary matched only as far as the break.  See
+The `cooked-wrap' property, and this is the only place it is written: WRAP is
+the row table's own fourth field, one of nil, t and `blank', so the mark is
+what the core says rather than anything inferred here.  Non-nil means the row
+below carries the rest of a logical line the child never broke.  The buffer
+has no other way to know that.  A screen row is one buffer line, so a line the
+child ended and a line the terminal ran out of columns for are the same two
+characters of text -- and everything that reads the buffer as language rather
+than as a grid then gets the wrong answer.  cooked's one documented
+link-detection gap is exactly this: a URL split across a row boundary matched
+only as far as the break.  See
 `cooked-link--join-wrapped', which is the reader.
 
 Only the live screen.  Scrollback needs nothing under
@@ -1270,33 +1275,35 @@ a mode whose whole point is that the buffer keeps the grid's line structure.
 
 Written only when it differs from what is already there, which on the ordinary
 row is never.  A property change runs `after-change-functions' exactly as an
-insertion does, and jit-lock is on that hook -- see `cooked--render-block'.
-A row inside a run has a freshly inserted newline
-that carries nothing, so the common case reads a property and writes none;
-only a row that has just started or stopped wrapping pays anything.
+insertion does, and jit-lock is on that hook -- see `cooked--render-block'.  A
+row inside a run has a freshly inserted newline that carries nothing, so the
+common case reads a property and writes none; only a row that has just started
+or stopped wrapping pays anything.
 
 At `point-max' there is nothing to mark yet: the last screen row is left
 unterminated -- see `cooked--fit-screen' -- so a wrap on it has no newline to
 sit on.  The mark is owed instead, and paid when extending the region gives the
 row its newline; see `cooked--owed-wrap'.
 
-WIDTH is how many cells the row's text occupies, from the row table, and a
-wrapped row narrower than `cooked--cols' is marked `blank' rather than t.  A
-row is inserted without its trailing blanks, wrapped or not, so the cells past
-its text are blanks the child wrote before the line went on to the next row,
-and nothing in the buffer says so.  At twenty columns \"see https://e.x/abc
-end\" leaves \"see https://e.x/abc\" on the first row, nineteen cells wide,
-and \"end\" on the second; joined at the newline with nothing between them
-they read as \"https://e.x/abcend\".  `cooked-link--join-wrapped' joins a
-`blank' row with a space instead."
-  (let ((mark (and wrapped
-                   (if (and width (< width cooked--cols)) 'blank t))))
-    (if (>= eol (point-max))
-        (cooked--owe-wrap eol mark)
-      (let ((marked (get-text-property eol 'cooked-wrap)))
-        (cond ((eq mark marked))
-              (mark (put-text-property eol (1+ eol) 'cooked-wrap mark))
-              (t (remove-text-properties eol (1+ eol) '(cooked-wrap nil))))))))
+`blank' rather than t says the row was rendered without blanks that are
+interior to its line.  A row is inserted without its trailing blanks, wrapped
+or not, so cells the child left blank before the line went on to the next row
+are missing from the buffer and nothing in it says so.  At twenty columns
+\"see https://e.x/abc end\" leaves \"see https://e.x/abc\" on the first row,
+nineteen cells wide, and \"end\" on the second; joined at the newline with
+nothing between them they read as \"https://e.x/abcend\".
+`cooked-link--join-wrapped' joins a `blank' row with a space instead, and
+`cooked--wrap-blanks' counts the missing cells back in.  Only the core can
+tell that row from one a wide character wrapped early -- `日本語' at five
+columns leaves column 4 to the `語' that moved down whole, and those cells
+belong to no character of the line -- which is why the mark arrives rather
+than being worked out from the width here."
+  (if (>= eol (point-max))
+      (cooked--owe-wrap eol wrap)
+    (let ((marked (get-text-property eol 'cooked-wrap)))
+      (cond ((eq wrap marked))
+            (wrap (put-text-property eol (1+ eol) 'cooked-wrap wrap))
+            (t (remove-text-properties eol (1+ eol) '(cooked-wrap nil)))))))
 
 (defun cooked--owe-wrap (end mark)
   "Record that the row ending at END, the end of the buffer, is owed MARK.
@@ -1575,7 +1582,7 @@ which has no such seam at all."
                 (goto-char pos)
                 ;; After the guard, which is the one thing in this loop that can
                 ;; shorten a row -- and so move the newline this is about.
-                (cooked--mark-row-wrap (line-end-position) wrapped cells))
+                (cooked--mark-row-wrap (line-end-position) wrapped))
               ;; Nothing scans the row here.  Rewriting the text is what tells
               ;; jit-lock the row is no longer fontified, so redisplay asks
               ;; `cooked--fontify-region' for it -- and only if this frame is one

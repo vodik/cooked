@@ -790,7 +790,7 @@ impl Replay {
             if let Some(row) = self.shadow.get_mut(damaged.index) {
                 *row = damaged.runs;
                 self.trimmed[damaged.index] = false;
-                self.wrapped[damaged.index] = damaged.wrapped;
+                self.wrapped[damaged.index] = damaged.wrap.wraps();
             }
         }
         self.levels = (delta.levels, delta.cursor_chars);
@@ -865,7 +865,7 @@ impl Replay {
             );
             assert_eq!(
                 wrapped.get(row.index),
-                Some(&row.wrapped),
+                Some(&row.wrap.wraps()),
                 "row {} was left out of the drain with a different wrap flag",
                 row.index
             );
@@ -1744,6 +1744,28 @@ fn a_wash_rewrapped_below_the_content_and_scrolled_away() {
         write("\x1b[u", &[], true),
     ];
     hiding_changes_nothing(1, 7, &steps).unwrap();
+}
+
+/// A wide character wrapped at the margin, rewrapped both ways and then scrolled away.
+///
+/// `日本語abc` at five columns leaves column 4 to the `語` that moved down whole, and a
+/// row that wrapped early is the one row a resize cannot measure by its cells alone. The
+/// three properties are the ones the padding could break: the rewrapped grid has to
+/// replay from the deltas, the seam the resize cuts has to be the same however the bytes
+/// were cut, and the rows the last line feeds hand over have to be the rows a run that
+/// drained all along handed over.
+#[test]
+fn a_wide_character_at_the_margin_rewrapped_and_scrolled_away() {
+    let steps = [
+        write("\u{65e5}\u{672c}\u{8a9e}abc", &[3, 9], true),
+        Step::Resize { rows: 0, cols: 4 },
+        write("", &[], true),
+        Step::Resize { rows: 0, cols: -4 },
+        write("\r\n\r\n\r\n", &[], true),
+    ];
+    replays_the_whole_grid(3, 5, &steps).unwrap();
+    fragmenting_changes_nothing(3, 5, &steps, true).unwrap();
+    hiding_changes_nothing(3, 5, &steps).unwrap();
 }
 
 /// A wrapped row stranded below the content and then scrolled away, once with a hidden

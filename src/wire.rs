@@ -9,7 +9,7 @@ use crate::emu::stream::Filter;
 use crate::emu::style::StyleId;
 use crate::emu::{
     self, Anchor, Bytes, Chars, Color, Cols, CursorShape, DamagedRow, Deco, Event, ImageData,
-    ImageFormat, ImageId, KeyEncoding, LinkId, Mark, MarkId, RunRef, Runs, Style,
+    ImageFormat, ImageId, KeyEncoding, LinkId, Mark, MarkId, RunRef, Runs, Style, Wrap,
 };
 use crate::env::{self, Env, Result, Value, lisp_enum, list, plist, sym};
 use crate::pty::Mode;
@@ -210,7 +210,7 @@ pub(crate) fn update_to_lisp<'e>(env: Env<'e>, update: &Update, rejoin: bool) ->
                     block.push_newline();
                 }
                 block.push_runs(env, &row.runs)?;
-                block.end_row(row.wrapped);
+                block.end_row(row.wrap, update.delta.width);
             }
             env.cons(env.into_lisp(run[0].index)?, block.into_lisp(&env)?)
         })
@@ -229,7 +229,7 @@ pub(crate) fn update_to_lisp<'e>(env: Env<'e>, update: &Update, rejoin: bool) ->
             block.push_runs(env, &edit.runs)?;
             block.rows.push(BlockRow {
                 start: Chars::ZERO,
-                ..Block::measure(&update.delta.fonts, &row.runs, row.wrapped)
+                ..Block::measure(&update.delta.fonts, &row.runs, row.wrap, update.delta.width)
             });
             env.cons(
                 env.into_lisp(row.index)?,
@@ -335,7 +335,8 @@ pub(crate) fn update_to_lisp<'e>(env: Env<'e>, update: &Update, rejoin: bool) ->
 /// A row table rides at the end: one `(START WIDTH UNIFORM WRAPPED HASH)` per *screen row*
 /// the block covers -- where the row's text begins in TEXT, how many columns it occupies,
 /// how far a byte-per-column reading of it can be trusted (see [`Uniformity`]), whether
-/// the row below continues its line, and a hash of what decides the row's layout. WIDTH,
+/// the row below continues its line and over what (see [`WrapMark`]), and a hash of what
+/// decides the row's layout. WIDTH,
 /// UNIFORM and HASH are by-products of work already done and spare Emacs a measurement
 /// and a copy of the row per drain; see `cooked--guard-row-width'. Per row rather than per
 /// block, because [`update_to_lisp`] coalesces contiguous damaged rows, and the offsets let
@@ -405,13 +406,13 @@ struct BlockRow {
     start: Chars,
     cols: Cols,
     uniform: Uniformity,
-    /// [`Row::wrapped`](crate::emu::cell::Row::wrapped): the row below continues this
-    /// row's logical line, so the newline between them is a soft wrap the child never
-    /// wrote.
+    /// Whether the row below continues this row's logical line, so that the newline
+    /// between them is a soft wrap the child never wrote, and whether blanks of the line
+    /// stand between the two; see [`WrapMark`].
     ///
     /// It rides the width guard's table because it is the same kind of fact: something the
     /// core knows about a rendered row that Emacs cannot see.
-    wrapped: bool,
+    wrap: WrapMark,
     /// A hash of everything about the row that decides how Emacs lays it out: its text,
     /// and where the renditions that change the font fall (bold, faint and italic, the
     /// faces `cooked--ascii-fixed-pitch-p' probes). Colours and underlines are left out,
@@ -425,6 +426,57 @@ struct BlockRow {
     ///
     /// Masked to 60 bits so it crosses as a fixnum and costs Emacs no bignum.
     hash: u64,
+}
+
+/// The `cooked-wrap' mark for one row: what a rendered row's newline carries.
+///
+/// The three values `cooked--mark-row-wrap' puts on a newline, decided here because the
+/// core is what knows the difference. [`WrapMark::Blank`] says the row's line goes on
+/// below over blanks its own text stops short of, which Emacs puts back as spaces when it
+/// reads the line as one string — a URL split across the break, or a position carried
+/// across a rewrap. A row a wide character wrapped early stops short of its line's end
+/// too, and those columns are *not* blanks of the line: `日本語` at five columns leaves
+/// column 4 to the `語` that moved down whole, so it is a plain wrap. Emacs cannot tell
+/// the two apart, since both reach it as a row of four columns out of five.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+enum WrapMark {
+    /// The line ends with this row; its newline is the child's own.
+    #[default]
+    Ends,
+    /// The line goes on below, and the row's text reaches the end of it.
+    Wraps,
+    /// The line goes on below over blanks the row was rendered without.
+    Blank,
+}
+
+impl WrapMark {
+    /// How a row of COLS columns of text ends, on a screen WIDTH columns wide.
+    fn of(wrap: Wrap, cols: Cols, width: usize) -> Self {
+        let line = match wrap {
+            Wrap::No => return Self::Ends,
+            Wrap::Full => width,
+            // The padding belongs to no column of the line, so the line ends where it
+            // begins. Saturating because a row is measured as Emacs will render it, and
+            // the width guard can leave that shorter than the grid said.
+            Wrap::Early(pad) => width.saturating_sub(pad.get()),
+        };
+        if cols.get() < line {
+            Self::Blank
+        } else {
+            Self::Wraps
+        }
+    }
+}
+
+impl<'e> env::IntoLisp<'e> for WrapMark {
+    /// nil, `t' and `blank', the values `cooked-wrap' takes.
+    fn into_lisp(self, env: &Env<'e>) -> Result<Value<'e>> {
+        match self {
+            Self::Ends => false.into_lisp(env),
+            Self::Wraps => true.into_lisp(env),
+            Self::Blank => sym!(env, "blank"),
+        }
+    }
 }
 
 /// How much of a byte-per-column reading of a row Emacs can trust, worst case first last.
@@ -613,12 +665,12 @@ impl<'a, 'e> Block<'a, 'e> {
     ///
     /// For a row sent as an edit: the replacement is only part of the row, and the width
     /// guard and the wrap mark still need the measurements of all of it.
-    fn measure(font_bits: &[u8], runs: &Runs, wrapped: bool) -> BlockRow {
+    fn measure(font_bits: &[u8], runs: &Runs, wrap: Wrap, width: usize) -> BlockRow {
         let mut block = Block::new(font_bits);
         for run in runs {
             block.push_run(run);
         }
-        block.end_row(wrapped);
+        block.end_row(wrap, width);
         block.rows[0]
     }
 
@@ -638,13 +690,13 @@ impl<'a, 'e> Block<'a, 'e> {
     ///
     /// Called once per damaged row and never for scrollback: a live row is a fixed-width
     /// slot whose layout Emacs can get wrong, while a scrollback line may wrap.
-    fn end_row(&mut self, wrapped: bool) {
+    fn end_row(&mut self, wrap: Wrap, width: usize) {
         let text = emu::fast_hash(&self.text.as_bytes()[self.row_start_byte.get()..]);
         self.rows.push(BlockRow {
             start: self.row_start,
             cols: self.cols,
             uniform: self.uniformity,
-            wrapped,
+            wrap: WrapMark::of(wrap, self.cols, width),
             hash: emu::mix(text, self.fonts) & ((1 << 60) - 1),
         });
         self.cols = Cols::ZERO;
@@ -661,13 +713,7 @@ impl<'a, 'e> Block<'a, 'e> {
             .map(|row| {
                 list!(
                     *env,
-                    [
-                        row.start,
-                        row.cols,
-                        row.uniform,
-                        row.wrapped,
-                        row.hash as i64
-                    ]
+                    [row.start, row.cols, row.uniform, row.wrap, row.hash as i64]
                 )
             })
             .collect::<Result<Vec<_>>>()?;
@@ -1111,7 +1157,7 @@ mod tests {
             .iter()
             .map(|i| DamagedRow {
                 index: *i,
-                wrapped: false,
+                wrap: Wrap::No,
                 runs: Runs::default(),
                 edit: None,
             })
@@ -1166,30 +1212,31 @@ mod tests {
         };
         let mut block = Block::default();
         push(&mut block, &[row("ab", 2)]);
-        block.end_row(false);
+        block.end_row(Wrap::No, 80);
         block.push_newline();
         // Two characters of three bytes each standing on two cells apiece: neither
         // one-byte nor one-cell, so this row is the nonuniform one.
         push(&mut block, &[row("世界", 4)]);
         // And the wrapped one: its logical line goes on below it. Per row like the other
         // two, and asserted alongside them, because a flag that leaked between rows would
-        // have Emacs join a line the child ended.
-        block.end_row(true);
+        // have Emacs join a line the child ended. Four columns of text on a four-column
+        // screen, so its line ends where its text does and it is a plain wrap.
+        block.end_row(Wrap::Full, 4);
         block.push_newline();
         push(&mut block, &[row("cd", 2)]);
-        block.end_row(false);
+        block.end_row(Wrap::No, 80);
 
-        let table: Vec<(usize, usize, Uniformity, bool)> = block
+        let table: Vec<(usize, usize, Uniformity, WrapMark)> = block
             .rows
             .iter()
-            .map(|r| (r.start.get(), r.cols.get(), r.uniform, r.wrapped))
+            .map(|r| (r.start.get(), r.cols.get(), r.uniform, r.wrap))
             .collect();
         assert_eq!(
             table,
             vec![
-                (0, 2, Uniformity::Ascii, false),
-                (3, 4, Uniformity::Mixed, true),
-                (6, 2, Uniformity::Ascii, false)
+                (0, 2, Uniformity::Ascii, WrapMark::Ends),
+                (3, 4, Uniformity::Mixed, WrapMark::Wraps),
+                (6, 2, Uniformity::Ascii, WrapMark::Ends)
             ],
             "text {:?}",
             block.text
@@ -1220,13 +1267,13 @@ mod tests {
             &mut block,
             &[glyphs("┌──"), plain(" ok ", 4), glyphs("\u{a0}──┐")],
         );
-        block.end_row(false);
+        block.end_row(Wrap::No, 80);
         block.push_newline();
         push(&mut block, &[glyphs("│"), plain("世", 2)]);
-        block.end_row(false);
+        block.end_row(Wrap::No, 80);
         block.push_newline();
         push(&mut block, &[plain("ab", 2)]);
-        block.end_row(false);
+        block.end_row(Wrap::No, 80);
 
         let classes: Vec<Uniformity> = block.rows.iter().map(|r| r.uniform).collect();
         assert_eq!(
@@ -1246,7 +1293,7 @@ mod tests {
         let hash = |runs: &[Run]| {
             let mut block = Block::new(&fonts);
             push(&mut block, runs);
-            block.end_row(false);
+            block.end_row(Wrap::No, 80);
             block.rows[0].hash
         };
         let run = |text: &str, style: StyleId| Run {

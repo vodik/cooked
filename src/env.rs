@@ -366,6 +366,9 @@ symbols! {
     // consing `Deco` is packed to avoid, paid per run instead.
     Glyph => "glyph",
     Image => "image",
+    // The one `cooked-wrap' mark that is not nil or t, on the row table of every wrapped
+    // row whose text stops short of its line; see `WrapMark` in wire.rs.
+    Blank => "blank",
     // How an `Anchor` is spelled: a character offset into this drain's scrollback, or a
     // cell on the live grid.
     AtScrolled => "scrolled",

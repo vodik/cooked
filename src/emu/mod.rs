@@ -153,7 +153,7 @@ pub(crate) use term::{
 // protocol's own types become nameable from outside. The second is the smaller
 // concession — these are already the wire format the Lisp side is written against, so
 // nothing here is more exposed than `cooked--apply' already assumes.
-pub use cell::{Deco, Run, RunRef, Runs};
+pub use cell::{Deco, Run, RunRef, Runs, Wrap};
 pub use image::ImageId;
 /// Exported for the same reason [`ImageId`] is: `delta_replay` renumbers the ids a
 /// drain names, since a terminal recycles them and two fed the same bytes need not agree.

@@ -20,7 +20,7 @@
 //! one the copy has at index 0, Emacs can keep the text it has and call it history rather
 //! than be sent it again; see [`Front::promote`].
 
-use super::super::cell::{BLANK, Cell, Extra, Row, RowRef, chars_before, draws_nothing};
+use super::super::cell::{BLANK, Cell, Extra, Row, RowRef, Wrap, chars_before, draws_nothing};
 use super::super::glyph;
 use super::super::screen::{Departed, Direction, Shift};
 use super::super::units::{Chars, Cols};
@@ -33,7 +33,12 @@ struct Known {
     /// Whether Emacs trimmed this row off the bottom of the primary screen's region, so
     /// the buffer holds no line for it at all; see [`Front::trim_from`].
     trimmed: bool,
-    wrapped: bool,
+    /// How the row's line ended when it was rendered. The whole of it and not just
+    /// whether it wrapped: two rows with the same cells can end differently -- `abcd `
+    /// and `abcd` at five columns both leave column 4 a default blank, but the first
+    /// filled up and the second was wrapped early by a wide character -- and Emacs marks
+    /// the newline between them differently for it. See `WrapMark' in wire.rs.
+    wrap: Wrap,
     /// The cursor's column when the row was rendered, if the cursor was on it.
     ///
     /// Rendering depends on it when the cursor is inside a run of box glyphs: Lisp cuts
@@ -251,7 +256,7 @@ impl Front {
             let row = &mut rows[index];
             row.known = true;
             row.trimmed = false;
-            row.wrapped = false;
+            row.wrap = Wrap::No;
             row.cursor = None;
             row.extras.clear();
         }
@@ -307,7 +312,7 @@ impl Front {
         // scrolled into a region holds blanks in the copy, so asking it first walked
         // every blank column of every such row.
         known.known
-            && known.wrapped == row.wrapped()
+            && known.wrap == row.wrap()
             && row.len() == self.cols
             && Cell::bytes(row.cells()) == Cell::bytes(self.cells(index))
             && known.extras.iter().eq(drawn(row.extras()))
@@ -495,7 +500,7 @@ impl Front {
         self.cells[slot..slot + cols].copy_from_slice(row.cells());
         known.known = true;
         known.trimmed = false;
-        known.wrapped = row.wrapped();
+        known.wrap = row.wrap();
         known.cursor = cursor;
         known.extras.clear();
         known.extras.extend(drawn(row.extras()).cloned());
