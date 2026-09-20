@@ -72,6 +72,7 @@ fn cell_style(t: &Term, row: usize, col: usize) -> Style {
     t.style(t.screen().row(row).unwrap().cells()[col].style())
 }
 
+mod collect;
 mod decrqss;
 mod front;
 mod hidden;

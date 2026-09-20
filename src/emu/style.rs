@@ -21,7 +21,7 @@
 use std::collections::HashMap;
 use std::hash::{BuildHasherDefault, Hasher};
 
-use super::cell::{Attrs, Color, Style};
+use super::cell::{Attrs, Color, STYLE_MAX, Style};
 
 /// The name of one rendition in a [`StyleStore`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Default)]
@@ -52,6 +52,24 @@ impl StyleId {
 /// Far past what a screen of ordinary output uses -- a coloured shell and a TUI need a
 /// few dozen -- and small enough that a child minting a rendition per character reaches
 /// it quickly and is cleaned up after rather than growing the table without limit.
+///
+/// [`StyleStore::collect`] doubles [`StyleStore::limit`] past this constant when a
+/// collection frees too little, and the true ceiling that ratchet can reach is what a
+/// rendition-per-cell flood can actually keep live: the cells of both the primary and
+/// the alternate grid, the front buffer's copy of what is shown, and the runs of
+/// whatever scrollback is still undrained. For R rows and C columns with N undrained
+/// scrollback rows -- one run per cell in the worst case, a run never joining its
+/// neighbour -- that is at most `C * (3 * R + N)`, and since `limit` only grows when a
+/// collection finds everything it marked still live, it cannot ratchet past twice that
+/// before the marks themselves stop growing. At the session's default undrained-row
+/// ceiling (`BACKLOG_HIGH_WATER`, 8,000 in `term/mod.rs`) and a generous 200x400 grid --
+/// the same one [`super::cell::Cell`]'s own field widths are sized against -- that comes
+/// to `400 * (600 + 8_000) = 3,440,000`, comfortably under the rendition field's
+/// 4,194,303 (`STYLE_MAX`, 22 bits). A caller can raise the backlog past that default,
+/// though, so `collect` also clamps `limit` at [`STYLE_MAX`] rather than trusting every
+/// caller's configuration to stay inside the margin; see
+/// `a_truecolour_flood_keeps_the_table_within_its_bound` in `term::tests::collect` for
+/// the same shape pinned at a size that stays fast to test.
 pub(crate) const STYLE_TABLE_CAPACITY: usize = 4096;
 
 /// Renditions by id, and ids by rendition; see the module comment.
@@ -194,10 +212,7 @@ impl StyleStore {
         // A freed id that was never announced does not need to be: nothing names it.
         self.unsent.retain(|id| live[id.0 as usize]);
         self.recent = [(StyleKey::DEFAULT, StyleId::DEFAULT); 2];
-        // Half full after a collection is the point to grow rather than collect again on
-        // the next few renditions, which would make a screenful of distinct colours
-        // quadratic.
-        self.limit = self.limit.max(self.ids.len() * 2);
+        self.limit = grown_limit(self.limit, self.ids.len());
     }
 
     /// The ids defined since the last call, with their renditions, for the drain to send.
@@ -288,6 +303,19 @@ impl Hasher for StyleHasher {
     }
 }
 
+/// The next [`StyleStore::limit`] after a collection leaves LIVE ids referenced.
+///
+/// Doubling LIVE makes room for a screen that keeps minting new renditions to do so for
+/// a while before it collects again, rather than on every write once it is full -- see
+/// [`StyleStore::collect`]. The `min` is the ceiling `STYLE_TABLE_CAPACITY`'s doc works
+/// out: past [`STYLE_MAX`], no id this store hands out can reach a cell anyway (an id
+/// too wide for its field degrades to the default rendition rather than aliasing, see
+/// [`super::cell::Cell::linked`]), so growing `limit` any further would only buy fewer,
+/// later collections over an id space nothing can use.
+fn grown_limit(current: usize, live: usize) -> usize {
+    current.max(live * 2).min(STYLE_MAX as usize)
+}
+
 /// The bits of STYLE that change the font; see [`StyleStore::font_bits`].
 fn font_bits(style: Style) -> u8 {
     let attrs = style.attrs;
@@ -353,6 +381,21 @@ mod tests {
         assert!(
             !store.is_full(),
             "everything is live, so the limit has to move"
+        );
+    }
+
+    #[test]
+    fn growth_never_prescribes_a_limit_past_what_a_cell_can_hold() {
+        assert_eq!(grown_limit(10, 5), 10, "a small live count is a no-op");
+        assert_eq!(
+            grown_limit(10, 100),
+            200,
+            "otherwise it doubles the live count"
+        );
+        assert_eq!(
+            grown_limit(10, STYLE_MAX as usize),
+            STYLE_MAX as usize,
+            "clamped at what the rendition field can hold, not doubled past it"
         );
     }
 

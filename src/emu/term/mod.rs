@@ -1270,6 +1270,12 @@ impl Term {
         self.state.styles.len()
     }
 
+    /// How many hyperlink destinations the store holds ids for, which a collection
+    /// keeps bounded the same way; see [`Term::styles_held`].
+    pub fn links_held(&self) -> usize {
+        self.state.links.len()
+    }
+
     pub fn screen(&self) -> &Screen {
         self.state.screen()
     }

@@ -241,9 +241,11 @@ const _: () = assert!(char::MAX as u64 >> CH_BITS == 0);
 const HEAD_MASK: u64 = (1 << LINK_SHIFT) - 1;
 
 /// Highest id each field can hold. An id past it degrades rather than aliasing; see
-/// [`Cell::linked`].
-const STYLE_MAX: u64 = (1 << STYLE_BITS) - 1;
-const LINK_MAX: u64 = (1 << LINK_BITS) - 1;
+/// [`Cell::linked`]. `pub(crate)` so [`StyleStore`](super::style::StyleStore) and
+/// [`LinkStore`](super::link::LinkStore) can clamp their own growth to what a cell can
+/// actually hold; see their `collect` methods.
+pub(crate) const STYLE_MAX: u64 = (1 << STYLE_BITS) - 1;
+pub(crate) const LINK_MAX: u64 = (1 << LINK_BITS) - 1;
 
 pub(crate) const CONTINUATION: char = '\0';
 pub(crate) const BLANK: char = ' ';

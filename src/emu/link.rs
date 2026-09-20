@@ -29,6 +29,7 @@
 
 use std::collections::HashMap;
 
+use super::cell::LINK_MAX;
 use super::fast_hash;
 use super::intern::{Ledger, dense_id};
 
@@ -76,7 +77,8 @@ pub(crate) struct LinkStore {
     /// which [`LinkStore::evict`] drops entries outright. Starts at
     /// [`MAX_TRACKED_LINKS`] and grows when a collection frees too little, exactly as
     /// `StyleStore::limit` does, so a screen genuinely showing more links than the cap
-    /// does not collect on every one of them.
+    /// does not collect on every one of them, and clamped at [`LINK_MAX`] for the same
+    /// reason `StyleStore::limit` is: see [`LinkStore::collect`].
     limit: usize,
 }
 
@@ -113,6 +115,11 @@ impl LinkStore {
         self.ledger.len() >= self.limit
     }
 
+    /// How many destinations are live.
+    pub(crate) fn len(&self) -> usize {
+        self.ledger.len()
+    }
+
     /// Free every id MARK does not report, so it can be handed to another destination.
     ///
     /// MARK is handed a function to call with each id still referenced and must report
@@ -137,10 +144,7 @@ impl LinkStore {
                 self.bytes -= uri.len();
             }
         }
-        // Half full after a collection is the point to grow rather than collect again on
-        // the next few links, which would make a screenful of distinct destinations
-        // quadratic. `StyleStore::collect` grows for the same reason.
-        self.limit = self.limit.max(self.ledger.len() * 2);
+        self.limit = grown_limit(self.limit, self.ledger.len());
     }
 
     /// Take URI as a destination, returning its id and whether Lisp has yet to see it.
@@ -202,6 +206,24 @@ impl LinkStore {
             }
         }
     }
+}
+
+/// The next `limit` after a collection leaves LIVE ids referenced.
+///
+/// The same doubling
+/// [`StyleStore::collect`](super::style::StyleStore::collect)'s own growth helper does,
+/// and for the same reason, but clamped at [`LINK_MAX`] rather than `StyleStore`'s
+/// `STYLE_MAX`. The link id is the narrower of the two fields a
+/// [`Cell`](super::cell::Cell) packs -- 21 bits against the rendition's 22 -- so the
+/// same worst case that only strains the rendition table's ceiling can cross this one:
+/// an `OSC 8` wrapped around every character (not just every rendition) of a 200x400
+/// grid plus its default 8,000 rows of undrained scrollback comes to the same
+/// `C * (3 * R + N)` = 3,440,000 that ceiling's doc works out, which is past
+/// `LINK_MAX`'s 2,097,151. So unlike the rendition table, this clamp is not only a
+/// defence against a caller raising the backlog past its default -- the unclamped bound
+/// already crosses the field width at the grid size the field was sized against.
+fn grown_limit(current: usize, live: usize) -> usize {
+    current.max(live * 2).min(LINK_MAX as usize)
 }
 
 #[cfg(test)]
@@ -279,6 +301,21 @@ mod tests {
             store.collect(|_mark| {});
         }
         assert_eq!(highest, 0, "one id, handed back and out again");
+    }
+
+    #[test]
+    fn growth_never_prescribes_a_limit_past_what_a_cell_can_hold() {
+        assert_eq!(grown_limit(10, 5), 10, "a small live count is a no-op");
+        assert_eq!(
+            grown_limit(10, 100),
+            200,
+            "otherwise it doubles the live count"
+        );
+        assert_eq!(
+            grown_limit(10, LINK_MAX as usize),
+            LINK_MAX as usize,
+            "clamped at what the link field can hold, not doubled past it"
+        );
     }
 
     #[test]
