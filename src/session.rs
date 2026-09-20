@@ -2067,10 +2067,27 @@ impl Shared {
             // shows the mode line that would name it and no keystroke can reach the
             // keymap it would change, so the sample is kept and the level rides the drain
             // `Session::set_hidden` announces when a window shows the buffer again.
+            //
+            // They also differ in when they are taken. The mode is sampled on every turn
+            // of this loop, including the one about to read, because the read is where a
+            // secret prompt arrives and the `tcsetattr` behind it follows within
+            // microseconds. The foreground is sampled only on a turn that found nothing
+            // at all -- no data, no interrupt -- which is the tick and the resample it
+            // arms. `Pty::foreground_program` costs a `tcgetpgrp` and a small `/proc`
+            // read, and taking those before every read puts them between the poll and the
+            // bytes: under a saturated machine that showed up as
+            // `shutdown_hangs_up_the_shell_rather_than_its_foreground_job` missing its
+            // hangup grace about once in a hundred runs. Nothing is lost by waiting: a
+            // child that is writing has not finished, and the tick after it stops is
+            // where a silent `exec` was always going to be caught.
             if self.sample_mode() {
                 self.announce();
             }
-            if self.sample_foreground() && !self.hidden.load(Ordering::Relaxed) {
+            if !ready
+                && !interrupted
+                && self.sample_foreground()
+                && !self.hidden.load(Ordering::Relaxed)
+            {
                 self.note();
             }
             self.retire_resample();
@@ -2405,10 +2422,11 @@ impl Shared {
     /// which is what `cooked-key-protocol-overrides' and the mode line need to name the
     /// right program.
     ///
-    /// On the tick only, and never on the read path: `Pty::foreground_program` is a
-    /// `tcgetpgrp` plus a small `/proc` read, which is nothing at ten times a second and
-    /// is not something a flood should pay per chunk. A change that follows output is
-    /// caught by the resample [`RESAMPLE_DELAY`] arms, like a termios change is.
+    /// Called only from a turn of the reader's loop that found nothing to read and no
+    /// interrupt -- the tick, and the resample [`RESAMPLE_DELAY`] arms after output.
+    /// `Pty::foreground_program` is a `tcgetpgrp` plus a small `/proc` read, which is
+    /// nothing at ten times a second and is not something a flood should pay per chunk,
+    /// nor something a read should wait behind.
     ///
     /// The first sample is not a change, however it comes out; see [`Watched`].
     fn sample_foreground(&self) -> bool {
