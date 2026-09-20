@@ -1317,11 +1317,7 @@ impl Shared {
             // is where the winner left it, and reading it here rather than waiting for the
             // reader to record it is what keeps `alive` answering no the moment this
             // returns. [`Exit::Lost`] is left for a child nobody reaped at all.
-            *exited = Some(
-                self.reap_or_kill()
-                    .or_else(|| self.pty.collected())
-                    .map_or(Exit::Lost, Exit::Status),
-            );
+            *exited = Some(self.reap_or_kill().map_or(Exit::Lost, Exit::Status));
         }
     }
 }
@@ -2068,11 +2064,18 @@ impl Shared {
 
     /// The child's exit status, after the hangup it has been sent and, failing that, a
     /// kill. `None` only for a child that cannot be reaped even then.
+    ///
+    /// A reap that loses the race to another thread answers `None` at once, the winner
+    /// having left the status in [`Pty::collected`]; that is read here, so that no caller
+    /// can report a child lost whose status is sitting there. Two callers forgot.
     fn reap_or_kill(&self) -> Option<i32> {
-        self.pty.reap(HANGUP_GRACE).or_else(|| {
-            let _ = self.pty.kill();
-            self.pty.reap(KILL_GRACE)
-        })
+        self.pty
+            .reap(HANGUP_GRACE)
+            .or_else(|| {
+                let _ = self.pty.kill();
+                self.pty.reap(KILL_GRACE)
+            })
+            .or_else(|| self.pty.collected())
     }
 
     /// The end of the reader for a pty that hung up, with the wait for a child that has
@@ -2155,19 +2158,9 @@ impl Shared {
             Ended::Aborted => {
                 let _ = self.pty.hangup();
                 Some(
-                    self.reap_or_kill()
-                        // `Pty::reap` answers `None` the instant `Pty::reaped` is already
-                        // true, without looking at what the winner left behind -- the same
-                        // gap [`Shared::linger_for_exit`] and [`Shared::reap_after_hangup`]
-                        // close by reading [`Pty::collected`] once a reap comes back empty.
-                        // Skipping it here is what let an abort that lost the race -- the
-                        // ordinary end reaping the child first, in the comment below, or
-                        // another abort doing the same -- report `Exit::Lost` for a child
-                        // whose real status was sitting in `Pty::collected` the entire
-                        // time. `Ended::Aborted` is the only caller of `reap_or_kill`, so
-                        // it is the only one that needs this said again rather than shared.
-                        .or_else(|| self.pty.collected())
-                        .map_or(Exit::Lost, Exit::Status),
+                    // Through `reap_or_kill`, which reads `Pty::collected` when the reap
+                    // itself lost the race: an abort races the ordinary end for the child.
+                    self.reap_or_kill().map_or(Exit::Lost, Exit::Status),
                 )
             }
         };
