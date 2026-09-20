@@ -595,21 +595,47 @@ a bell, must still be handled."
         (should (equal failures '(cooked-resize-requests)))
         (should (= rings 1))))))
 
-(ert-deftest cooked-frame-size-reports-answer-from-the-frame ()
-  "`19t' in cells on any frame; `15t' only where there are pixels, like `14t'."
+(defun cooked-tests--frame-size-report (rows cols)
+  "Spawn a session that asks `19t', `15t' and `11t', with ROWS and COLS stood
+in for `frame-text-lines' and `frame-text-cols', and return the bytes it got
+back.
+
+Only the cell count is stubbed, not `display-graphic-p' or the pixel
+functions: batch Emacs has no window system, and forcing `display-graphic-p'
+to claim one leads every *other* caller down there -- the palette sync, the
+graphics probe, the cell metrics -- into a real `font-info' call that signals
+\"Window system frame should be used\".  So the pixel half of the reply is
+read as the live frame actually answers it, which in batch is always
+silence, and only the cells half is a controlled table.  `11t' is xterm's
+\"not iconified\", always answered, so it is the terminator
+`cooked-tests--settle' waits for."
   (let ((out (make-temp-file "cooked-19t")))
     (unwind-protect
-        (cooked-tests--with-session (cooked-tests--reply-to "\\033[19t\\033[15t\\033[11t" out)
-          (should (cooked-tests--settle
-                   (lambda () (string-suffix-p "\e[1t" (cooked-tests--contents out)))))
-          (should (equal (cooked-tests--contents out)
-                         (concat
-                          (format "\e[9;%d;%dt" (frame-text-lines) (frame-text-cols))
-                          (if (display-graphic-p)
-                              (format "\e[5;%d;%dt" (frame-text-height) (frame-text-width))
-                            "")
-                          "\e[1t"))))
+        (cl-letf (((symbol-function 'frame-text-lines) (lambda (&optional _f) rows))
+                  ((symbol-function 'frame-text-cols) (lambda (&optional _f) cols)))
+          (cooked-tests--with-session
+              (cooked-tests--reply-to "\\033[19t\\033[15t\\033[11t" out)
+            (should (cooked-tests--settle
+                     (lambda () (string-suffix-p "\e[1t" (cooked-tests--contents out)))))
+            (cooked-tests--contents out)))
       (delete-file out))))
+
+(ert-deftest cooked-frame-size-reports-answer-from-the-frame ()
+  "`19t' answers rows and columns in cells; `15t' answers pixels, and only
+where there are any -- the rule `14t' already follows for a terminal frame.
+
+Two different cell counts, so the wire bytes below name the table's own
+numbers and not some value the plumbing happened to already hold. Whichever
+end of the pipeline forms these bytes -- Lisp reading the query at the
+moment it arrives, or the core answering from a size Lisp already pushed
+down -- the table says what the wire must carry either way."
+  (dolist (case '((24 . 80) (6 . 132)))
+    (let* ((rows (car case)) (cols (cdr case))
+           (pixels (if (display-graphic-p)
+                       (format "\e[5;%d;%dt" (frame-text-height) (frame-text-width))
+                     "")))
+      (should (equal (cooked-tests--frame-size-report rows cols)
+                      (concat (format "\e[9;%d;%dt" rows cols) pixels "\e[1t"))))))
 
 (ert-deftest cooked-osc-handler-errors-do-not-break-redisplay ()
   (cooked-tests--with-session '("/bin/sh" "-c" "printf '\\033]2;boom\\007'; printf 'after\\n'; sleep 5")
