@@ -2278,7 +2278,14 @@ impl Shared {
                 Some(
                     // Through `reap_or_kill`, which reads `Pty::collected` when the reap
                     // itself lost the race: an abort races the ordinary end for the child.
-                    self.reap_or_kill(HangupGrace::detached())
+                    //
+                    // The short grace, even though this is the reader's own thread: the
+                    // notifier is still open and the wakeup that says the session ended
+                    // goes out below, *after* this. [`HangupGrace::detached`] is for the
+                    // teardown nobody is listening to; here a buffer is waiting to be
+                    // told its child is gone, and five seconds of silence would be worse
+                    // for it than a child killed four seconds sooner.
+                    self.reap_or_kill(HangupGrace::explicit())
                         .map_or(Exit::Lost, Exit::Status),
                 )
             }
@@ -4130,6 +4137,13 @@ mod tests {
     /// kill landing on a shell that was in the middle of doing exactly what the grace
     /// exists to allow, and it reported `Status(137)`. Revert [`Pty::reap`] to a wall
     /// deadline and the slow trap here fails it every time instead of one time in sixty.
+    ///
+    /// The outer sleep is thirty seconds rather than the five minutes it once was, and
+    /// that is the one bound left in the test: a stopped clock means nothing here gives
+    /// up, so a hangup that failed to reach `sleep` -- the race
+    /// [`crate::pty::Pty::hangup`] samples the foreground group early to close -- would
+    /// otherwise hang for the whole sleep rather than say what went wrong. Thirty seconds
+    /// later it fails on `Status(9)`, which names that race exactly.
     #[test]
     fn shutdown_hangs_up_the_shell_rather_than_its_foreground_job() {
         if !std::path::Path::new("/bin/bash").exists() {
@@ -4143,7 +4157,7 @@ mod tests {
                 "--norc",
                 "-i",
                 "-c",
-                "trap 'sleep 1; exit 3' HUP; sleep 300; exit 9",
+                "trap 'sleep 1; exit 3' HUP; sleep 30; exit 9",
             ],
             Options {
                 clock: clock.clock(),
@@ -4219,19 +4233,9 @@ mod tests {
     fn an_aborted_reader_still_ends_the_session() {
         // `exec`, so the ignored disposition is the sleep's own and the hangup is
         // refused by the only process there is.
-        let clock = TestClock::new();
-        let (session, _read) = session_with(
-            &["/bin/sh", "-c", "trap '' HUP; exec sleep 300"],
-            Options {
-                clock: clock.clock(),
-                ..Options::default()
-            },
-        );
+        let (session, _read) = session(&["/bin/sh", "-c", "trap '' HUP; exec sleep 300"]);
         let pid = session.pid().as_raw();
         std::thread::sleep(Duration::from_millis(150));
-        // An abort is the reader's own exit, so it waits out the generous detached grace;
-        // wound on, this reaches the kill without sitting through five real seconds.
-        let _winding = Winding::on(&clock, HangupGrace::detached().into());
         session.shared.finish(Ended::Aborted);
         assert!(!session.alive());
         assert_eq!(alive(pid), Err(Errno::ESRCH));
@@ -4323,17 +4327,7 @@ mod tests {
     /// `sleep` would still be running and `alive` would still say so.
     #[test]
     fn a_panicking_reader_ends_the_session_and_wakes_emacs() {
-        let clock = TestClock::new();
-        let (session, read) = session_with(
-            &["/bin/sh", "-c", "trap '' HUP; echo hi; exec sleep 300"],
-            Options {
-                clock: clock.clock(),
-                ..Options::default()
-            },
-        );
-        // The panicking reader ends as an abort, and an abort pays the detached grace
-        // before it wakes Emacs; see `an_aborted_reader_still_ends_the_session`.
-        let _winding = Winding::on(&clock, HangupGrace::detached().into());
+        let (session, read) = session(&["/bin/sh", "-c", "trap '' HUP; echo hi; exec sleep 300"]);
         let pid = session.pid().as_raw();
         // Set before the child's first write can be read, so that write is the one that
         // panics; the echo is what makes sure there is a read to panic on.

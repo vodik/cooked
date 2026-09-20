@@ -769,13 +769,23 @@ impl Pty {
     /// and be killed for it at the end of the grace. A job that gets the hangup twice,
     /// once from here and once forwarded by its shell, is no worse off than one closing
     /// terminal window already leaves it.
+    ///
+    /// The foreground group is read *before* either signal goes out, not between them.
+    /// A shell that has begun to act on the hangup takes the terminal back for itself
+    /// with `tcsetpgrp` before it runs the trap, so a group read after the first `killpg`
+    /// can already be the shell's own -- and then the job the shell is still waiting on
+    /// gets no hangup at all, the trap does not run until that job ends by itself, and a
+    /// `sleep 300` turns teardown into a five minute wait. The sample is one `tcgetpgrp`
+    /// either way; taking it first is what makes the second signal land on the job that
+    /// was in the foreground when the hangup was decided on.
     pub(crate) fn hangup(&self) -> Result<()> {
         let _guard = self.reap_lock.held();
         if self.reaped() {
             return Err(Error::Reaped);
         }
+        let foreground = self.foreground();
         let result = Self::send_to(self.child, Signal::SIGHUP);
-        if let Ok(foreground) = self.foreground()
+        if let Ok(foreground) = foreground
             && foreground != self.child
         {
             let _ = Self::send_to(foreground, Signal::SIGHUP);
