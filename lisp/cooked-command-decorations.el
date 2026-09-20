@@ -489,7 +489,28 @@ sits on; see `cooked--command-around'."
         (cooked-command-decorations--act command)
       (user-error "cooked: no command here"))))
 
-(define-key cooked-mode-map (kbd "C-c C-o") #'cooked-command-decorations-menu)
+;; This layer's opt-in model is "load it to turn it on" (see the Commentary
+;; above), so the key belongs here rather than in `cooked-mode.el''s
+;; `defvar-keymap' -- the core map would otherwise carry a binding to a
+;; command that does not exist until a user opts in, which is the same
+;; "autoload that forwards to a second file" shape `cooked.el' already
+;; explains is not worth chasing.  But a bare top-level `keymap-set' has the
+;; reload hazard the mode-map ticket removed: re-evaluating this file (a
+;; package upgrade, an `eval-buffer') would put the key back after a user
+;; removed it.  Guarding on `featurep' is the same trick `defvar' plays for a
+;; variable, applied to one key in someone else's keymap: nil only until the
+;; `provide' below runs once, so a later reload leaves a user's
+;; `keymap-unset' alone.
+;;
+;; Not `C-c C-o': that key is `cooked-delete-output' (see docs/KEYBOARD.md),
+;; reached through the `<remap> <comint-delete-output>' entry in
+;; `cooked-mode-map', and a direct `keymap-set' on the same key in a child
+;; map wins over a remap in the parent, silently taking the key away from a
+;; documented core command the moment this optional layer loads.  `C-c M-n' /
+;; `C-c M-o' / `C-c M-p' / `C-c M-x' are cooked's own precedent for a
+;; Meta-letter extra under the `C-c' prefix; `M-m' is free.
+(unless (featurep 'cooked-command-decorations)
+  (keymap-set cooked-mode-map "C-c M-m" #'cooked-command-decorations-menu))
 
 (provide 'cooked-command-decorations)
 ;;; cooked-command-decorations.el ends here

@@ -2307,15 +2307,17 @@ completion UI, the built-in one included, is on the far side of that same test."
     ("C-c C-e" . cooked-send-string)
     ("C-c C-l" . cooked-refresh)
     ("C-c C-n" . cooked-next-command)
-    ;; Added by cooked-command-decorations.el, which is a layer of its own and
-    ;; still binds into the map from the top level of the file.
-    ("C-c C-o" . cooked-command-decorations-menu)
     ("C-c C-p" . cooked-previous-command)
     ("C-c C-q" . cooked-send-literal-key)
     ("C-c C-v" . cooked-toggle-peek)
     ("C-c C-y" . cooked-paste)
     ("C-c C-z" . cooked-suspend)
     ("C-c ESC ESC" . cooked-send-escape)
+    ;; Added by cooked-command-decorations.el, which is a layer of its own and
+    ;; still binds into the map from the top level of the file -- guarded
+    ;; there against reloading, since that file is opt-in by load rather than
+    ;; by a mode-map entry; see cooked-command-decorations-menu-key-is-bound.
+    ("C-c M-m" . cooked-command-decorations-menu)
     ("C-c M-n" . cooked-next-link)
     ("C-c M-o" . cooked-clear-scrollback)
     ("C-c M-p" . cooked-previous-link)

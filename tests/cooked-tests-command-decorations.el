@@ -395,7 +395,18 @@ from a click on a marker that happens to still be there."
       (should (eq (cooked-command-decorations--command-at (point)) command)))))
 
 (ert-deftest cooked-command-decorations-menu-key-is-bound ()
-  (should (eq (lookup-key cooked-mode-map (kbd "C-c C-o")) #'cooked-command-decorations-menu)))
+  (should (eq (lookup-key cooked-mode-map (kbd "C-c M-m")) #'cooked-command-decorations-menu)))
+
+(ert-deftest cooked-command-decorations-menu-key-survives-reloading-the-file ()
+  "The same reload hazard `cooked-mode-map-survives-reloading-the-file' pins
+for the core map, one layer out: re-evaluating this file must not put back a
+key a user removed."
+  (unwind-protect
+      (progn
+        (keymap-unset cooked-mode-map "C-c M-m")
+        (load (locate-library "cooked-command-decorations") nil t)
+        (should-not (lookup-key cooked-mode-map (kbd "C-c M-m"))))
+    (keymap-set cooked-mode-map "C-c M-m" #'cooked-command-decorations-menu)))
 
 (provide 'cooked-tests-command-decorations)
 ;;; cooked-tests-command-decorations.el ends here
