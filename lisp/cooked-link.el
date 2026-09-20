@@ -565,9 +565,9 @@ than an optimisation.  The caller takes its old path on nil, so the ordinary
 scan is unchanged and the only thing a screen of short lines pays for this
 feature is the property search that answers nil.
 
-A row the emulator wrapped after blank cells is marked `blank' rather than t,
-and is joined with a space: its trailing blanks were never inserted, and
-without one \"see https://e.x/abc\" and \"end\" would read as one URL.
+A row the emulator wrapped after blank cells is marked with an integer rather
+than t, and is joined with a space: its trailing blanks were never inserted,
+and without one \"see https://e.x/abc\" and \"end\" would read as one URL.
 
 `cooked-link--join-rows' bounds the run of rows joined into one line.  The count
 is per logical line: a hard newline inside a piece ends the line it was counting
@@ -589,7 +589,7 @@ and the row after it starts a new one from zero."
         ;; A row whose cells ended in blanks is joined with one blank, standing
         ;; where its newline stood, so every offset after it still maps to the
         ;; position it did.  See `cooked--mark-row-wrap'.
-        (when (and join (eq (get-text-property wrap 'cooked-wrap) 'blank))
+        (when (and join (integerp (get-text-property wrap 'cooked-wrap)))
           (setq piece (concat piece " ")))
         (when join (setq joined t))
         (push (cons offset pos) chunks)

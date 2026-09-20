@@ -210,8 +210,10 @@ rows joined by newlines -- see `cooked--render-rows' -- so START is where that
 row's text begins in TEXT, WIDTH how many grid cells it occupies, UNIFORM t
 when every character of it is one byte on one cell, `glyph' when the ones that
 are not are box glyphs, and nil otherwise, WRAPPED whether the row below
-continues this row's logical line -- t, or `blank' when blanks of that line
-stand between the two -- and HASH a key for its layout.  All four
+continues this row's logical line -- t, or an integer when blanks of that line
+stand between the two, the columns of that integer a wide character's early
+wrap left rather than blanks of the line, zero for an ordinary wrap -- and
+HASH a key for its layout.  All four
 are by-products of the core building the row; WIDTH, UNIFORM and HASH are
 `cooked--guard-row-width's and WRAPPED is `cooked--mark-row-wrap's, and
 all four are read by `cooked--render-rows' rather than here.  START is read
@@ -1156,20 +1158,29 @@ after it, and the rows below are what gets rewritten."
 (defun cooked--wrap-blanks (newline cols)
   "Blank cells the row ending at NEWLINE had before it wrapped, at COLS wide.
 
-Nonzero only for a newline marked `blank': the row was written without the
-blanks the child left at its end, and a rewrap puts those cells back inside
-the line.  On a five-column screen `ab' wrapped with three blanks after it,
-and at ten columns the line reads `ab   cd', so a position on `c' is five
-characters into it rather than two.  A row a wide character wrapped early is
-marked t and counts none, since the columns it stops short of are that
-character's room rather than cells of the line; see `cooked--mark-row-wrap'."
-  (if (eq (get-text-property newline 'cooked-wrap) 'blank)
-      (let ((start (max (save-excursion (goto-char newline)
-                                        (line-beginning-position))
-                        (cooked--screen-start-position))))
-        (max 0 (- cols (string-width
-                        (buffer-substring-no-properties start newline)))))
-    0))
+Nonzero only for a newline whose `cooked-wrap' property is an integer: the
+row was written without the blanks the child left at its end, and a rewrap
+puts those cells back inside the line.  On a five-column screen `ab' wrapped
+with three blanks after it, and at ten columns the line reads `ab   cd', so a
+position on `c' is five characters into it rather than two.
+
+The property's value is how many of the row's own last columns belong to a
+wide character that wrapped early instead of to the line -- zero for an
+ordinary wrap -- and is subtracted back out, since those columns are not
+blanks to put anywhere.  `ab' followed by two of the child's own blanks and
+then a two-column character with one column of room left is marked 1: the
+row is four columns short of five, and one of those four is the character's
+leftover room rather than the two blanks that are really there.  See
+`cooked--mark-row-wrap'."
+  (let ((pad (get-text-property newline 'cooked-wrap)))
+    (if (integerp pad)
+        (let ((start (max (save-excursion (goto-char newline)
+                                          (line-beginning-position))
+                          (cooked--screen-start-position))))
+          (max 0 (- cols
+                    (string-width (buffer-substring-no-properties start newline))
+                    pad)))
+      0)))
 
 (defun cooked--logical-place (position base cols)
   "POSITION as (LINES . CHARS), for carrying it across a rewrap of the screen.
@@ -1177,12 +1188,12 @@ character's room rather than cells of the line; see `cooked--mark-row-wrap'."
 LINES is how many newlines that end a line lie between BASE, from
 `cooked--logical-base', and POSITION, and CHARS is how far into its logical
 line POSITION is.  A newline marked `cooked-wrap' is a row boundary rather
-than a line end, and counts nothing; the blanks before a `blank' one count,
-measured at COLS, the width the rows were laid out at.  The rewrap chunks each
-logical line afresh and leaves its characters as they were, so the pair names
-the same character before and after: `hello world' wrapped at five columns,
-with the mark on `w' at row 1 column 1, is (0 . 6), and at twenty columns
-that is row 0 column 6."
+than a line end, and counts nothing; the blanks before one marked with an
+integer count, measured at COLS, the width the rows were laid out at.  The
+rewrap chunks each logical line afresh and leaves its characters as they were,
+so the pair names the same character before and after: `hello world' wrapped
+at five columns, with the mark on `w' at row 1 column 1, is (0 . 6), and at
+twenty columns that is row 0 column 6."
   (save-excursion
     (goto-char base)
     (let ((lines 0)
@@ -1255,7 +1266,7 @@ rewrap pushed its character up into history."
   "Record on the newline at EOL whether the row it ends was soft-wrapped.
 
 The `cooked-wrap' property, and this is the only place it is written: WRAP is
-the row table's own fourth field, one of nil, t and `blank', so the mark is
+the row table's own fourth field, nil, t or an integer, so the mark is
 what the core says rather than anything inferred here.  Non-nil means the row
 below carries the rest of a logical line the child never broke.  The buffer
 has no other way to know that.  A screen row is one buffer line, so a line the
@@ -1285,19 +1296,20 @@ unterminated -- see `cooked--fit-screen' -- so a wrap on it has no newline to
 sit on.  The mark is owed instead, and paid when extending the region gives the
 row its newline; see `cooked--owed-wrap'.
 
-`blank' rather than t says the row was rendered without blanks that are
+An integer rather than t says the row was rendered without blanks that are
 interior to its line.  A row is inserted without its trailing blanks, wrapped
 or not, so cells the child left blank before the line went on to the next row
 are missing from the buffer and nothing in it says so.  At twenty columns
 \"see https://e.x/abc end\" leaves \"see https://e.x/abc\" on the first row,
 nineteen cells wide, and \"end\" on the second; joined at the newline with
 nothing between them they read as \"https://e.x/abcend\".
-`cooked-link--join-wrapped' joins a `blank' row with a space instead, and
-`cooked--wrap-blanks' counts the missing cells back in.  Only the core can
-tell that row from one a wide character wrapped early -- `日本語' at five
-columns leaves column 4 to the `語' that moved down whole, and those cells
-belong to no character of the line -- which is why the mark arrives rather
-than being worked out from the width here."
+`cooked-link--join-wrapped' joins such a row with a space instead, and
+`cooked--wrap-blanks' counts the missing cells back in.  The integer itself
+is how many of the row's own last columns are not blanks of the line but a
+wide character's leftover room -- `日本語' at five columns leaves column 4 to
+the `語' that moved down whole, and that cell belongs to no character of the
+line -- zero when there is no such room, which is why the mark carries a
+number rather than being worked out from the width here."
   (if (>= eol (point-max))
       (cooked--owe-wrap eol wrap)
     (let ((marked (get-text-property eol 'cooked-wrap)))

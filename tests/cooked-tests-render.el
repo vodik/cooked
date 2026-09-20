@@ -1536,9 +1536,10 @@ the cursor is kept on its character the same way."
 
 The oracle for `cooked--logical-place' and `cooked--wrap-blanks'.  Emacs carries
 the mark across a rewrap by counting its own `cooked-wrap' newlines and the
-blanks a `blank' one hides, while the core carries an OSC 133 mark on the same
-cell by re-laying `Logical' and reporting where it landed -- two mechanisms with
-nothing in common but the rule that a wrapped row is the screen's full width.
+blanks a row marked with an integer hides, while the core carries an OSC 133
+mark on the same cell by re-laying `Logical' and reporting where it landed --
+two mechanisms with nothing in common but the rule that a wrapped row is the
+screen's full width.
 Put both on `d' of a line whose first row is `ab' and eight blanks, and every
 width has to leave them on the same character: agreeing with each other is the
 only check either one has that it agrees with the grid.
@@ -1638,6 +1639,30 @@ different one at every width where they are not."
         (should (equal (cooked-tests--at (point) 1)
                        (if (= cols 30) " " "\n"))))
       (should (equal (cooked-tests--text) "one\nab\ncd")))))
+
+(ert-deftest cooked-a-rewrap-counts-real-blanks-before-a-wide-wrap-exactly ()
+  "A row with its own trailing blanks that then wraps early is not padded twice.
+
+`ab' followed by two of the child's own blanks left only one column of room
+for a two-column character, which moved to the row below whole.
+`cooked--wrap-blanks' used to count three blanks there -- the row's own two
+plus the character's one column of leftover room, indistinguishable by width
+alone -- so a mark past the wrap on `c' rewrapped one character short and
+landed on `d' instead.  The core now reports the one column of padding
+separately, and the mark stays on `c' at every width."
+  (let ((cooked-rejoin-wrapped-lines t))
+    (cooked-tests--with-fed-screen 5 5
+      (cooked-tests--fed "one\r\nab  語cd")
+      (should (equal (cooked-tests--text) "one\nab\n語cd"))
+      (set-mark (save-excursion
+                  (goto-char (cooked--screen-start-position))
+                  (search-forward "語")
+                  (point)))
+      (should (equal (cooked-tests--at (mark t) 1) "c"))
+      (dolist (cols '(30 7 5))
+        (cooked-tests--fed-resize 5 cols)
+        (should (equal (cooked-tests--at (mark t) 1) "c")))
+      (should (equal (cooked-tests--text) "one\nab\n語cd")))))
 
 (ert-deftest cooked-a-row-scrolled-above-a-status-line-keeps-what-was-on-it ()
   "A region from the top row scrolls into history as the whole screen does.
