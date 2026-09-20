@@ -33,14 +33,27 @@ const READ_CHUNK: usize = 64 * 1024;
 /// (12 MB/s, `OSC 133` back to back) is five milliseconds, a third of a redisplay
 /// interval, spent by Emacs doing nothing.
 ///
-/// 8KB because the two costs meet there. The check between slices is an atomic load and
-/// a bounds test, so eight of them per read is nothing measurable next to parsing 64KB;
-/// what a smaller slice would buy is a shorter worst-case wait, and at 8KB that wait is
-/// already under a millisecond even for the slowest input above and about 90us for
-/// ordinary text. Going to 1KB would multiply the loop overhead eightfold to shave off
-/// what nobody can perceive, and it would also cut more parses in two -- see
-/// [`Shared::feed`] on why a slice boundary is not free.
-const PARSE_SLICE: usize = 8 * 1024;
+/// 1KB, measured rather than assumed to be too small. [`HANDOFF_YIELDS`] records that
+/// cutting this from 8KB to 1KB takes the contended 99th percentile of the wait from
+/// 33us to 12us; what that measurement left open was the other side of the trade --
+/// eight times as many slice boundaries, each an atomic load and a bounds test, and
+/// eight times as many chances for a parse to be cut in two at a boundary [`Shared::
+/// feed`] then has to resume rather than restart. `session::tests::
+/// feed_throughput_under_contention` answers it: a fixed 400,000-line corpus through
+/// [`Shared::feed`] against a waiter taking the lock every 8ms, the same shape `cd3fe58`
+/// used to measure the wait itself, run under `perf stat -e instructions:u,cycles:u` on
+/// the release binary at 8, 4, 2 and 1KB, five runs each with the minimum taken and
+/// `/proc/loadavg` at 5 to 11 throughout (other agents were on the machine). The
+/// instruction counts -- the reliable figure on a machine other agents are also
+/// running on, where wall clock and even `cycles:u` are not -- were 2,893,057,696 at
+/// 8KB and 2,902,687,602, 2,900,734,548 and 2,902,176,890 at 4, 2 and 1KB respectively:
+/// every smaller setting is within 0.33% of the 8KB baseline, well under the under-0.5%
+/// bar this was held to. `cycles:u` moved by up to 6% between settings in the same runs
+/// but with no consistent direction, which is what scheduling noise from a loaded
+/// machine looks like, not a real cost. So the extra slice boundaries are exactly as
+/// cheap as they look on paper -- a handful of atomic loads against 2.9 billion
+/// instructions of parsing 400,000 lines -- and 1KB buys the shorter wait for nothing.
+const PARSE_SLICE: usize = 1024;
 
 /// How many times the reader yields its timeslice to let a waiting Emacs thread take the
 /// terminal lock before carrying on regardless; see [`Shared::feed`].
@@ -4263,5 +4276,64 @@ mod tests {
             wrong.is_none(),
             "line out of order or cut in two: {wrong:?}"
         );
+    }
+
+    /// What a smaller [`PARSE_SLICE`] costs, measured rather than assumed.
+    ///
+    /// The HANDOFF_YIELDS docstring and `cd3fe58` measured what a smaller slice buys --
+    /// a shorter worst-case wait for the lock -- but not what it costs, because every
+    /// row in `tests/throughput.rs` calls `Term::feed` directly and never crosses a
+    /// slice boundary at all. This is the honest version: a fixed corpus through
+    /// `Shared::feed` -- the method that actually slices -- with a waiter thread
+    /// standing in for Emacs, taking the lock every 8ms the way `cd3fe58` did (`Session::
+    /// ready` on a real drain cycle) so the count includes both the parse and the
+    /// handoff's yields, not the parse alone.
+    ///
+    /// Not `#[bench]`: nightly-only, and cargo's stable harness already gives repeatable
+    /// isolation when run with `--exact` against one test and nothing else matching.
+    /// Run under `perf stat -e instructions:u,cycles:u` with `PARSE_SLICE` edited to 8,
+    /// 4, 2 and 1 KB and the crate rebuilt `--release` for each setting:
+    ///
+    /// ```text
+    /// cargo test --release --lib \
+    ///   session::tests::feed_throughput_under_contention -- --ignored --exact
+    /// ```
+    ///
+    /// A child that only sleeps, as above: the corpus fed is the only parse in flight,
+    /// and its size (400,000 lines) is large enough that a handful of milliseconds of
+    /// process startup and test-harness overhead -- fixed across every `PARSE_SLICE`
+    /// setting -- does not dominate the count.
+    #[test]
+    #[ignore = "benchmark"]
+    fn feed_throughput_under_contention() {
+        const LINES: usize = 400_000;
+        let data: Vec<u8> = (0..LINES)
+            .flat_map(|i| {
+                format!("line {i:06} the quick brown fox jumps over the lazy dog\r\n").into_bytes()
+            })
+            .collect();
+        let (session, _read) = session(&["/bin/sh", "-c", "sleep 30"]);
+
+        let running = AtomicBool::new(true);
+        std::thread::scope(|scope| {
+            let waiter = scope.spawn(|| {
+                let mut acquisitions = 0usize;
+                while running.load(Ordering::SeqCst) {
+                    drop(session.term());
+                    acquisitions += 1;
+                    std::thread::sleep(Duration::from_millis(8));
+                }
+                acquisitions
+            });
+            let (drawable, outbound) = session.shared.feed(&data, false);
+            running.store(false, Ordering::SeqCst);
+            assert!(drawable, "four hundred thousand lines are worth drawing");
+            assert!(outbound.is_empty(), "plain text owes the child nothing");
+            let acquisitions = waiter.join().expect("waiter");
+            // A few acquisitions at minimum, so a run where the parse finished before
+            // the waiter's first 8ms tick -- which would silently measure an
+            // uncontended feed -- fails loudly instead of reporting a number.
+            assert!(acquisitions > 0, "the waiter never contended for the lock");
+        });
     }
 }
