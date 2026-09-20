@@ -22,6 +22,7 @@ use std::collections::HashMap;
 use std::hash::{BuildHasherDefault, Hasher};
 
 use super::cell::{Attrs, Cell, Color, RunRef, STYLE_MAX, Style};
+use super::units::Chars;
 
 /// The name of one rendition in a [`StyleStore`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Default)]
@@ -44,6 +45,47 @@ impl StyleId {
     /// The id a wire value or a test names. The store is what gives it a meaning.
     pub const fn from_raw(value: u32) -> Self {
         Self(value)
+    }
+}
+
+/// The bits of one rendition that change the font Emacs draws it in: bold, faint and
+/// italic, the attributes `cooked--ascii-fixed-pitch-p' probes a font for.
+///
+/// The rest of a rendition -- its colours, its underline, its inverse -- leaves every
+/// glyph the width it had, so a row whose text is unchanged and whose fonts are unchanged
+/// occupies the same columns as the one Emacs already shows. That is the whole of what a
+/// row's layout hash needs of a rendition, which is why the drain carries these three
+/// bits per id rather than the renditions themselves.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct FontBits(u8);
+
+impl FontBits {
+    /// A rendition that leaves the font alone, which is what an id no table entry covers
+    /// reads as.
+    pub const PLAIN: Self = Self(0);
+
+    /// What a run of CHARS characters starting AT characters into the row contributes to
+    /// the row's layout hash, or `None` where the rendition leaves the font alone.
+    ///
+    /// Where the run starts and how long it is are part of it: `\e[1mab\e[m cd` and
+    /// `ab \e[1mcd\e[m` hold the same text and the same three bits, and Emacs lays them
+    /// out differently.
+    pub(crate) fn in_row(self, at: Chars, chars: Chars) -> Option<u64> {
+        (self != Self::PLAIN)
+            .then(|| ((at.get() as u64) << 32) | ((chars.get() as u64) << 8) | u64::from(self.0))
+    }
+}
+
+impl From<Style> for FontBits {
+    fn from(style: Style) -> Self {
+        let attrs = style.attrs;
+        Self(
+            [Attrs::BOLD, Attrs::FAINT, Attrs::ITALIC]
+                .iter()
+                .enumerate()
+                .filter(|(_, flag)| attrs.contains(**flag))
+                .fold(0, |bits, (bit, _)| bits | 1 << bit),
+        )
     }
 }
 
@@ -85,9 +127,9 @@ pub(crate) struct StyleStore {
     /// pen and the blank an erase leaves, so the hash map is consulted only when the pen
     /// actually changes.
     recent: [(StyleKey, StyleId); 2],
-    /// For each slot, the bits of its rendition that change the font: bold, faint and
-    /// italic. See [`StyleStore::font_bits`].
-    fonts: Vec<u8>,
+    /// For each slot, the bits of its rendition that change the font. See
+    /// [`StyleStore::font_bits`].
+    fonts: Vec<FontBits>,
     /// Ids defined or redefined since Lisp was last told, in the order they were made.
     unsent: Vec<StyleId>,
     /// How many live renditions trigger a collection. Starts at
@@ -102,7 +144,7 @@ impl Default for StyleStore {
         ids.insert(StyleKey::of(Style::default()), StyleId::DEFAULT);
         Self {
             styles: vec![Style::default()],
-            fonts: vec![0],
+            fonts: vec![FontBits::PLAIN],
             ids,
             free: Vec::new(),
             recent: [(StyleKey::DEFAULT, StyleId::DEFAULT); 2],
@@ -151,13 +193,13 @@ impl StyleStore {
         let id = match self.free.pop() {
             Some(id) => {
                 self.styles[id.0 as usize] = style;
-                self.fonts[id.0 as usize] = font_bits(style);
+                self.fonts[id.0 as usize] = style.into();
                 id
             }
             None => {
                 let id = StyleId(self.styles.len() as u32);
                 self.styles.push(style);
-                self.fonts.push(font_bits(style));
+                self.fonts.push(style.into());
                 id
             }
         };
@@ -208,12 +250,11 @@ impl StyleStore {
         self.styles.get(id.0 as usize).copied().unwrap_or_default()
     }
 
-    /// Which of each id's renditions change the font, indexed by id: bold is 1, faint 2 and
-    /// italic 4, the attributes `cooked--ascii-fixed-pitch-p' probes a font for.
+    /// Which of each id's renditions change the font, indexed by id.
     ///
     /// What a row's layout hash needs of a rendition, handed over with the drain so the
     /// hash can be taken where the rows are encoded, without the store.
-    pub(crate) fn font_bits(&self) -> &[u8] {
+    pub(crate) fn font_bits(&self) -> &[FontBits] {
         &self.fonts
     }
 
@@ -351,16 +392,6 @@ fn grown_limit(current: usize, live: usize) -> usize {
     current.max(live * 2).min(STYLE_MAX as usize)
 }
 
-/// The bits of STYLE that change the font; see [`StyleStore::font_bits`].
-fn font_bits(style: Style) -> u8 {
-    let attrs = style.attrs;
-    [Attrs::BOLD, Attrs::FAINT, Attrs::ITALIC]
-        .iter()
-        .enumerate()
-        .filter(|(_, flag)| attrs.contains(**flag))
-        .fold(0, |bits, (bit, _)| bits | 1 << bit)
-}
-
 #[cfg(test)]
 mod tests {
     use super::super::cell::Color;
@@ -432,6 +463,39 @@ mod tests {
             STYLE_MAX as usize,
             "clamped at what the rendition field can hold, not doubled past it"
         );
+    }
+
+    /// The three bits the layout hash needs, and only those three: a rendition Emacs
+    /// draws in another font lays its row out differently, while one it merely colours
+    /// differently does not.
+    #[test]
+    fn font_bits_are_the_three_attributes_that_change_a_glyph_s_width() {
+        let of = |attrs| FontBits::from(Style { attrs, ..red(9) });
+        assert_eq!(of(Attrs::NONE), FontBits::PLAIN);
+        assert_eq!(of(Attrs::UNDERLINE | Attrs::REVERSE), FontBits::PLAIN);
+        assert_ne!(of(Attrs::BOLD), FontBits::PLAIN);
+        assert_ne!(of(Attrs::FAINT), of(Attrs::BOLD));
+        assert_ne!(of(Attrs::ITALIC), of(Attrs::BOLD));
+        assert_eq!(
+            of(Attrs::BOLD | Attrs::UNDERLINE),
+            of(Attrs::BOLD),
+            "the colour and the underline leave every glyph the width it had"
+        );
+    }
+
+    /// What a run contributes to its row's hash carries where the run is, so the same
+    /// text with the same fonts in another order is a different layout.
+    #[test]
+    fn a_font_run_carries_its_place_in_the_row() {
+        let bold = FontBits::from(Style {
+            attrs: Attrs::BOLD,
+            ..Style::default()
+        });
+        let (at, chars) = (Chars::new(3), Chars::new(2));
+        assert_eq!(FontBits::PLAIN.in_row(at, chars), None);
+        assert_ne!(bold.in_row(at, chars), None);
+        assert_ne!(bold.in_row(Chars::new(4), chars), bold.in_row(at, chars));
+        assert_ne!(bold.in_row(at, Chars::new(1)), bold.in_row(at, chars));
     }
 
     impl Style {

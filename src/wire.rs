@@ -6,7 +6,7 @@
 //! crosses as a bare symbol is spelled once here.
 
 use crate::emu::stream::Filter;
-use crate::emu::style::StyleId;
+use crate::emu::style::{FontBits, StyleId};
 use crate::emu::{
     self, Anchor, Bytes, Chars, Color, Cols, CursorShape, DamagedRow, Deco, Event, ImageData,
     ImageFormat, ImageId, KeyEncoding, LinkId, Mark, MarkId, RunRef, Runs, Style, Wrap,
@@ -370,7 +370,7 @@ pub(crate) struct Block<'a, 'e> {
     /// `StyleStore::font_bits`. Read only for the layout hash, which is why an empty
     /// table -- scrollback, the comint filter -- costs nothing but a hash that ignores
     /// fonts where nothing reads it.
-    font_bits: &'a [u8],
+    font_bits: &'a [FontBits],
     /// Leave the LINK field of every record zero, for an encoding whose consumer has no
     /// table to resolve an id through.
     unlinked: bool,
@@ -635,7 +635,7 @@ pub(crate) fn wire_layout() -> Vec<WireConst> {
 
 impl<'a, 'e> Block<'a, 'e> {
     /// A block whose layout hashes read font bits from FONT_BITS.
-    fn new(font_bits: &'a [u8]) -> Self {
+    fn new(font_bits: &'a [FontBits]) -> Self {
         Self {
             font_bits,
             ..Self::default()
@@ -756,13 +756,9 @@ impl<'a, 'e> Block<'a, 'e> {
             .font_bits
             .get(run.style.get() as usize)
             .copied()
-            .unwrap_or(0);
-        if font != 0 {
-            let at = (self.offset - self.row_start).get() as u64;
-            self.fonts = emu::mix(
-                self.fonts,
-                (at << 32) | ((chars.get() as u64) << 8) | u64::from(font),
-            );
+            .unwrap_or(FontBits::PLAIN);
+        if let Some(mixed) = font.in_row(self.offset - self.row_start, chars) {
+            self.fonts = emu::mix(self.fonts, mixed);
         }
         if !run.style.is_default() || run.link.is_some() {
             self.push_style(chars, run.style, run.link);
@@ -775,7 +771,7 @@ impl<'a, 'e> Block<'a, 'e> {
     ///
     /// For a row sent as an edit: the replacement is only part of the row, and the width
     /// guard and the wrap mark still need the measurements of all of it.
-    fn measure(font_bits: &[u8], runs: &Runs, wrap: Wrap, width: usize) -> BlockRow {
+    fn measure(font_bits: &[FontBits], runs: &Runs, wrap: Wrap, width: usize) -> BlockRow {
         let mut block = Block::new(font_bits);
         for run in runs {
             block.push_run(run);
@@ -1116,6 +1112,7 @@ fn event_to_lisp<'e>(
 mod tests {
     use super::*;
     use crate::emu::Run;
+    use crate::emu::cell::{Attrs, Color};
 
     /// The keys a plist literal in SOURCE starting at MARKER names, in order.
     fn plist_keys(source: &str, marker: &str) -> Vec<String> {
@@ -1388,7 +1385,19 @@ mod tests {
     fn a_row_hash_changes_with_text_and_font_and_not_with_colour() {
         // Id 1 is bold and id 2 red, which is what the font table says of them.
         let (plain, bold, red) = (StyleId::DEFAULT, StyleId::from_raw(1), StyleId::from_raw(2));
-        let fonts = [0, 1, 0];
+        let fonts = [
+            FontBits::PLAIN,
+            Style {
+                attrs: Attrs::BOLD,
+                ..Style::default()
+            }
+            .into(),
+            Style {
+                fg: Color::Indexed(1),
+                ..Style::default()
+            }
+            .into(),
+        ];
         let hash = |runs: &[Run]| {
             let mut block = Block::new(&fonts);
             push(&mut block, runs);

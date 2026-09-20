@@ -161,7 +161,7 @@ pub use image::ImageId;
 /// drain names, since a terminal recycles them and two fed the same bytes need not agree.
 pub use link::LinkId;
 pub use screen::{Direction, Shift};
-pub use style::StyleId;
+pub use style::{FontBits, StyleId};
 pub use term::{
     BACKLOG_HIGH_WATER, DamagedRow, Delta, Edit, Feed, Levels, Progress, Reply, ReplyKind,
     Scrolled, Term,

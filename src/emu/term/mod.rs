@@ -14,7 +14,7 @@ use super::parser::{OscCode, Params, Parser, Perform};
 use super::png::png_dimensions;
 use super::screen::{Cursor, Erase, Evicted, Resize, Screen, Shift};
 use super::sixel;
-use super::style::{StyleId, StyleStore};
+use super::style::{FontBits, StyleId, StyleStore};
 use super::text::{self, Segmenter, Step, Width};
 use super::units::{Chars, Cols};
 use super::utf8::{Decoder, Piece, PrintableAscii};
@@ -539,12 +539,12 @@ pub struct Delta {
     /// meaning.
     pub styles: Vec<(StyleId, Style)>,
     /// Which renditions change the font, indexed by [`StyleId`], for the layout hash the
-    /// row table carries; see `StyleStore::font_bits`.
+    /// row table carries; see [`FontBits`] and `StyleStore::font_bits`.
     ///
     /// Empty on a drain with no `rows`, which is every drain that left the screen out and
     /// every whole drain of a child that only scrolled: the hash is the one reader, and a
     /// block with no row to hash reads nothing.
-    pub fonts: Vec<u8>,
+    pub fonts: Vec<FontBits>,
     /// Scrolled-off lines, already reduced to styled runs.
     pub scrolled: Vec<Scrolled>,
     /// Absolute index of `scrolled`'s first line, so an [`Anchor`] can be told apart
