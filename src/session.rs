@@ -2247,11 +2247,7 @@ mod tests {
 
     fn session_with(argv: &[&str], options: Options) -> (Session, OwnedFd) {
         let (read, write) = pipe();
-        let size = Winsize {
-            rows: 24,
-            cols: 80,
-            cell: Default::default(),
-        };
+        let size = Winsize::new(24, 80);
         (
             Session::spawn(
                 argv,
@@ -3713,11 +3709,7 @@ mod tests {
         let session = Session::spawn(
             &["/bin/sh", "-c", &script],
             &[("PATH", "/usr/bin:/bin")],
-            Winsize {
-                rows: 24,
-                cols: 80,
-                cell: Default::default(),
-            },
+            Winsize::new(24, 80),
             None,
             wake,
             Options::default(),
@@ -4079,11 +4071,11 @@ mod tests {
         ]);
         wait_for(&session, |u| rendered(u).contains("ready"));
         session
-            .resize(Winsize {
-                rows: 12,
-                cols: 40,
-                cell: CellMetrics::new(10, 20),
-            })
+            .resize(Winsize::with_cell(
+                12,
+                40,
+                CellMetrics::new(10, 20).expect("nonzero"),
+            ))
             .expect("resize");
         // The answer to `2048 h` first, sent by the reader as it parsed the request, then
         // the report the resize owes.
@@ -4107,11 +4099,7 @@ mod tests {
         let started = std::time::Instant::now();
         for n in 0..10_000u16 {
             session
-                .resize(Winsize {
-                    rows: 24 + n % 2,
-                    cols: 80,
-                    cell: Default::default(),
-                })
+                .resize(Winsize::new(24 + n % 2, 80))
                 .expect("resize");
             // Checked as it goes, so a regression fails in seconds rather than hours.
             assert!(
@@ -4153,13 +4141,7 @@ mod tests {
     #[test]
     fn resize_reaches_the_child() {
         let (session, _read) = session(&["/bin/sh", "-c", "sleep 0.3; stty size"]);
-        session
-            .resize(Winsize {
-                rows: 12,
-                cols: 40,
-                cell: Default::default(),
-            })
-            .expect("resize");
+        session.resize(Winsize::new(12, 40)).expect("resize");
         let update = wait_for_within(&session, 10.0, |u| rendered(u).contains("12 40"));
         assert!(rendered(&update).contains("12 40"));
     }

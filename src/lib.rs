@@ -819,13 +819,12 @@ fn set_tuning<'e>(env: Env<'e>, args: &[Value<'e>]) -> Result<Value<'e>> {
 fn spawn<'e>(env: Env<'e>, args: &[Value<'e>]) -> Result<Value<'e>> {
     let argv = strings(env, args[0])?;
     let vars = pairs(env, args[1])?;
-    let size = Winsize {
-        rows: env.from_lisp::<u16>(args[2])?.max(1),
-        cols: env.from_lisp::<u16>(args[3])?.max(1),
-        // Reported by the first resize rather than at spawn: the buffer usually has no
-        // window yet here, so there is no font to measure.
-        cell: None,
-    };
+    // Reported by the first resize rather than at spawn: the buffer usually has no window
+    // yet here, so there is no font to measure.
+    let size = Winsize::new(
+        env.from_lisp::<u16>(args[2])?.max(1),
+        env.from_lisp::<u16>(args[3])?.max(1),
+    );
     let wake = env.open_channel(args[4])?;
     let cwd = env.opt::<String>(args, 5)?;
     // The interval through the constructor, because the frame ceiling derives from it;

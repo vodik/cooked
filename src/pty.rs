@@ -162,6 +162,27 @@ pub struct Winsize {
     pub cell: Option<CellMetrics>,
 }
 
+impl Winsize {
+    /// ROWS by COLS, with no cell size reported -- what a terminal frame's window is, and
+    /// what a graphical one is before its first resize has measured a font.
+    pub fn new(rows: u16, cols: u16) -> Self {
+        Self {
+            rows,
+            cols,
+            cell: None,
+        }
+    }
+
+    /// ROWS by COLS, with CELL as the font's measured size.
+    pub fn with_cell(rows: u16, cols: u16, cell: CellMetrics) -> Self {
+        Self {
+            rows,
+            cols,
+            cell: Some(cell),
+        }
+    }
+}
+
 impl From<Winsize> for libc::winsize {
     fn from(w: Winsize) -> Self {
         Self {
@@ -996,11 +1017,7 @@ mod tests {
 
     /// The 80x24 window every spawn here asks for; no test turns on the size.
     fn size() -> Winsize {
-        Winsize {
-            rows: 24,
-            cols: 80,
-            cell: None,
-        }
+        Winsize::new(24, 80)
     }
 
     fn termios_with(lflag: LocalFlags) -> Termios {
