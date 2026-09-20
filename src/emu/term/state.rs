@@ -560,7 +560,20 @@ impl State {
         let events = self.settle_events(&marks);
         let levels = Levels::of(self);
         let cursor_chars = cursor_chars(self.screen(), levels.cursor);
-        let rows = self.damaged_rows(damaged, promoted, &shifts, levels.cursor);
+        let Self {
+            front,
+            screens,
+            shown,
+            ..
+        } = self;
+        let rows = front.present(
+            *shown,
+            &screens[*shown],
+            levels.cursor,
+            promoted,
+            &shifts,
+            damaged,
+        );
         // Last, after everything that could have named a new id: the rows, edits and
         // scrollback above were all built from cells written before this drain began.
         let styles = self.styles.take_unsent();
@@ -714,148 +727,6 @@ impl State {
             },
             None => moved.get(id).unwrap_or_else(|| at.unmeasured()),
         }
-    }
-
-    /// The damaged rows Emacs does not already have, recording them as sent.
-    ///
-    /// PROMOTED rows leave the top of the copy first, and then SHIFTS are applied to it, as
-    /// Emacs does both to its text, because the damage indices are in the coordinates they
-    /// leave behind. Then a damaged row that matches the copy is left out, which is a
-    /// repaint that wrote the same thing back.
-    ///
-    /// A changed row whose change is small is sent as an [`Edit`] of the part that changed,
-    /// on the alternate screen only when it has no changed neighbour; see
-    /// [`front::Front::edit`].
-    ///
-    /// On the primary screen, the rows below `used` are forgotten afterwards. Emacs trims
-    /// its screen region to that many lines, so whatever it held for them is gone, and a
-    /// background wash drawn there later must be sent rather than matched against a copy of
-    /// text the buffer no longer has. A wash already there when the screen grows back over
-    /// it is sent too, damaged or not.
-    fn damaged_rows(
-        &mut self,
-        mut damaged: Vec<usize>,
-        promoted: Option<Shift>,
-        shifts: &[Shift],
-        cursor: Cursor,
-    ) -> Vec<DamagedRow> {
-        let (height, width) = (self.screen().height(), self.screen().width());
-        self.front.ensure(height, width);
-        if let Some(promotion) = promoted {
-            self.front.shift(promotion);
-        }
-        for shift in shifts {
-            self.front.shift(*shift);
-        }
-        // A cursor move damages no row, and yet Lisp cuts a glyph run around the cursor's
-        // cell, so the rows it left and the row it is on are asked about as if damaged.
-        // Their cells are what the copy holds, so only the cursor can make them differ.
-        let front = &self.front;
-        let screen = &self.screens[self.shown];
-        // A row Emacs trimmed off the bottom of the primary comes back as an empty line when
-        // the screen grows over it, which a cursor moving down or a scroll does without
-        // damaging it. An empty line is what a blank row renders to, but not a row the
-        // child washed with a background, so that one is sent.
-        //
-        // A wrapped row is sent too, blank or not, and this is the only route by which a
-        // wrap flag below the content ever reaches Emacs. An empty line carries a newline
-        // and a wrapped row must not, so a row whose line goes on has to be rendered
-        // rather than left to the trim's blank -- `CSI 1K` on the continuation of a
-        // wrapped row leaves exactly that, a line of blanks continued into blanks, and
-        // the flag comes back with the row when the cursor moves down again or a scroll
-        // brings it up. Emacs cannot be told by clearing the flag on the grid instead: a
-        // drain would then be changing the rows a later rewrap re-lays and a later scroll
-        // hands to scrollback, and two consumers draining the same terminal at different
-        // moments -- a buffer no window shows drains without the screen for minutes --
-        // would end up with different transcripts of the same bytes.
-        let used = if self.shown.is_alternate() {
-            0
-        } else {
-            screen.used()
-        };
-        let regrown = (0..used).filter(|&row| {
-            front.trimmed(row)
-                && screen
-                    .row(row)
-                    .is_some_and(|row| !row.is_blank() || row.wrapped())
-        });
-        let moved: Vec<usize> = front
-            .cursor_rows()
-            .chain(Some(cursor.row).filter(|&row| front.knows(row)))
-            .chain(regrown)
-            .filter(|row| damaged.binary_search(row).is_err())
-            .collect();
-        if !moved.is_empty() {
-            damaged.extend(moved);
-            damaged.sort_unstable();
-            damaged.dedup();
-        }
-        let screen = &self.screens[self.shown];
-        // Row 0 of the primary screen continues the scrollback above it when the head is
-        // not empty, so its text in the buffer begins mid-line.
-        let seam = !self.shown.is_alternate() && !screen.head().is_zero();
-        let alternate = self.shown.is_alternate();
-        let front = &mut self.front;
-        let at = |index: usize| (cursor.row == index).then_some(cursor.col as u16);
-        let changed: Vec<usize> = damaged
-            .into_iter()
-            .filter(|&index| {
-                let Some(row) = screen.row(index) else {
-                    return false;
-                };
-                let same = front.matches(index, row, at(index));
-                if same {
-                    front.settle_cursor(index, at(index));
-                }
-                !same
-            })
-            .collect();
-        let rows = changed
-            .iter()
-            .enumerate()
-            .filter_map(|(i, &index)| {
-                let row = screen.row(index)?;
-                // On the primary screen every changed row is offered as an edit, and on
-                // the alternate screen only a row with no changed neighbour.
-                //
-                // Contiguous rows sent whole coalesce into one block that Emacs rewrites
-                // with a single deletion and insertion, and that destroys every marker,
-                // overlay and property on the rows' unchanged cells: a prompt's semantic
-                // marks, a bookmark, an overlay a mode put on a line of output. On the
-                // primary screen those are the transcript's, so the rows that changed a
-                // little are edited in place and keep them. The price is Emacs' per-edit
-                // cost. Measured in instructions per frame for 24 80-column rows each
-                // changing one cell, 24 edits cost 1.7M against 0.38M for one block of
-                // plain rows, and 1.9M against 2.8M for rows of eight styled spans, whose
-                // properties the block writes again. The alternate screen is a full-screen
-                // program's picture, repainted at its frame rate and carrying none of those
-                // marks, so it keeps the block. An isolated row -- the spinner, the clock,
-                // the bar -- has no block to join, and there the edit is the cheaper of the
-                // two on either screen.
-                let isolated = (i == 0 || changed[i - 1] + 1 != index)
-                    && changed.get(i + 1).is_none_or(|&next| next != index + 1);
-                let edit = (isolated || !alternate)
-                    .then(|| front.edit(index, row, at(index), seam && index == 0))
-                    .flatten()
-                    .map(|span| Edit {
-                        char_start: span.char_start,
-                        char_end: span.char_end,
-                        chars: span.length,
-                        runs: row.runs_between(span.start, span.end),
-                    });
-                front.record(index, row, at(index));
-                Some(DamagedRow {
-                    index,
-                    wrap: row.wrap(),
-                    runs: row.runs(),
-                    edit,
-                })
-            })
-            .collect();
-        if !self.shown.is_alternate() {
-            self.front.trim_from(self.screen().used());
-        }
-        rows
     }
 
     /// Emacs has changed its own text for row INDEX, or for every row when INDEX is `None`,

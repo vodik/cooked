@@ -23,8 +23,10 @@
 use super::super::cell::{BLANK, Cell, Extra, Row, RowRef, Wrap, chars_before, draws_nothing};
 use super::super::glyph;
 use super::super::grid::Grid;
-use super::super::screen::{Departed, Shift};
+use super::super::screen::{Departed, Screen, Shift};
 use super::super::units::{Chars, Cols};
+use super::screens::ScreenId;
+use super::{Cursor, DamagedRow, Edit};
 
 /// One row of Emacs' copy of the screen, besides its cells.
 #[derive(Debug, Clone, Default)]
@@ -82,14 +84,142 @@ pub(super) struct Front {
 }
 
 impl Front {
-    /// Take the shape of a ROWS by COLS screen, knowing nothing about any of it unless it
-    /// already had that shape, where every row is kept.
+    /// Show BACK, the grid of screen OF, and hand back the rows Emacs does not already
+    /// have, recording them as sent.
     ///
-    /// The promotion needs nothing here even when the shape changed and every row went
-    /// with it: this is only ever reached from a drain, which has already taken the
-    /// promotion for the delta it is building, so there is no prefix left to cut short.
-    pub(super) fn ensure(&mut self, rows: usize, cols: usize) {
-        self.grid.ensure(rows, cols);
+    /// The whole delta, in the order its steps depend on each other:
+    ///
+    /// 1. the copy takes the screen's shape, keeping every row when it already had it;
+    /// 2. PROMOTED rows leave the top of the copy, and then SHIFTS are applied to it, as
+    ///    Emacs does both to its text -- before any row is compared, because the damage
+    ///    indices are in the coordinates the moves leave behind;
+    /// 3. the rows a cursor move alone can leave drawn wrong, and the rows Emacs trimmed
+    ///    that the screen has grown back over, join DAMAGED;
+    /// 4. a damaged row that matches the copy is left out, which is a repaint that wrote
+    ///    the same thing back;
+    /// 5. each row that is left is measured against the copy as an [`Edit`] of the part
+    ///    that changed, and only then recorded -- the copy it is measured against is the
+    ///    one the record overwrites;
+    /// 6. the copy stops claiming the rows Emacs trims off the bottom of its region.
+    ///
+    /// A changed row whose change is small is sent as an edit on the primary screen, and
+    /// on the alternate screen only when it has no changed neighbour; see [`Front::edit`].
+    pub(super) fn present(
+        &mut self,
+        of: ScreenId,
+        back: &Screen,
+        cursor: Cursor,
+        promoted: Option<Shift>,
+        shifts: &[Shift],
+        mut damaged: Vec<usize>,
+    ) -> Vec<DamagedRow> {
+        self.grid.ensure(back.height(), back.width());
+        for shift in promoted.iter().chain(shifts) {
+            self.shift(*shift);
+        }
+        // A cursor move damages no row, and yet Lisp cuts a glyph run around the cursor's
+        // cell, so the rows it left and the row it is on are asked about as if damaged.
+        // Their cells are what the copy holds, so only the cursor can make them differ.
+        //
+        // A row Emacs trimmed off the bottom of the primary comes back as an empty line
+        // when the screen grows over it, which a cursor moving down or a scroll does
+        // without damaging it. An empty line is what a blank row renders to, but not a row
+        // the child washed with a background, so that one is sent.
+        //
+        // A wrapped row is sent too, blank or not, and this is the only route by which a
+        // wrap flag below the content ever reaches Emacs. An empty line carries a newline
+        // and a wrapped row must not, so a row whose line goes on has to be rendered
+        // rather than left to the trim's blank -- `CSI 1K` on the continuation of a
+        // wrapped row leaves exactly that, a line of blanks continued into blanks, and
+        // the flag comes back with the row when the cursor moves down again or a scroll
+        // brings it up. Emacs cannot be told by clearing the flag on the grid instead: a
+        // drain would then be changing the rows a later rewrap re-lays and a later scroll
+        // hands to scrollback, and two consumers draining the same terminal at different
+        // moments -- a buffer no window shows drains without the screen for minutes --
+        // would end up with different transcripts of the same bytes.
+        let used = if of.is_alternate() { 0 } else { back.used() };
+        let regrown = (0..used).filter(|&row| {
+            self.trimmed(row)
+                && back
+                    .row(row)
+                    .is_some_and(|row| !row.is_blank() || row.wrapped())
+        });
+        let moved: Vec<usize> = self
+            .cursor_rows()
+            .chain(Some(cursor.row).filter(|&row| self.knows(row)))
+            .chain(regrown)
+            .filter(|row| damaged.binary_search(row).is_err())
+            .collect();
+        if !moved.is_empty() {
+            damaged.extend(moved);
+            damaged.sort_unstable();
+            damaged.dedup();
+        }
+        // Row 0 of the primary screen continues the scrollback above it when the head is
+        // not empty, so its text in the buffer begins mid-line.
+        let seam = !of.is_alternate() && !back.head().is_zero();
+        let at = |index: usize| (cursor.row == index).then_some(cursor.col as u16);
+        let changed: Vec<usize> = damaged
+            .into_iter()
+            .filter(|&index| {
+                let Some(row) = back.row(index) else {
+                    return false;
+                };
+                let same = self.matches(index, row, at(index));
+                if same {
+                    self.settle_cursor(index, at(index));
+                }
+                !same
+            })
+            .collect();
+        let rows = changed
+            .iter()
+            .enumerate()
+            .filter_map(|(i, &index)| {
+                let row = back.row(index)?;
+                // On the primary screen every changed row is offered as an edit, and on
+                // the alternate screen only a row with no changed neighbour.
+                //
+                // Contiguous rows sent whole coalesce into one block that Emacs rewrites
+                // with a single deletion and insertion, and that destroys every marker,
+                // overlay and property on the rows' unchanged cells: a prompt's semantic
+                // marks, a bookmark, an overlay a mode put on a line of output. On the
+                // primary screen those are the transcript's, so the rows that changed a
+                // little are edited in place and keep them. The price is Emacs' per-edit
+                // cost. Measured in instructions per frame for 24 80-column rows each
+                // changing one cell, 24 edits cost 1.7M against 0.38M for one block of
+                // plain rows, and 1.9M against 2.8M for rows of eight styled spans, whose
+                // properties the block writes again. The alternate screen is a full-screen
+                // program's picture, repainted at its frame rate and carrying none of those
+                // marks, so it keeps the block. An isolated row -- the spinner, the clock,
+                // the bar -- has no block to join, and there the edit is the cheaper of the
+                // two on either screen.
+                let isolated = (i == 0 || changed[i - 1] + 1 != index)
+                    && changed.get(i + 1).is_none_or(|&next| next != index + 1);
+                let edit = (isolated || !of.is_alternate())
+                    .then(|| self.edit(index, row, at(index), seam && index == 0))
+                    .flatten()
+                    .map(|span| Edit {
+                        char_start: span.char_start,
+                        char_end: span.char_end,
+                        chars: span.length,
+                        runs: row.runs_between(span.start, span.end),
+                    });
+                self.record(index, row, at(index));
+                Some(DamagedRow {
+                    index,
+                    wrap: row.wrap(),
+                    runs: row.runs(),
+                    edit,
+                })
+            })
+            .collect();
+        // Emacs trims its screen region to the rows the emulator says are in use, so
+        // whatever it held below them is gone; see `cooked--fit-screen'.
+        if !of.is_alternate() {
+            self.trim_from(back.used());
+        }
+        rows
     }
 
     /// Stop claiming to know the rows from FIRST down.
@@ -187,7 +317,7 @@ impl Front {
     /// the guard edited is still in the buffer and only has to be sent when it is next
     /// damaged, while a trimmed row that holds a background wash has to be sent once the
     /// screen grows back over it, damaged or not.
-    pub(super) fn trim_from(&mut self, first: usize) {
+    fn trim_from(&mut self, first: usize) {
         for index in first..self.grid.height() {
             let known = self.known_mut(index);
             known.known = false;
@@ -197,7 +327,7 @@ impl Front {
     }
 
     /// Whether row INDEX was trimmed off the buffer and has not been sent since.
-    pub(super) fn trimmed(&self, index: usize) -> bool {
+    fn trimmed(&self, index: usize) -> bool {
         self.grid.meta(index).is_some_and(|known| known.trimmed)
     }
 
@@ -214,7 +344,7 @@ impl Front {
     /// The rows rotated in at the far end are empty lines in the buffer, which is what a
     /// blank row renders to, so they are known to be blank rather than forgotten: a
     /// scroll that brings in a blank bottom row then costs Emacs nothing for it.
-    pub(super) fn shift(&mut self, shift: Shift) {
+    fn shift(&mut self, shift: Shift) {
         let Shift {
             top,
             bottom,
@@ -251,7 +381,7 @@ impl Front {
     /// gone: the width guard trims a row after it is drawn, and a shift the copy cannot
     /// follow forgets rows the buffer still holds as they were cut. Such a row matches
     /// nothing, so asking about it sends it whole, once.
-    pub(super) fn cursor_rows(&self) -> impl Iterator<Item = usize> + '_ {
+    fn cursor_rows(&self) -> impl Iterator<Item = usize> + '_ {
         (0..self.grid.height()).filter(|&index| {
             self.grid
                 .meta(index)
@@ -260,7 +390,7 @@ impl Front {
     }
 
     /// Whether Emacs' text for row INDEX is known.
-    pub(super) fn knows(&self, index: usize) -> bool {
+    fn knows(&self, index: usize) -> bool {
         self.grid.meta(index).is_some_and(|known| known.known)
     }
 
@@ -270,7 +400,7 @@ impl Front {
     /// True of any row that matched, since a match with the cursor elsewhere means the
     /// cursor is in no glyph run of it either way, and it keeps a row the cursor left
     /// from being asked about again on every drain.
-    pub(super) fn settle_cursor(&mut self, index: usize, cursor: Option<u16>) {
+    fn settle_cursor(&mut self, index: usize, cursor: Option<u16>) {
         if let Some(known) = self.grid.meta_mut(index) {
             known.cursor = cursor;
         }
@@ -278,7 +408,7 @@ impl Front {
 
     /// Whether ROW, rendered with the cursor at CURSOR, is what Emacs already shows at
     /// INDEX.
-    pub(super) fn matches(&self, index: usize, row: RowRef<'_>, cursor: Option<u16>) -> bool {
+    fn matches(&self, index: usize, row: RowRef<'_>, cursor: Option<u16>) -> bool {
         let Some(row_shown) = self.grid.row(index) else {
             return false;
         };
@@ -317,13 +447,7 @@ impl Front {
     ///   it, where character offsets from the row's start are not offsets Lisp can find;
     /// - the replacement would cover more than half the row, where two partial edits of
     ///   the text cost Emacs about what one rewrite does.
-    pub(super) fn edit(
-        &self,
-        index: usize,
-        row: RowRef<'_>,
-        cursor: Option<u16>,
-        seam: bool,
-    ) -> Option<Span> {
+    fn edit(&self, index: usize, row: RowRef<'_>, cursor: Option<u16>, seam: bool) -> Option<Span> {
         let old_row = self.grid.row(index)?;
         let (old, known) = (old_row.cells, old_row.meta);
         let cols = self.grid.width();
@@ -473,7 +597,7 @@ impl Front {
     }
 
     /// Note that Emacs now shows ROW at INDEX, rendered with the cursor at CURSOR.
-    pub(super) fn record(&mut self, index: usize, row: RowRef<'_>, cursor: Option<u16>) {
+    fn record(&mut self, index: usize, row: RowRef<'_>, cursor: Option<u16>) {
         let cols = self.grid.width();
         let (Some(front), true) = (self.grid.row_mut(index), row.len() == cols) else {
             return;
