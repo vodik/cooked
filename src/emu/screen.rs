@@ -6,6 +6,7 @@ use super::cell::{
 use super::image::{CellSize, ImageId, Placement};
 use super::style::StyleId;
 use super::units::{Chars, Cols};
+use super::utf8::PrintableAscii;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct Cursor {
@@ -1021,21 +1022,22 @@ impl Screen {
     /// Insert mode and a pending wrap both bail out entirely rather than being handled:
     /// IRM shifts the row per character, and a pending wrap means the next character
     /// scrolls.
-    pub fn write_run(&mut self, text: &str, pen: Pen) -> usize {
+    pub(crate) fn write_run(&mut self, run: PrintableAscii<'_>, pen: Pen) -> Cols {
         if self.insert_mode || self.cursor.wrap_pending {
-            return 0;
+            return Cols::ZERO;
         }
         let (row, col) = (self.cursor.row, self.cursor.col);
         let room = self.cols.saturating_sub(col + 1);
+        let text = run.as_str();
         let n = text.len().min(room);
         if n == 0 {
-            return 0;
+            return Cols::ZERO;
         }
         if !self.edit(row, |r| r.fill_run(col, &text[..n], pen)) {
-            return 0;
+            return Cols::ZERO;
         }
         self.cursor.col = col + n;
-        n
+        Cols::new(n)
     }
 
     pub fn autowrap(&self) -> bool {

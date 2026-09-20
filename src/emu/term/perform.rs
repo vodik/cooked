@@ -58,23 +58,20 @@ impl State {
     /// [`Perform::print_bytes`]'s to decide once for everything it was handed; the pen
     /// cannot change inside a run either, because changing it takes an escape sequence
     /// and that would have ended the run.
-    fn print_ascii(&mut self, run: &[u8], batched: bool, pen: Pen) {
-        // SAFETY: the decoder hands over nothing here but bytes in `0x20..=0x7e`.
-        let mut rest = unsafe { std::str::from_utf8_unchecked(run) };
-        while !rest.is_empty() {
+    fn print_ascii(&mut self, mut run: PrintableAscii<'_>, batched: bool, pen: Pen) {
+        while !run.is_empty() {
             let placed = if batched {
-                self.screen_mut().write_run(rest, pen)
+                self.screen_mut().write_run(run, pen)
             } else {
-                0
+                Cols::ZERO
             };
-            if placed == 0 {
+            if placed.is_zero() {
                 // The character `write_run` declined: the last column of a row, a pending
                 // wrap. One trip through the full path settles it.
-                let c = rest.chars().next().unwrap_or('\0');
+                let c = run.advance(Cols::ONE).as_str().chars().next().unwrap();
                 self.print(c);
-                rest = &rest[c.len_utf8()..];
             } else {
-                let last = rest[..placed].chars().next_back();
+                let last = run.advance(placed).last();
                 self.last_print = last;
                 // The run bypassed the segmenter, so the segmenter is told what it
                 // missed: the last character placed is the cell a combining mark arriving
@@ -91,7 +88,6 @@ impl State {
                     self.text
                         .restart(last.encode_utf8(&mut buf), Width::measured(Cols::ONE));
                 }
-                rest = &rest[placed..];
             }
         }
     }

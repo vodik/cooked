@@ -83,7 +83,10 @@ impl Perform for Dispatcher {
         while let Some(piece) = self.decoder.next(&mut rest) {
             match piece {
                 Piece::Ascii(run) => {
-                    let run = run.iter().map(|&b| Sequence::Print(char::from(b)));
+                    let run = run
+                        .as_bytes()
+                        .iter()
+                        .map(|&b| Sequence::Print(char::from(b)));
                     self.dispatched.extend(run);
                 }
                 Piece::Char(c) => self.dispatched.push(Sequence::Print(c)),

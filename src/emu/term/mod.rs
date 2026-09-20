@@ -17,7 +17,7 @@ use super::sixel;
 use super::style::{StyleId, StyleStore};
 use super::text::{self, Segmenter, Step, Width};
 use super::units::{Chars, Cols};
-use super::utf8::{Decoder, Piece};
+use super::utf8::{Decoder, Piece, PrintableAscii};
 use csi::{Handover, PushedPen, SavedMode};
 pub(crate) use keypress::{Assumed, Key, Modifiers, NamedKey};
 pub(crate) use keys::{KeyEncoding, KittyFlags, ModifyOtherKeys};

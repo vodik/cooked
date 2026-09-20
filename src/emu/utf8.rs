@@ -34,15 +34,82 @@
 //! exactly that function's answer, for every way of cutting the input into reads.
 
 use super::text::printable_ascii_len;
+use super::units::Cols;
 
 /// What [`Decoder::next`] yields.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Piece<'a> {
     /// A run of printable ASCII, `0x20..=0x7e`: a byte is a character is a cell.
-    Ascii(&'a [u8]),
+    Ascii(PrintableAscii<'a>),
     /// One code point that is not ASCII and not a control, or `U+FFFD` for bytes that
     /// were not one.
     Char(char),
+}
+
+/// A run of printable ASCII, `0x20..=0x7e`, proved by the scan in [`Decoder::next`] and
+/// made nowhere else.
+///
+/// Not every ASCII byte: DEL and the C0 controls are outside the range this is built
+/// from, so a consumer that has one of these never has to ask whether a control slipped
+/// in. Holding the bytes as `&str` rather than `&[u8]` is what lets `as_str` exist without
+/// a second proof at the point of use -- the one `from_utf8_unchecked` in [`Self::new`]
+/// is the only place that fact is asserted, beside the scan that established it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct PrintableAscii<'a>(&'a str);
+
+impl<'a> PrintableAscii<'a> {
+    /// BYTES, asserted to be printable ASCII.
+    ///
+    /// SAFETY: every byte of BYTES must be in `0x20..=0x7e`. [`Decoder::next`] is the only
+    /// caller, right after [`printable_ascii_len`] has measured exactly that.
+    #[inline]
+    unsafe fn new(bytes: &'a [u8]) -> Self {
+        debug_assert!(bytes.iter().all(|&b| (0x20..=0x7e).contains(&b)));
+        // SAFETY: see above.
+        Self(unsafe { std::str::from_utf8_unchecked(bytes) })
+    }
+
+    /// The run as text, for a printer that wants to hand it to `write_run` or a
+    /// segmenter restart.
+    #[inline]
+    pub(crate) fn as_str(self) -> &'a str {
+        self.0
+    }
+
+    /// The run as bytes, for a printer that writes one cell per byte.
+    #[inline]
+    pub(crate) fn as_bytes(self) -> &'a [u8] {
+        self.0.as_bytes()
+    }
+
+    #[inline]
+    pub(crate) fn is_empty(self) -> bool {
+        self.0.is_empty()
+    }
+
+    /// How many columns the run is: a byte is a character is a cell, so this is also its
+    /// length in bytes and in characters.
+    #[inline]
+    pub(crate) fn len(self) -> Cols {
+        Cols::new(self.0.len())
+    }
+
+    /// The last character of the run, or `None` if it is empty.
+    #[inline]
+    pub(crate) fn last(self) -> Option<char> {
+        self.0.chars().next_back()
+    }
+
+    /// Take the first N columns off the front of the run, leaving the rest in `self`.
+    ///
+    /// N must be at most [`Self::len`]; a caller past that end is a bug in the printer,
+    /// not in the text, so this panics the way slicing does.
+    #[inline]
+    pub(crate) fn advance(&mut self, n: Cols) -> Self {
+        let (head, tail) = self.0.split_at(n.get());
+        self.0 = tail;
+        Self(head)
+    }
 }
 
 /// A sequence the end of a read cut short, waiting for the rest.
@@ -98,7 +165,8 @@ impl Decoder {
                 }
                 let (run, tail) = rest.split_at(ascii);
                 *rest = tail;
-                return Some(Piece::Ascii(run));
+                // SAFETY: `printable_ascii_len` just measured RUN as `0x20..=0x7e`.
+                return Some(Piece::Ascii(unsafe { PrintableAscii::new(run) }));
             }
             if let Some((c, len)) = whole(rest) {
                 *rest = &rest[len..];
@@ -265,8 +333,8 @@ mod tests {
                 match piece {
                     Piece::Ascii(run) => {
                         assert!(!run.is_empty());
-                        assert!(run.iter().all(|b| (0x20..0x7f).contains(b)));
-                        out.push_str(std::str::from_utf8(run).unwrap());
+                        assert!(run.as_bytes().iter().all(|b| (0x20..0x7f).contains(b)));
+                        out.push_str(run.as_str());
                     }
                     Piece::Char(c) => {
                         assert!(!c.is_ascii() && !c.is_control(), "{c:?}");

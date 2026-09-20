@@ -68,7 +68,7 @@ use super::style::{StyleId, StyleStore};
 use super::term::osc::{hyperlink_uri, validated_text};
 use super::text::{Segmenter, Step, Width};
 use super::units::{Chars, Cols};
-use super::utf8::{Decoder, Piece};
+use super::utf8::{Decoder, Piece, PrintableAscii};
 
 /// Columns one logical line may reach before it is retired to keep it bounded.
 ///
@@ -660,8 +660,8 @@ impl Stream {
     /// starts a cluster". What it cannot skip is the per-column write, because the
     /// columns are what a later `\r` overwrites -- the text is not accumulated as a
     /// string until it is emitted.
-    fn print_ascii(&mut self, run: &[u8]) {
-        let plain = run.len();
+    fn print_ascii(&mut self, run: PrintableAscii<'_>) {
+        let plain = run.len().get();
         if self.col + plain > MAX_LINE_COLUMNS {
             self.retire();
         }
@@ -669,7 +669,7 @@ impl Stream {
         self.split_wide(self.col);
         self.split_wide(self.col + plain - 1);
         let cell = self.pen_cell(BLANK);
-        for (offset, &b) in run.iter().enumerate() {
+        for (offset, &b) in run.as_bytes().iter().enumerate() {
             self.line[self.col + offset] = Column::new(cell.with_char(char::from(b)));
         }
         self.col += plain;
@@ -678,9 +678,7 @@ impl Stream {
         // last character placed is what a combining mark arriving next has to find. See
         // `State::print_ascii', which does the same and explains the one `Prepend' case
         // this declines.
-        let last = [run[plain - 1]];
-        // SAFETY: the decoder hands over nothing here but bytes in `0x20..=0x7e`.
-        let last = unsafe { std::str::from_utf8_unchecked(&last) };
+        let last = &run.as_str()[plain - 1..];
         self.seg.restart(last, Width::measured(Cols::ONE));
     }
 }
