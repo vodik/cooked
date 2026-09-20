@@ -4,7 +4,7 @@
 //! the reader never touches Lisp. It parses into the shared [`Term`] and pokes a pipe
 //! descriptor obtained from `open_channel`; Emacs' filter then drains on the main thread.
 
-use crate::emu::{ColorScheme, Delta, Feed, FrameSize, Palette, Reply, ReplyKind, Term};
+use crate::emu::{ColorScheme, Delta, Drain, Feed, FrameSize, Palette, Reply, ReplyKind, Term};
 use crate::error::Result;
 use crate::lock::{CondvarExt, LockExt};
 use crate::pty::{
@@ -1522,33 +1522,45 @@ impl Shared {
 }
 
 impl Session {
-    /// [`Session::drain_with`] for a consumer that promotes nothing, which is what the
-    /// tests here read.
+    /// [`Session::drain_as`] for a consumer that promotes nothing, which is what the tests
+    /// here read.
     #[cfg(test)]
     pub(crate) fn drain(&self) -> Update {
-        self.drain_with(false)
+        self.drain_as(Drain::Whole)
     }
 
-    /// Collect everything that changed, acknowledging the wakeup that asked for it.
+    /// [`Session::drain_as`] for a buffer no window shows, which is what the tests here
+    /// read.
+    #[cfg(test)]
+    pub(crate) fn drain_hidden(&self) -> Update {
+        self.drain_as(Drain::Hidden)
+    }
+
+    /// Collect everything that changed in the shape SHAPE asks for, acknowledging the
+    /// wakeup that asked for it; see [`Drain`].
     ///
-    /// PROMOTE says the consumer keeps a screen of its own, as a cooked buffer does, and
-    /// can promote the scrolled rows it already holds; see [`Delta::promoted`]. The
-    /// compile pump reads the scrollback as text and does not.
+    /// A [`Drain::Hidden`] is whole once the child has exited. The screen it left is what
+    /// the buffer keeps, and Lisp appends its exit line below that screen, which has to be
+    /// there first. [`Drain::Scrolled`] is not escalated: its consumer flushes what is
+    /// left on the grid by resizing the grid away, not by being sent it; see
+    /// `cooked-process--residue'.
     ///
     /// Acknowledging is not re-arming: the next wake byte waits on [`Session::ready`],
     /// which Emacs calls once it has applied what this returned. See
     /// [`Notifier::acknowledge`] for why the window covers the render rather than the
     /// collection.
-    ///
-    /// [`Delta::promoted`]: crate::emu::Delta::promoted
-    pub(crate) fn drain_with(&self, promote: bool) -> Update {
+    pub(crate) fn drain_as(&self, shape: Drain) -> Update {
         self.shared.notifier.acknowledge();
-        let mut term = self.shared.term_for_lisp();
-        let delta = if promote {
-            term.drain_promoting()
-        } else {
-            term.drain()
+        // `Some` only where the answer decides the shape, and then it is the reading the
+        // update carries: a drain that is not hidden reads the exit after its own drain
+        // instead, which is one drain fresher.
+        let exit = (shape == Drain::Hidden).then(|| self.shared.exit());
+        let shape = match exit {
+            Some(Some(_)) => Drain::Whole,
+            _ => shape,
         };
+        let mut term = self.shared.term_for_lisp();
+        let delta = term.drain_as(shape);
         drop(term);
         self.shared.unthrottle();
         // One at a time rather than two guards alive at once in the struct literal, so
@@ -1558,30 +1570,7 @@ impl Session {
             delta,
             mode: self.shared.mode.load(),
             foreground,
-            exit: self.shared.exit(),
-        }
-    }
-
-    /// [`Session::drain_with`] for a buffer no window shows; see [`Term::drain_hidden`].
-    ///
-    /// Whole once the child has exited. The screen it left is what the buffer keeps, and
-    /// Lisp appends its exit line below that screen, which has to be there first.
-    pub(crate) fn drain_hidden(&self) -> Update {
-        self.shared.notifier.acknowledge();
-        let exit = self.shared.exit();
-        let mut term = self.shared.term_for_lisp();
-        let delta = if exit.is_some() {
-            term.drain()
-        } else {
-            term.drain_hidden()
-        };
-        drop(term);
-        self.shared.unthrottle();
-        Update {
-            delta,
-            mode: self.shared.mode.load(),
-            foreground: self.shared.state.held().foreground.program(),
-            exit,
+            exit: exit.unwrap_or_else(|| self.shared.exit()),
         }
     }
 
@@ -3524,7 +3513,7 @@ mod tests {
         drop(session);
     }
 
-    /// The backpressure window ends at [`Session::ready`] and not at [`Session::drain_with`]:
+    /// The backpressure window ends at [`Session::ready`] and not at [`Session::drain_as`]:
     /// a drain that took a delta buys no second wake byte until Emacs says it has applied
     /// the first.
     ///

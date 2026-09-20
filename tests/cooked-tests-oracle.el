@@ -548,9 +548,12 @@ only, for the grid read-back above."
            (drain (symbol-function 'cooked--drain)))
       (setq cooked-tests--oracle-payload nil)
       (cl-letf (((symbol-function 'cooked--drain)
-                 (lambda (session rejoin &optional hidden promote)
-                   (let ((update (funcall drain session rejoin hidden
-                                          (and (not (eq how 'unpromoted)) promote))))
+                 (lambda (session rejoin &optional mode)
+                   (let ((update (funcall drain session rejoin
+                                          (if (and (eq mode 'promoting)
+                                                   (eq how 'unpromoted))
+                                              'whole
+                                            mode))))
                      (unless cooked-tests--oracle-payload
                        (setq cooked-tests--oracle-payload update))
                      update))))

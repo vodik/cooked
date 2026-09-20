@@ -559,14 +559,17 @@ answers for, or `cooked-process--ignored-drain-keys' argues out.")
 
 (defconst cooked-process--ignored-drain-keys
   '((:promoted . "Promotion hands rows the buffer already holds to the
-scrollback, and this file never asks for it: the consumer's buffer is not a
+scrollback, and a `scrolled' drain does none: the consumer's buffer is not a
 transcript of the grid, and nothing here holds a copy of a row.")
-    (:rows . "A consumer with no copy of the screen has no row to patch.  What
-is still on the grid is read whole, by `cooked--screen-text', and shown as an
+    (:rows . "Empty on every drain this file takes, and not merely unread:
+`cooked-process--pump' asks for a `scrolled' drain, which builds no damaged row
+at all, a consumer with no copy of the screen having none to patch.  What is
+still on the grid is read whole, by `cooked--screen-text', and shown as an
 overlay; see `cooked-process--tail-text'.")
-    (:edits . "As `:rows': there is no held row for an edit to replace part
-of.")
-    (:shifts . "As `:rows': there is no held row for a shift to move.")
+    (:edits . "As `:rows': no held row for an edit to replace part of, and so
+none built.")
+    (:shifts . "As `:rows': no held row for a shift to move, and so none
+built.")
     (:height . "The grid's shape is this file's own, from `cooked-process-rows'
 and `cooked-process--columns', and nothing here is laid out against it.")
     (:width . "As `:height'.")
@@ -590,8 +593,10 @@ goes through `cooked-process-send-string' as bytes the caller composed.")
     (:keys . "As `:app-cursor'.")
     (:kitty-flags . "As `:app-cursor'.")
     (:modify-other-keys . "As `:app-cursor'.")
-    (:withheld . "Only a drain asked to leave the screen out withholds it, and
-`cooked-process--pump' never asks: there is no window to be hidden from."))
+    (:withheld . "Nil on every drain this file takes.  A `scrolled' drain
+leaves the screen out without withholding it: the damage waits in the core for
+a whole drain nobody here asks for, and a consumer with no screen is owed
+none."))
   "Why the pump leaves each remaining key of a drain alone.
 
 Not an inventory of the drain -- the `cooked--drain' docstring in src/lib.rs is
@@ -603,6 +608,15 @@ added to the drain and to neither table fails
 
 (defun cooked-process--pump (host)
   "Drain HOST's session and pass what retired to the consumer.
+
+The drain is a `scrolled' one: the scrollback, the events, the resources and
+the levels, and no damaged rows.  Asking for a whole drain cost the core a row
+diff and a block per damaged row -- a progress bar rewriting one row pays it on
+every wake -- and every one of them landed on the ignored list below, because
+the live grid is read whole a moment later by `cooked-process--refresh-tail'.
+The damage waits in the core exactly as it does for a hidden buffer, so the
+session is still one a whole drain would report correctly; nothing here ever
+takes one.
 
 `cooked--consume-drain' is what makes this a consumer of a drain rather than a
 second reading of one.  It installs the resources before the retired text is
@@ -631,7 +645,7 @@ the exit has reaped the session, which kills it and the host with it."
             (and (buffer-live-p host)
                  (buffer-local-value 'cooked-process--session host))
           (condition-case err
-              (let ((update (cooked--drain session cooked-process--rejoin)))
+              (let ((update (cooked--drain session cooked-process--rejoin 'scrolled)))
                 (cooked--consume-drain
                  update
                  (lambda ()
@@ -669,7 +683,7 @@ screen is the reading that does not depend on that."
     (let ((session cooked-process--session)
           (cols cooked-process--columns))
       (cooked--resize session 1 cols)
-      (let* ((update (cooked--drain session cooked-process--rejoin))
+      (let* ((update (cooked--drain session cooked-process--rejoin 'scrolled))
              ;; Through the shared step for the same reason the pump is, and it
              ;; is the last drain of the build: the resources this text names go
              ;; in before it is rendered, and a reply the child is still waiting

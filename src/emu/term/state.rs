@@ -474,12 +474,25 @@ impl State {
         self.kitty.forget(id);
     }
 
-    /// Everything that changed since the last drain; see [`Delta`].
+    /// Everything that changed since the last drain, in the shape SHAPE asks for; see
+    /// [`Delta`] and [`Drain`].
+    pub(super) fn drain(&mut self, shape: Drain) -> Delta {
+        if shape.carries_screen() {
+            self.drain_whole(shape)
+        } else {
+            self.drain_screenless(shape)
+        }
+    }
+
+    /// [`State::drain`] for a consumer that holds a copy of the screen and has it patched
+    /// row by row; see [`Drain::carries_screen`].
     ///
-    /// With PROMOTE, the rows that left the top of the screen as Emacs already holds them
-    /// are promoted rather than sent: see [`Delta::promoted`]. Without it every scrolled
-    /// row is text, for a consumer that reads the scrollback rather than keeping a screen.
-    pub(super) fn drain(&mut self, promote: bool) -> Delta {
+    /// With [`Drain::promotes`], the rows that left the top of the screen as Emacs already
+    /// holds them are promoted rather than sent: see [`Delta::promoted`]. Otherwise every
+    /// scrolled row is text, for a consumer that reads the scrollback rather than keeping a
+    /// screen.
+    fn drain_whole(&mut self, shape: Drain) -> Delta {
+        let promote = shape.promotes();
         let damaged = self.screen_mut().drain_damage();
         let promoted = self.front.take_promoted();
         // The scroll the promoted rows left by, read before the log is taken, which drops a
@@ -567,9 +580,17 @@ impl State {
         }
     }
 
-    /// [`Term::drain_hidden`]'s half: the drain less the screen, for a caller that has
-    /// already checked no event needs the screen's text.
-    pub(super) fn drain_hidden(&mut self) -> Delta {
+    /// [`State::drain`] less the screen, for [`Drain::Hidden`] and [`Drain::Scrolled`].
+    ///
+    /// No [`DamagedRow`] is built, and no damage is drained: the dirty rows, the shift log
+    /// and the front buffer are left exactly as they stand, so the next [`Drain::Whole`]
+    /// on this session brings the screen up to date in one go however many screenless
+    /// drains went by. The two shapes differ only in [`Delta::withheld`]; see
+    /// [`Drain::withholds`].
+    ///
+    /// The caller has already checked that no event needs the screen's text, where the
+    /// shape it asked for cares; see [`Term::drain_as`].
+    fn drain_screenless(&mut self, shape: Drain) -> Delta {
         self.shed_unplaced_images();
         let scrolled = Vec::from(std::mem::take(&mut self.pending_scrollback));
         let scrolled_base = self.evicted_total - scrolled.len();
@@ -612,7 +633,7 @@ impl State {
             cursor_chars,
             events,
             marks,
-            withheld: true,
+            withheld: shape.withholds(),
             ..Delta::default()
         }
     }

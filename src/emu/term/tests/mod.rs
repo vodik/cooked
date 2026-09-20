@@ -98,6 +98,7 @@ mod promote;
 mod replies;
 mod reports;
 mod screen;
+mod scrolled;
 mod sgr;
 mod terminfo;
 mod text;

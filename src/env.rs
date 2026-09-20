@@ -413,6 +413,12 @@ symbols! {
     // decoded to a number, so there is no third spelling to fall through to.
     Dark => "dark",
     Light => "light",
+    // How Lisp spells `cooked--drain''s MODE, for the `FromLisp' impl on `Drain' in
+    // lib.rs. Compared with `Env::eq' for the same reason the two above are. The fourth,
+    // `scrolled', is `AtScrolled' above: one symbol, two meanings that never meet.
+    Whole => "whole",
+    Promoting => "promoting",
+    Hidden => "hidden",
     // The keys of the plist `cooked--spawn' takes as its INITIAL-STATE argument; see
     // `SpawnState''s `FromLisp' impl in lib.rs.
     MinRedisplayInterval => ":min-redisplay-interval",

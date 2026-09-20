@@ -1793,7 +1793,7 @@ A row the width guard trimmed, the rows a flood scrolled through between
 drains, and a scroll after a region scroll all arrive as text."
   (cl-flet ((drained (bytes)
               (cooked--feed cooked--session bytes)
-              (let ((update (cooked--drain cooked--session cooked-rejoin-wrapped-lines nil t)))
+              (let ((update (cooked--drain cooked--session cooked-rejoin-wrapped-lines 'promoting)))
                 (cooked--apply update)
                 update)))
     (cooked-tests--with-fed-screen 3 20
@@ -2789,7 +2789,7 @@ a bare `error' and not a render."
   :tags '(pty)
   (cooked-tests--with-session '("/bin/cat")
     (should (cooked-tests--settle (lambda () cooked--session)))
-    (let ((drain (lambda () (cooked--drain cooked--session nil nil t))))
+    (let ((drain (lambda () (cooked--drain cooked--session nil 'promoting))))
       (cooked--feed cooked--session "hello")
       (should (plist-get (funcall drain) :rows))
       ;; The same cells written over themselves: damaged, and matching the copy.
@@ -4901,7 +4901,7 @@ comes out in the new theme's colours from ids the core already sent."
   (cooked-tests--with-fed-screen 3 20
     (cooked--feed cooked--session
                   "\e]8;;https://example.invalid/\e\\link\e]8;;\e\\")
-    (let ((update (cooked--drain cooked--session t nil t)))
+    (let ((update (cooked--drain cooked--session t 'promoting)))
       (should (plist-get update :links))
       (setq cooked--link-uris nil)
       (cooked--apply-resources update)
@@ -4922,7 +4922,7 @@ comes out in the new theme's colours from ids the core already sent."
   (cooked-tests--with-fed-screen 2 10
     (cooked-tests--fed "one\r\ntwo")
     (cooked--feed cooked--session "\r\nthree")
-    (let* ((update (cooked--drain cooked--session t nil t))
+    (let* ((update (cooked--drain cooked--session t 'promoting))
            (inhibit-read-only t)
            (buffer-undo-list t)
            (start (cooked--apply-scrollback update)))
@@ -4945,7 +4945,7 @@ comes out in the new theme's colours from ids the core already sent."
   (cooked-tests--with-fed-screen 3 10
     (cooked-tests--fed "one")
     (cooked--feed cooked--session "\r\ntwo")
-    (let* ((update (cooked--drain cooked--session t nil t))
+    (let* ((update (cooked--drain cooked--session t 'promoting))
            (inhibit-read-only t)
            (buffer-undo-list t)
            (cooked--deco-pass (list 'unset))
@@ -4962,7 +4962,7 @@ comes out in the new theme's colours from ids the core already sent."
   "The grid, the cursor and the modes are the drain's, for redisplay to read."
   (cooked-tests--with-fed-screen 3 10
     (cooked-tests--fed "one")
-    (let* ((update (cooked--drain cooked--session t nil t))
+    (let* ((update (cooked--drain cooked--session t 'promoting))
            (cursor (cooked--cursor-decode (plist-get update :cursor))))
       (cooked--apply-levels (append (list :height 9 :width 40 :used 4 :head 2
                                           :exit nil)
@@ -5079,7 +5079,7 @@ can check is worse than no reason."
     (should (cooked-tests--settle
              (lambda () (string-match-p "hello" (cooked-tests--text)))))
     (cooked-tests--hide-buffer)
-    (let* ((update (cooked--drain cooked--session cooked-rejoin-wrapped-lines t))
+    (let* ((update (cooked--drain cooked--session cooked-rejoin-wrapped-lines 'hidden))
            (handled (append cooked--consumed-drain-keys cooked--withheld-drain-keys)))
       (should (plist-member update :withheld))
       (should-not (cooked-tests--unaccounted-drain-keys

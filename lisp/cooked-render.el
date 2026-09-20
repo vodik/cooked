@@ -159,7 +159,8 @@ again is safe."
             (progn
               (setq cooked--draining t
                     cooked--drain-pending nil)
-              (let ((update (cooked--drain cooked--session cooked-rejoin-wrapped-lines hidden t)))
+              (let ((update (cooked--drain cooked--session cooked-rejoin-wrapped-lines
+                                           (if hidden 'hidden 'promoting))))
                 (if (plist-get update :withheld)
                     (cooked--apply-withheld update)
                   (cooked--apply update)))
@@ -167,7 +168,7 @@ again is safe."
               ;; and a freeze that has lifted does not lift again.
               (while (and cooked--drain-pending cooked--session)
                 (setq cooked--drain-pending nil)
-                (cooked--apply (cooked--drain cooked--session cooked-rejoin-wrapped-lines nil t))))
+                (cooked--apply (cooked--drain cooked--session cooked-rejoin-wrapped-lines 'promoting))))
           (when (buffer-live-p buffer)
             (with-current-buffer buffer
               (setq cooked--draining nil

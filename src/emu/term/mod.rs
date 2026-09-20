@@ -451,6 +451,61 @@ pub struct Scrolled {
     pub wrapped: bool,
 }
 
+/// What a caller wants out of a drain; see [`Term::drain_as`].
+///
+/// One enum rather than the pair of booleans this was, because the four shapes are four
+/// states of one choice and only some of the pairs meant anything: "hidden and promoting"
+/// named nothing, and a caller that passed it got a hidden drain regardless.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Drain {
+    /// Everything, with every scrolled row sent as text. For a consumer that reads the
+    /// scrollback and keeps no copy of the screen.
+    #[default]
+    Whole,
+    /// [`Drain::Whole`] for a consumer that keeps the screen as text of its own, which can
+    /// be handed the rows of it that scroll away rather than sent them again; see
+    /// [`Delta::promoted`]. A cooked buffer is the one such consumer.
+    Promoting,
+    /// Everything but the screen, for a buffer no window shows; see [`Term::drain_hidden`].
+    Hidden,
+    /// [`Drain::Hidden`]'s delta for a consumer that has no screen to be shown one: the
+    /// scrollback, the events, the resources and the levels, and no damaged rows.
+    ///
+    /// `cooked-process--pump' is the caller. Its buffer shows the retired text and reads
+    /// what is still on the grid whole, through `cooked--screen-text', so every row the
+    /// core would diff against the front is built and then dropped. The damage waits in
+    /// the core exactly as [`Drain::Hidden`] leaves it, which is what keeps a later
+    /// [`Drain::Whole`] on the same session correct -- nothing here forgets the front, and
+    /// a whole drain after any number of scrolled ones repaints every row that changed
+    /// under them.
+    Scrolled,
+}
+
+impl Drain {
+    /// Whether the delta carries the screen: the damaged rows and the edits, the shifts,
+    /// and the marks still on the grid.
+    fn carries_screen(self) -> bool {
+        matches!(self, Self::Whole | Self::Promoting)
+    }
+
+    /// Whether rows Emacs already holds may be promoted rather than sent as text; see
+    /// [`Delta::promoted`].
+    fn promotes(self) -> bool {
+        self == Self::Promoting
+    }
+
+    /// Whether the consumer that asked for this drain is owed the screen by a later one,
+    /// which is what [`Delta::withheld`] tells Lisp.
+    ///
+    /// True only of [`Drain::Hidden`]: a buffer no window shows is one that *has* a screen
+    /// and will want it again the moment a window appears. [`Drain::Scrolled`] leaves the
+    /// same damage waiting in the core and is owed nothing, because its consumer holds no
+    /// row a damaged row could patch.
+    fn withholds(self) -> bool {
+        self == Self::Hidden
+    }
+}
+
 /// Everything that changed since the last drain.
 #[derive(Debug, Clone, Default)]
 pub struct Delta {
@@ -558,9 +613,13 @@ pub struct Delta {
     /// Marks that left the grid during a resize are here too, anchored into this drain's
     /// scrollback batch, which `anchor_to_lisp` already knows how to spell.
     pub marks: Vec<(MarkId, Anchor<Chars>)>,
-    /// Whether this drain left the screen out, being [`Term::drain_hidden`]'s: `rows`,
-    /// `shifts` and the marks still on the grid wait in the core, and the next drain that
-    /// is not hidden brings them.
+    /// Whether the consumer is owed the screen by a later drain: `rows`, `shifts` and the
+    /// marks still on the grid wait in the core, and the next drain that is not hidden
+    /// brings them.
+    ///
+    /// [`Term::drain_hidden`]'s, and only its. [`Drain::Scrolled`] leaves the same damage
+    /// waiting and reports false, because its consumer never asked for the screen and has
+    /// no row for a damaged row to patch; see [`Drain::withholds`].
     pub withheld: bool,
 }
 
@@ -1058,20 +1117,20 @@ impl Term {
 
     /// Everything that changed since the last drain, every scrolled row as text.
     pub fn drain(&mut self) -> Delta {
-        self.drain_with(false)
+        self.drain_as(Drain::Whole)
     }
 
     /// Everything that changed since the last drain, for a consumer that keeps the screen
     /// as text of its own and can promote the rows of it that scroll away; see
     /// [`Delta::promoted`].
     pub fn drain_promoting(&mut self) -> Delta {
-        self.drain_with(true)
+        self.drain_as(Drain::Promoting)
     }
 
-    fn drain_with(&mut self, promote: bool) -> Delta {
-        let route = &mut self.state.replies;
-        route.handling |= std::mem::take(&mut route.undrained);
-        self.state.drain(promote)
+    /// Drain for a consumer with no copy of the screen: everything but the damaged rows,
+    /// and nothing withheld; see [`Drain::Scrolled`].
+    pub fn drain_scrolled(&mut self) -> Delta {
+        self.drain_as(Drain::Scrolled)
     }
 
     /// Drain for a buffer no window shows: everything but the screen.
@@ -1090,12 +1149,24 @@ impl Term {
     /// A whole drain after all, marked by [`Delta::withheld`] being false, when an event
     /// needs the screen's text; see [`Queued::needs_text`].
     pub fn drain_hidden(&mut self) -> Delta {
-        if self.state.events.iter().any(Queued::needs_text) {
-            return self.drain();
-        }
+        self.drain_as(Drain::Hidden)
+    }
+
+    /// The one drain, in whichever of the four shapes the caller asked for.
+    ///
+    /// A [`Drain::Hidden`] whose events need the screen's text is a whole drain after all;
+    /// see [`Queued::needs_text`]. [`Drain::Scrolled`] is not escalated for the same
+    /// events: its consumer declines them -- `cooked-process--pump' passes no handler --
+    /// and holds no buffer text for a mark to anchor into or for `CSI 2 J' to pin.
+    pub fn drain_as(&mut self, shape: Drain) -> Delta {
+        let shape = if shape == Drain::Hidden && self.state.events.iter().any(Queued::needs_text) {
+            Drain::Whole
+        } else {
+            shape
+        };
         let route = &mut self.state.replies;
         route.handling |= std::mem::take(&mut route.undrained);
-        self.state.drain_hidden()
+        self.state.drain(shape)
     }
 
     /// Drop what a child has stopped sending: a chunked picture with no chunk for

@@ -807,7 +807,7 @@ reason for a field the core no longer sends is one nobody can check."
           (let* ((host (buffer-local-value 'cooked-process--host buffer))
                  (update (with-current-buffer host
                            (cooked--drain cooked-process--session
-                                          cooked-process--rejoin)))
+                                          cooked-process--rejoin 'scrolled)))
                  (handled (append cooked--consumed-drain-keys
                                   cooked-process--drain-keys)))
             ;; The drain is the real thing and not an empty plist a bug could

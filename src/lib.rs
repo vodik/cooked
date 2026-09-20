@@ -26,8 +26,8 @@ mod wire;
 pub mod wire_gen;
 
 use emu::{
-    Assumed, Button, CellMetrics, ColorScheme, FrameSize, ImageFormat, ImageId, Key, Modifiers,
-    NamedKey, PasteOutcome, PixelSize, ShownFormats,
+    Assumed, Button, CellMetrics, ColorScheme, Drain, FrameSize, ImageFormat, ImageId, Key,
+    Modifiers, NamedKey, PasteOutcome, PixelSize, ShownFormats,
 };
 use env::{Env, FromLisp, IntoLisp, Result, Runtime, UserPtr, Value, plist, sym};
 use nix::sys::signal::Signal;
@@ -182,7 +182,8 @@ pub unsafe extern "C" fn emacs_module_init(runtime: *mut Runtime) -> std::ffi::c
         /// byte and touches no termios flag.  NAME is nil where the platform declines to
         /// say.
         ///
-        /// With PROMOTE non-nil and HIDDEN nil, the rows scrolled off the top that the buffer already holds
+        /// MODE is what shape of drain this is, and nil means `whole'.  With `promoting',
+        /// the rows scrolled off the top that the buffer already holds
         /// as its top screen rows come as :promoted rather than in :scrolled: (BOTTOM . ROWS),
         /// ROWS having one (CHARS . ENDS) per row, oldest first, saying how many characters
         /// the row keeps and whether a newline ends it.  Those rows are the first of the
@@ -224,12 +225,21 @@ pub unsafe extern "C" fn emacs_module_init(runtime: *mut Runtime) -> std::ffi::c
         /// (ID FG BG UL ATTRS) per rendition first named, or named anew after its id was
         /// freed and reused.
         ///
-        /// With HIDDEN non-nil, for a buffer no window shows, the screen is left out:
+        /// With `hidden', for a buffer no window shows, the screen is left out:
         /// :rows, :edits and :shifts are empty and :marks holds only marks that scrolled
-        /// away, while the damage waits in SESSION for the next drain without HIDDEN.
+        /// away, while the damage waits in SESSION for the next drain that is not hidden.
         /// :withheld is then t.  It is nil, and the drain whole, when an event needs the
         /// screen's text (an OSC 133 mark, CSI 2 J or CSI 3 J) or the child has exited.
-        "cooked--drain" 1..=4 => drain;
+        ///
+        /// With `scrolled', the screen is left out the same way and nothing is withheld:
+        /// :withheld is nil and the damage still waits, because the consumer holds no copy
+        /// of the screen for a damaged row to patch and never asks for one.  It reads what
+        /// is on the grid whole, with `cooked--screen-text', and is never sent the screen
+        /// for an event either, having declined the events that would want it.  A later
+        /// `whole' drain of the same session is still correct: it brings every row that
+        /// changed under the scrolled drains in one go.  `cooked-process--pump' is the
+        /// caller.
+        "cooked--drain" 1..=3 => drain;
 
         /// The rows SESSION's screen occupies, as one rendered block.
         ///
@@ -989,14 +999,12 @@ impl<'e> FromLisp<'e> for SpawnState {
 
 fn drain<'e>(env: Env<'e>, args: &[Value<'e>]) -> Result<Value<'e>> {
     let rejoin = args.get(1).is_none_or(|v| !env.is_nil(*v));
-    let hidden = args.get(2).is_some_and(|v| !env.is_nil(*v));
-    let promote = args.get(3).is_some_and(|v| !env.is_nil(*v));
-    let session = env.from_lisp::<&Session>(args[0])?;
-    let update = if hidden {
-        session.drain_hidden()
-    } else {
-        session.drain_with(promote)
+    let shape = match args.get(2) {
+        Some(v) => env.from_lisp::<Drain>(*v)?,
+        None => Drain::Whole,
     };
+    let session = env.from_lisp::<&Session>(args[0])?;
+    let update = session.drain_as(shape);
     update_to_lisp(env, &update, rejoin)
 }
 
@@ -1382,6 +1390,26 @@ fn image_forget<'e>(env: Env<'e>, args: &[Value<'e>]) -> Result<Value<'e>> {
         env.from_lisp::<&Session>(args[0])?.term().forget_image(id);
     }
     Ok(env.nil())
+}
+
+impl<'e> FromLisp<'e> for Drain {
+    /// `cooked--drain''s MODE: nil or `whole', `promoting', `hidden', `scrolled'.
+    ///
+    /// Compared by identity for the reason [`ColorScheme`] is: these four are the whole of
+    /// the choice, and anything else is a caller passing the wrong thing.
+    fn from_lisp(env: &Env<'e>, v: Value<'e>) -> Result<Self> {
+        if env.is_nil(v) || env.eq(v, sym!(env, "whole")?) {
+            Ok(Drain::Whole)
+        } else if env.eq(v, sym!(env, "promoting")?) {
+            Ok(Drain::Promoting)
+        } else if env.eq(v, sym!(env, "hidden")?) {
+            Ok(Drain::Hidden)
+        } else if env.eq(v, sym!(env, "scrolled")?) {
+            Ok(Drain::Scrolled)
+        } else {
+            Err(env.signal_wrong_type("cooked-drain-mode-p", v))
+        }
+    }
 }
 
 impl<'e> FromLisp<'e> for ColorScheme {
