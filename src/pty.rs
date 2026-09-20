@@ -242,30 +242,83 @@ pub(crate) struct Fds {
 pub(crate) struct Pty {
     /// `None` once [`Pty::close`] has released them; see [`Fds`].
     fds: std::sync::Mutex<Option<std::sync::Arc<Fds>>>,
+    /// The pid the fork returned, which outlives the child: `cooked--pid' answers with it
+    /// after the exit, and [`Child::Collected`] is what says it is no longer ours to aim
+    /// a signal at.
     child: Pid,
-    /// Set once `waitpid` has collected the child. Signalling after that point would
-    /// aim at a pid the kernel is free to have handed to somebody else.
-    reaped: std::sync::atomic::AtomicBool,
-    /// The status `waitpid` collected, for whoever did not collect it.
+    /// Whether the child is still ours, and what it exited with once it is not; see
+    /// [`Child`] and [`Live`].
+    state: std::sync::Mutex<Child>,
+}
+
+/// Whether the child is still ours to signal.
+///
+/// One state under one lock, where there were three fields beside each other: a `reaped`
+/// flag, the `collected` status written before it so that whoever saw the flag could read
+/// the status behind it, and a `reap_lock` serialising `signal`'s
+/// reaped-check-then-`killpg` against `waitpid`'s own reaped-check-then-collect. The
+/// order between the first two was a comment, and the third existed only because the
+/// other two could be read apart: a `cooked--signal' on Emacs' thread could see the flag
+/// clear, have the reader's `waitpid` collect the child -- freeing its pid for reuse -- in
+/// the gap, and `killpg` a process group the kernel had since handed to something else.
+///
+/// Now there is nothing to keep in order and nothing to remember to check: the pid is
+/// reachable only through [`Live`], which is this lock held on `Running`, and `waitpid` is
+/// the same lock. Both critical sections are one `killpg` or one `WNOHANG` `waitpid`,
+/// never blocking, so holding it across either is always short.
+#[derive(Debug)]
+enum Child {
+    /// Running, or a zombie nobody has collected: the pid is ours and a signal reaches it
+    /// and nothing else.
+    Running,
+    /// What `waitpid` collected, for whoever did not collect it.
     ///
     /// `waitpid` hands a status to exactly one caller, and since `Session::shutdown`
     /// stopped joining the reader either thread may be that caller. The loser needs the
     /// real status all the same -- `Session::alive` answers from it -- and without this it
-    /// had only `Exit::Lost` to record, or nothing at all, which would leave a killed session
-    /// reporting itself alive for as long as the winner took to write the status down.
+    /// had only `Exit::Lost` to record, or nothing at all, which would leave a killed
+    /// session reporting itself alive for as long as the winner took to write the status
+    /// down.
+    Collected(i32),
+}
+
+/// The child while it is still ours, with the lock that keeps it so held.
+///
+/// A signal aims at a pid, and a pid the kernel has taken back belongs to whatever it was
+/// handed to next -- which is why `killpg` after the reap is the one thing this file must
+/// make impossible rather than merely refuse. So the target is not a field anyone can
+/// reach: it is behind [`Pty::live`], which answers [`Error::Reaped`] once the child has
+/// been collected, and which holds the lock `waitpid` needs for as long as the caller
+/// holds it. There is no spelling for signalling a reaped pid.
+///
+/// The descriptors are taken under this and never the other way round: `Pty::signal`
+/// reads the foreground group and asks the platform to deliver while it holds the child,
+/// and the `fds` lock is a leaf everywhere, cloned out and let go in the one expression.
+struct Live<'a> {
+    pid: Pid,
+    /// The child, still `Running` for as long as this lives.
+    _held: std::sync::MutexGuard<'a, Child>,
+}
+
+impl Live<'_> {
+    /// The child's own pid, which is also its process group: `Pty::spawn` puts it in a
+    /// session of its own.
+    fn pid(&self) -> Pid {
+        self.pid
+    }
+
+    /// `killpg` TARGET, refusing anything that could reach our own process group.
     ///
-    /// Written under `reap_lock` before `reaped` is set, so anyone who sees that flag sees
-    /// this too.
-    collected: std::sync::Mutex<Option<i32>>,
-    /// Serialises `signal`'s reaped-check-then-`killpg` against `waitpid`'s own
-    /// reaped-check-then-collect, both of which touch `reaped`. Without this, a
-    /// `cooked--signal` call on the Lisp thread can observe `reaped() == false`, have
-    /// the reader thread's `waitpid` collect the child (freeing its pid for reuse) in
-    /// the gap, and then `killpg` a process group the kernel has since handed to
-    /// something else entirely. Both critical sections are a `WNOHANG` `waitpid` or a
-    /// single `killpg` — never blocking — so holding this across either is always
-    /// short.
-    reap_lock: std::sync::Mutex<()>,
+    /// The guard is not paranoia: `tcgetpgrp` can report 0 once the session is gone, and
+    /// `kill(-0, ...)` means "my own process group" — which here is Emacs.
+    fn signal(&self, target: Pid, sig: Signal) -> Result<()> {
+        match target {
+            // `killpg` rather than `kill(-pid)`, which one missed negation turns into a
+            // signal to the wrong process.
+            target if target.as_raw() > 1 => Ok(killpg(target, sig)?),
+            _ => Err(Error::NoForeground),
+        }
+    }
 }
 
 /// How long [`Pty::write`] waits on a child that is not draining its input before it
@@ -517,9 +570,7 @@ impl Pty {
                 exit_watch: platform::ExitWatch::new(child),
             }))),
             child,
-            reaped: std::sync::atomic::AtomicBool::new(false),
-            collected: std::sync::Mutex::new(None),
-            reap_lock: std::sync::Mutex::new(()),
+            state: std::sync::Mutex::new(Child::Running),
         })
     }
 
@@ -730,27 +781,34 @@ impl Pty {
         }
     }
 
+    /// The child, for as long as the caller holds it, or [`Error::Reaped`] once it has
+    /// been collected; see [`Live`].
+    fn live(&self) -> Result<Live<'_>> {
+        let held = self.state.held();
+        match *held {
+            Child::Running => Ok(Live {
+                pid: self.child,
+                _held: held,
+            }),
+            Child::Collected(_) => Err(Error::Reaped),
+        }
+    }
+
     /// Signal the foreground process group, falling back to the child's own.
     ///
-    /// The guard is not paranoia: `tcgetpgrp` can report 0 once the session is gone, and
-    /// `kill(-0, ...)` means "my own process group" — which here is Emacs. Once the child
-    /// has been reaped its pid is available for reuse, so refuse then too.
+    /// The child is held across the whole of it, so a `waitpid` on another thread cannot
+    /// reap it -- and free its pid for reuse -- between the group being read and the
+    /// signal going out. See [`Live`].
     pub(crate) fn signal(&self, sig: Signal) -> Result<()> {
-        // Held across the check and the `killpg` so a `waitpid` on another thread
-        // cannot reap the child, and free its pid for reuse, in between. See the field
-        // comment on `reap_lock`.
-        let _guard = self.reap_lock.held();
-        if self.reaped() {
-            return Err(Error::Reaped);
-        }
+        let live = self.live()?;
         match self.foreground() {
             // The platform may deliver to the foreground group itself, under the
             // kernel's lock; otherwise the group is read here and signalled in two steps.
             Ok(foreground) => match platform::signal_foreground(self.fds()?.master.as_fd(), sig) {
                 Some(result) => Ok(result?),
-                None => Self::send_to(foreground, sig),
+                None => live.signal(foreground, sig),
             },
-            Err(_) => Self::send_to(self.child, sig),
+            Err(_) => live.signal(live.pid(), sig),
         }
     }
 
@@ -779,16 +837,13 @@ impl Pty {
     /// either way; taking it first is what makes the second signal land on the job that
     /// was in the foreground when the hangup was decided on.
     pub(crate) fn hangup(&self) -> Result<()> {
-        let _guard = self.reap_lock.held();
-        if self.reaped() {
-            return Err(Error::Reaped);
-        }
+        let live = self.live()?;
         let foreground = self.foreground();
-        let result = Self::send_to(self.child, Signal::SIGHUP);
+        let result = live.signal(live.pid(), Signal::SIGHUP);
         if let Ok(foreground) = foreground
-            && foreground != self.child
+            && foreground != live.pid()
         {
-            let _ = Self::send_to(foreground, Signal::SIGHUP);
+            let _ = live.signal(foreground, Signal::SIGHUP);
         }
         result
     }
@@ -799,32 +854,22 @@ impl Pty {
     }
 
     fn signal_group(&self, sig: Signal) -> Result<()> {
-        let _guard = self.reap_lock.held();
-        if self.reaped() {
-            return Err(Error::Reaped);
-        }
-        Self::send_to(self.child, sig)
-    }
-
-    /// `killpg` TARGET, refusing anything that could reach our own process group.
-    fn send_to(target: Pid, sig: Signal) -> Result<()> {
-        match target {
-            // `killpg` rather than `kill(-pid)`, which one missed negation turns into a
-            // signal to the wrong process.
-            target if target.as_raw() > 1 => Ok(killpg(target, sig)?),
-            _ => Err(Error::NoForeground),
-        }
+        let live = self.live()?;
+        live.signal(live.pid(), sig)
     }
 
     /// Whether the child has been collected, and its pid therefore no longer ours.
     pub(crate) fn reaped(&self) -> bool {
-        self.reaped.load(std::sync::atomic::Ordering::SeqCst)
+        self.collected().is_some()
     }
 
     /// The status whoever reaped the child collected, if anyone has; see
-    /// [`Self::collected`].
+    /// [`Child::Collected`].
     pub(crate) fn collected(&self) -> Option<i32> {
-        *self.collected.held()
+        match *self.state.held() {
+            Child::Running => None,
+            Child::Collected(status) => Some(status),
+        }
     }
 
     /// Exit status if the child has terminated, without blocking.
@@ -893,13 +938,13 @@ impl Pty {
     }
 
     fn waitpid(&self, flags: WaitPidFlag) -> Result<Option<i32>> {
-        // Same lock `signal` takes, and for the same reason: this call (always
-        // `WNOHANG`, so never blocking) is what can flip `reaped` out from under a
-        // concurrent `signal`.
-        let _guard = self.reap_lock.held();
-        if self.reaped() {
+        // The same lock a signal holds, and for the same reason: this call (always
+        // `WNOHANG`, so never blocking) is what takes the child away from a concurrent
+        // `killpg`. See [`Live`].
+        let mut state = self.state.held();
+        let Child::Running = *state else {
             return Ok(None);
-        }
+        };
         let collected = match waitpid(self.child, Some(flags))? {
             WaitStatus::Exited(_, code) => code,
             // The shell convention, and what `cooked-last-exit-code' renders.
@@ -907,10 +952,9 @@ impl Pty {
             // Still alive, or merely stopped or continued: the child is still ours.
             _ => return Ok(None),
         };
-        // Written before `reaped`, so a thread that sees the flag can always read the
-        // status behind it.
-        *self.collected.held() = Some(collected);
-        self.reaped.store(true, std::sync::atomic::Ordering::SeqCst);
+        // One write, so there is no order to keep between the status and the fact that
+        // there is one.
+        *state = Child::Collected(collected);
         Ok(Some(collected))
     }
 }
