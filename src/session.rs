@@ -260,6 +260,39 @@ pub(crate) struct Update {
     pub exit: Option<Exit>,
 }
 
+/// What the reader knows about the tty's foreground, which is not the same as what the
+/// tty has.
+///
+/// The distinction is the first sample. A session is spawned, and for the moment before
+/// the child has called `setsid` and taken the terminal, `tcgetpgrp` has nothing to
+/// report; the sample that finds the shell a fraction of a millisecond later is not a
+/// change in what is running but the first time anyone looked. Announced as a change, it
+/// is a wakeup a session always sends and never owes, and the tests that count wakes see
+/// it: `a_panicking_reader_ends_the_session_and_wakes_emacs` consumed it in place of the
+/// byte `finish` sends.
+///
+/// So "nothing holds the terminal" and "nobody has asked yet" are two states rather than
+/// one `None`, and only a move between two *answers* is a change. See
+/// [`Shared::sample_foreground`].
+#[derive(Debug, PartialEq, Eq)]
+enum Watched {
+    /// Never sampled. The next sample settles it and announces nothing.
+    Unseen,
+    /// The last answer, `None` meaning nothing held the terminal at that moment.
+    Seen(Option<Foreground>),
+}
+
+impl Watched {
+    /// The answer to hand Lisp, which has no use for the distinction above: a session
+    /// nobody has sampled yet and a tty nothing holds are both "no foreground program".
+    fn program(&self) -> Option<Foreground> {
+        match self {
+            Self::Unseen => None,
+            Self::Seen(foreground) => foreground.clone(),
+        }
+    }
+}
+
 /// Where everything that paces a frame reads the time.
 ///
 /// `Instant::now` in a session, and in a test a clock the test steps by hand. The rules
@@ -626,6 +659,29 @@ impl Notifier {
         self.flush()
     }
 
+    /// Mark something pending that Emacs should have soon, under the gates that pace a
+    /// frame rather than in spite of them.
+    ///
+    /// The difference from [`Self::announce`] is which of them is right for a *level*
+    /// that is not urgent enough to break a frame. What the tty has in the foreground is
+    /// the case this exists for: Emacs wants it within a tick, so that a program the
+    /// shell just `exec`ed into is named and given its key protocol, but it is not the
+    /// child saying anything and a program that `exec`s in the middle of one of its own
+    /// frames must not tear that frame. Clearing `last_read` and `ceiling_at` the way
+    /// `announce` does would do exactly that: a `sh -c '...; exec sleep 5'` writing under
+    /// DEC mode 2026 would have its half-drawn frame sent the moment the `exec` landed,
+    /// and two writes a quiescence window apart would be drawn as two frames because the
+    /// `exec` between them released the first.
+    ///
+    /// So the deadlines are left alone and [`Self::flush`] decides, as it does for a
+    /// read. A session with nothing else going on has no gate to wait on and is woken at
+    /// once; a session mid-frame carries the level out with the frame it was already
+    /// going to draw, and the reader retries the flush on every tick either way.
+    fn note(&self) -> bool {
+        self.state.held().pending.changed();
+        self.flush()
+    }
+
     /// A keystroke is about to be written, so the frame that echoes it may skip
     /// `min_interval`; see [`NotifyState::echo`].
     ///
@@ -851,12 +907,12 @@ struct Shared {
     sending: AtomicUsize,
     mode: AtomicMode,
     /// What the tty has in the foreground, as the reader last sampled it; see
-    /// [`Shared::sample_foreground`]. `None` while nothing holds the terminal.
+    /// [`Shared::sample_foreground`] and [`Watched`].
     ///
     /// A mutex rather than an atomic because it carries a name, and behind a mutex
     /// rather than beside `mode` in `Term` because it is a fact about the tty, which is
     /// the reader's to sample and Emacs' only to read at a drain.
-    foreground: Mutex<Option<Foreground>>,
+    foreground: Mutex<Watched>,
     /// A size the child is not yet known to have, for the reader thread to keep applying
     /// until it sticks. `None` once the tty agrees. See `Session::resize`.
     pending_resize: Mutex<Option<Winsize>>,
@@ -1167,9 +1223,6 @@ impl Session {
 
         let pty = Pty::spawn(argv, env, size, cwd)?;
         let mode = pty.mode().unwrap_or_default();
-        // Sampled here for the same reason `mode` is: the first tick would otherwise find
-        // the shell where `None` was and announce a change nothing changed.
-        let foreground = pty.foreground_program();
         let mut term = Term::new(size.rows.into(), size.cols.into());
         // XTGETTCAP answers for the entry the child was told about, and this is where
         // what it was told is known: Lisp chose TERM, and it arrives here with the rest.
@@ -1201,7 +1254,7 @@ impl Session {
             writer: Mutex::new(()),
             sending: AtomicUsize::new(0),
             mode: AtomicMode::new(mode),
-            foreground: Mutex::new(foreground),
+            foreground: Mutex::new(Watched::Unseen),
             pending_resize: Mutex::new(None),
             clock: options.clock.clone(),
             notifier: Notifier::new(wake, &options),
@@ -1371,7 +1424,7 @@ impl Session {
         Update {
             delta,
             mode: self.shared.mode.load(),
-            foreground: self.shared.foreground.held().clone(),
+            foreground: self.shared.foreground.held().program(),
             exit: *self.shared.exited.held(),
         }
     }
@@ -1394,7 +1447,7 @@ impl Session {
         Update {
             delta,
             mode: self.shared.mode.load(),
-            foreground: self.shared.foreground.held().clone(),
+            foreground: self.shared.foreground.held().program(),
             exit,
         }
     }
@@ -1686,6 +1739,14 @@ impl Shared {
     /// business, not the notifier's: a failed write means Emacs is gone.
     fn announce(&self) {
         if !self.notifier.announce() {
+            self.shutdown.store(true, Ordering::SeqCst);
+        }
+    }
+
+    /// Mark a level Emacs should have soon without breaking a frame to deliver it; see
+    /// [`Notifier::note`].
+    fn note(&self) {
+        if !self.notifier.note() {
             self.shutdown.store(true, Ordering::SeqCst);
         }
     }
@@ -1995,20 +2056,22 @@ impl Shared {
             // nothing reports a change of foreground program either. The poll timeout
             // bounds the latency of both, and an unchanged sample costs nothing.
             //
-            // Both are taken before either is acted on, so one tick's wakeup carries
-            // whichever of them moved rather than the mode's short-circuiting the other.
+            // The two are told apart by how urgent they are, which is why they are not
+            // one call. A mode change is `announce`: a password prompt turning echo off
+            // is worth breaking a held frame for, because it is only useful early. A
+            // change of foreground program is `note`, which waits out the same gates a
+            // read does -- see `Notifier::note` for why a program that `exec`s in the
+            // middle of its own frame must not tear it.
             //
-            // A hidden buffer is not woken for the foreground program alone: nothing
+            // A hidden buffer is not woken for the foreground program at all: nothing
             // shows the mode line that would name it and no keystroke can reach the
             // keymap it would change, so the sample is kept and the level rides the drain
-            // `Session::set_hidden` announces when a window shows the buffer again. The
-            // mode is announced either way, because a secret prompt is owed its debounce
-            // whether or not anyone is looking yet.
-            let mode_changed = self.sample_mode();
-            let foreground_changed =
-                self.sample_foreground() && !self.hidden.load(Ordering::Relaxed);
-            if mode_changed || foreground_changed {
+            // `Session::set_hidden` announces when a window shows the buffer again.
+            if self.sample_mode() {
                 self.announce();
+            }
+            if self.sample_foreground() && !self.hidden.load(Ordering::Relaxed) {
+                self.note();
             }
             self.retire_resample();
 
@@ -2346,11 +2409,13 @@ impl Shared {
     /// `tcgetpgrp` plus a small `/proc` read, which is nothing at ten times a second and
     /// is not something a flood should pay per chunk. A change that follows output is
     /// caught by the resample [`RESAMPLE_DELAY`] arms, like a termios change is.
+    ///
+    /// The first sample is not a change, however it comes out; see [`Watched`].
     fn sample_foreground(&self) -> bool {
         let sampled = self.pty.foreground_program();
         let mut held = self.foreground.held();
-        let changed = *held != sampled;
-        *held = sampled;
+        let changed = matches!(&*held, Watched::Seen(last) if *last != sampled);
+        *held = Watched::Seen(sampled);
         changed
     }
 
