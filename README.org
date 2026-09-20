@@ -570,7 +570,8 @@ make bench         # the acceptance gate for the render and write paths
 
 =lisp-test-quick= is the inner loop: it excludes tests tagged =pty= (they depend
 on a real child's behaviour or timing), =stress= (they loop many times to hunt a
-race) and =tmux=, and it splits by file the way =lisp-test-parallel= does, so
+race), =script= (they run a real shell under script(1)) and =tmux=, and it splits
+by file the way =lisp-test-parallel= does, so
 =make -j8 lisp-test-quick= uses the machine.  Neither =lisp-test= nor
 =lisp-test-parallel= excludes anything by default; =lisp-test-quick= is a faster
 subset for iterating, not a replacement.  =SELECTOR= narrows any of the ERT-based
