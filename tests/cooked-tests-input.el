@@ -2418,8 +2418,9 @@ the core -- rather than encoded against a copy of them that is a drain old."
 click's real pixel, not the cell's top-left corner.
 
 Regression: `cooked--mouse-offset' used to measure a pointer's offset only
-when `cooked-mouse-state-pixels' said the child wanted one, and that field was
-only as fresh as the last drain.  A child enabling 1016 and reading a click
+when the `pixels' slot of `cooked-mouse-state' said the child wanted one, and
+that slot was only as fresh as the last drain.  A child enabling 1016 and
+reading a click
 before Emacs next drained got a report the format tag alone said was pixels,
 but whose coordinates were still the cell scaled and biased -- the corner
 every position-standing-in-for-the-pointer already reports, indistinguishable
