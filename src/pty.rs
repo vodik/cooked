@@ -173,12 +173,11 @@ impl Winsize {
         }
     }
 
-    /// ROWS by COLS, with CELL as the font's measured size.
-    pub fn with_cell(rows: u16, cols: u16, cell: CellMetrics) -> Self {
+    /// The same size, with CELL as the font's measured size.
+    pub fn with_cell(self, cell: CellMetrics) -> Self {
         Self {
-            rows,
-            cols,
             cell: Some(cell),
+            ..self
         }
     }
 }

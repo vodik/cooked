@@ -4071,11 +4071,7 @@ mod tests {
         ]);
         wait_for(&session, |u| rendered(u).contains("ready"));
         session
-            .resize(Winsize::with_cell(
-                12,
-                40,
-                CellMetrics::new(10, 20).expect("nonzero"),
-            ))
+            .resize(Winsize::new(12, 40).with_cell(CellMetrics::new(10, 20).expect("nonzero")))
             .expect("resize");
         // The answer to `2048 h` first, sent by the reader as it parsed the request, then
         // the report the resize owes.
