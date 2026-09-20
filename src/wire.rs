@@ -374,7 +374,7 @@ pub(crate) struct Block<'a, 'e> {
     /// Leave the LINK field of every record zero, for an encoding whose consumer has no
     /// table to resolve an id through.
     unlinked: bool,
-    /// Columns `text` occupies on the grid, summed from [`Run::cols`].
+    /// Columns `text` occupies on the grid, summed from [`RunRef::cols`].
     ///
     /// `cooked--guard-row-width' needs to know how wide a row *should* be, and asking
     /// `string-width' costs 59us a row for CJK and 100us for box drawing, to recompute

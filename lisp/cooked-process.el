@@ -399,11 +399,12 @@ against the screen column it sits on.  A compilation buffer has no screen
 column, and text that displays as something other than itself is text a regexp
 matches and the eye does not.
 
-Links are dropped because they could not be followed from there.  A
-`cooked-link-id' resolves through `cooked--link-uris', which is buffer-local
-to the session -- the hidden host, here -- so an id carried into the consumer's
-buffer would arrive as a `mouse-face' over text whose destination nothing in
-that buffer can look up.  Worse than no link.
+Links are dropped because nothing there would follow them.  The destination
+itself rides on the text now, as `cooked-link-uri', so it would survive the
+trip; but the keys, the mouse bindings and the `help-echo' that act on it are
+`cooked-mode''s, and the consumer is a compilation buffer with its own.  A link
+carried across would arrive as a `mouse-face' over text that does nothing when
+clicked.  Worse than no link.
 
 The styling is applied by rendering into the host buffer and lifting the result
 out again, rather than by building a propertized string: `cooked--render-block'

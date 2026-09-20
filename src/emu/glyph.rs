@@ -70,9 +70,9 @@ const DASH_MASK: u16 = 0b11 << DASH_SHIFT;
 /// `cooked--box-weight-*' and `cooked--box-direction-*'. See
 /// [`crate::emu::cell::wire_layout`] and [`crate::wire::wire_layout`] for the rest.
 ///
-/// `cooked--box-weight-light' has no entry: light is the bit pattern every other
-/// weight is stated relative to (`cooked--box-weight-none' 0, `-heavy' 2, `-double' 3),
-/// and nothing on either side spells 1 by name.
+/// A light weight has no entry: light is the bit pattern every other weight is stated
+/// relative to (`cooked--box-weight-none' 0, `-heavy' 2, `-double' 3), and nothing on
+/// either side spells 1 by name.
 pub(crate) fn wire_layout() -> Vec<(&'static str, u32)> {
     vec![
         ("box-kind-block", u32::from(KIND_BLOCK)),
