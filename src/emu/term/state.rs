@@ -129,6 +129,11 @@ impl State {
     /// The guard is about which screen produced the rows, so callers that already know the
     /// rows came from the primary must use [`State::archive`] instead — see `resize`.
     ///
+    /// Asked of the screen the rows left rather than of [`State::shown`], so that whether a
+    /// grid is a transcript has one owner: [`Screen::keeps_history`] is the same fact that
+    /// stops the alternate grid building departure records in the first place, and the two
+    /// cannot now disagree.
+    ///
     /// Growth is bounded by backpressure rather than by discarding: once [`Term::backlog`]
     /// is high the reader stops reading and the child blocks in `write`, as against a slow
     /// terminal. Losing the middle of a build log is worse than waiting.
@@ -136,7 +141,7 @@ impl State {
     /// The alt screen contributes no scrollback and has a fixed-size grid, so there is
     /// nothing there to apply backpressure against.
     pub(super) fn evicted(&mut self, rows: Evicted) {
-        if self.shown.is_alternate() {
+        if !self.screen().keeps_history() {
             return;
         }
         self.archive(rows);

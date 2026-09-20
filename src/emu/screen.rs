@@ -674,11 +674,12 @@ pub struct Screen {
     insert_mode: bool,
     /// Whether rows leaving the top of this grid are history worth building.
     ///
-    /// False for the alternate grid, which contributes no transcript.
-    /// [`State::evicted`](super::term) owns the policy of not archiving while the alternate
-    /// screen is shown; this only stops the *work* of building departure records nobody
-    /// will read. It cannot be folded into [`Screen::archives`], whose full-region test is
-    /// as true under `less` as on the primary.
+    /// False for the alternate grid, which contributes no transcript. The one owner of that
+    /// fact: it stops the work of building departure records nobody will read, and
+    /// [`Screen::keeps_history`] is what `State::evicted` asks before archiving what it is
+    /// handed, in place of a second reading of which screen is shown. It cannot be folded
+    /// into [`Screen::archives`], whose full-region test is as true under `less` as on the
+    /// primary.
     history: bool,
 }
 
@@ -725,6 +726,14 @@ impl Screen {
             history: false,
             ..Self::new(rows, cols)
         }
+    }
+
+    /// Whether rows leaving the top of this grid become Emacs' transcript.
+    ///
+    /// False for the alternate screen, and the reason a grid built by [`Screen::scratch`]
+    /// hands nothing to anyone: a full-screen program's frame is a picture, not history.
+    pub fn keeps_history(&self) -> bool {
+        self.history
     }
 
     /// Keep a copy of the next COUNT rows to leave the top; see [`Departed::row`].
@@ -1721,7 +1730,7 @@ impl Screen {
     ///
     /// Scanned back from [`Damage`]'s reach rather than from the bottom row, which is what
     /// keeps a screen using five of its fifty rows from reading forty-five blank rows on
-    /// every drain. [`Screen::last_used_row_by_scan`] is the same answer the slow way, and
+    /// every drain. `Screen::last_used_row_by_scan` is the same answer the slow way, and
     /// the property test holds the two together.
     fn last_used_row(&self) -> usize {
         self.damage
@@ -2479,6 +2488,11 @@ mod tests {
 
         // The scroll itself still happened: this is about what leaves, not what moves.
         assert_eq!(scratch.row(0).unwrap().to_text(), "");
+
+        // And the grid says so itself, which is what `State::evicted` asks before
+        // archiving rather than reading back which screen is shown.
+        assert!(primary.keeps_history());
+        assert!(!scratch.keeps_history());
     }
 
     #[test]
