@@ -12,6 +12,7 @@ use crate::pty::{
     Winsize,
 };
 use crate::replies::ReplyQueue;
+use crate::wire::WireConst;
 use nix::errno::Errno;
 use nix::poll::{PollFd, PollFlags};
 use nix::sys::signal::{SigSet, Signal};
@@ -1233,17 +1234,28 @@ impl Default for Options {
 }
 
 /// This module's half of `cooked--wire-layout': the tuning defaults above and
-/// [`crate::emu::BACKLOG_HIGH_WATER`], mirrored by `cooked-min-redisplay-interval' and
-/// `cooked-backlog-limit' in lisp/cooked-session.el. See
+/// [`crate::emu::BACKLOG_HIGH_WATER`], which lisp/cooked-session.el reads for the
+/// standard values of `cooked-min-redisplay-interval' and `cooked-backlog-limit'. See
 /// [`crate::emu::cell::wire_layout`], [`crate::emu::glyph::wire_layout`] and
 /// [`crate::wire::wire_layout`] for the rest.
-pub(crate) fn wire_layout() -> Vec<(&'static str, u32)> {
+pub(crate) fn wire_layout() -> Vec<WireConst> {
     vec![
-        (
+        WireConst::new(
             "min-redisplay-interval-ms",
             DEFAULT_MIN_REDISPLAY_INTERVAL_MS as u32,
+            "Redisplay floor the core falls back to, in milliseconds.\n\
+             \n\
+             What a session is paced by when `cooked--spawn' is given no interval; the\n\
+             standard value of `cooked-min-redisplay-interval' is this in seconds.",
         ),
-        ("backlog-limit", crate::emu::BACKLOG_HIGH_WATER as u32),
+        WireConst::new(
+            "backlog-limit",
+            crate::emu::BACKLOG_HIGH_WATER as u32,
+            "Items the core lets pile up before it stops draining the pty.\n\
+             \n\
+             The standard value of `cooked-backlog-limit'; see that variable for what\n\
+             raising it buys and costs.",
+        ),
     ]
 }
 

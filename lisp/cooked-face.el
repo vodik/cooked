@@ -23,20 +23,11 @@
 (require 'color)
 (require 'face-remap)
 (require 'cooked-util)
-
-(defconst cooked--attr-bold 1)
-(defconst cooked--attr-faint 2)
-(defconst cooked--attr-italic 4)
-(defconst cooked--attr-underline 8)
-(defconst cooked--attr-blink 16)
-(defconst cooked--attr-reverse 32)
-(defconst cooked--attr-conceal 64)
-(defconst cooked--attr-strike 128)
-(defconst cooked--attr-underline-shift 8
-  "Bit position of the underline-style field.  See `Attrs' in src/emu/cell.rs.")
-(defconst cooked--attr-underline-style (ash 7 cooked--attr-underline-shift))
-(defconst cooked--attr-overline (ash 1 11)
-  "SGR 53, above the underline-style field.  See `Attrs' in src/emu/cell.rs.")
+;; `cooked--attr-*' and the style-record offsets, printed from the core's own
+;; tables: the numbers this file reads are not written here.  A top-level
+;; `require' is loaded by the byte-compiler as well, which is what lets
+;; `cooked--do-style-spans' expand `cooked--style-record' into a literal.
+(require 'cooked-wire)
 
 (defcustom cooked-color-names
   ["black" "red3" "green3" "yellow3" "blue2" "magenta3" "cyan3" "gray90"
@@ -525,28 +516,6 @@ the colours and with conceal.")
 (defsubst cooked--attr-p (attrs bit)
   "Whether BIT is set in the ATTRS bitmask."
   (/= 0 (logand attrs bit)))
-
-(eval-and-compile
-  (defconst cooked--style-record 16
-    "Bytes in one packed style span.  See `Block::push_style' in src/wire.rs.
-
-The stride *is* the format: a reader finds the next span by adding this and
-never by decoding a length.  The Rust side asserts the same number, so a field
-added to the record on one side without widening it on both desynchronises the
-two at the second span of the first styled row, where every later span reads
-its neighbour's bytes and the buffer comes out miscoloured with nothing to
-point at.
-
-The fields are `u32's at the offsets the constants below name: START and END
-as character offsets, then the ids of the span's rendition and link.  They are
-available at compile time so that `cooked--do-style-spans' adds literals rather
-than look up variables on the render path.")
-
-  (defconst cooked--style-start 0 "Offset of START in a style record.")
-  (defconst cooked--style-end 4 "Offset of END in a style record.")
-  (defconst cooked--style-id 8 "Offset of the rendition id in a style record.")
-  (defconst cooked--style-link 12
-    "Offset of the link id in a style record, 0 for none."))
 
 (defun cooked--install-styles (styles)
   "Record STYLES, a drain's `:styles', before anything naming them renders.

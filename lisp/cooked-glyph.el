@@ -31,40 +31,24 @@
 ;;; Code:
 
 (require 'cl-lib)
+(require 'cooked-wire)
 
 ;;;; The descriptor
 ;;
-;; Mirrors the bit layout of `BoxGlyph' in src/emu/glyph.rs — kept in sync by hand,
-;; the same way `cooked--attr-*' in cooked-face.el mirrors `Attrs'.  Line glyphs: four
-;; 2-bit edge-weight fields (up/down/left/right, 0=none 1=light 2=heavy 3=double)
-;; packed into bits 0-7, an arc flag at bit 8, forward/backward diagonal flags at
-;; bits 9-10 (mutually exclusive with the edge fields on any real codepoint), and a
-;; 2-bit dash code in bits 11-12.  Block glyphs: bit 15 set, a 3-bit direction in
-;; bits 0-2, a 4-bit fill amount in bits 3-6.
+;; The bit layout of `BoxGlyph' in src/emu/glyph.rs, read from cooked-wire.el rather
+;; than written out again here: `cooked--box-*' is printed from the same constants
+;; the Rust side packs with.  Line glyphs: four 2-bit edge-weight fields
+;; (up/down/left/right, 0=none 1=light 2=heavy 3=double) packed into bits 0-7, an arc
+;; flag at bit 8, forward/backward diagonal flags at bits 9-10 (mutually exclusive
+;; with the edge fields on any real codepoint), and a 2-bit dash code in bits 11-12.
+;; Block glyphs: bit 15 set, a 3-bit direction in bits 0-2, a 4-bit fill amount in
+;; bits 3-6.
 
-(defconst cooked--box-kind-block (ash 1 15))
-(defconst cooked--box-arc (ash 1 8))
-(defconst cooked--box-diag-forward (ash 1 9))
-(defconst cooked--box-diag-backward (ash 1 10))
-(defconst cooked--box-dash-shift 11)
-(defconst cooked--box-dash-mask (ash 3 11))
 (defconst cooked--box-dash-counts [0 2 3 4]
   "Dash code (bits 11-12 of a line descriptor) to the number of dashes it means.
 Unicode defines only 2-, 3- and 4-dash lines, so the count does not fit the
 two bits the layout has left; `BoxGlyph::dashes' in src/emu/glyph.rs decodes
 the same table on the Rust side.")
-
-(defconst cooked--box-weight-none 0)
-(defconst cooked--box-weight-heavy 2)
-(defconst cooked--box-weight-double 3)
-
-(defconst cooked--box-direction-up 0)
-(defconst cooked--box-direction-down 1)
-(defconst cooked--box-direction-left 2)
-(defconst cooked--box-direction-right 3)
-(defconst cooked--box-direction-full 4)
-(defconst cooked--box-direction-shade 5)
-(defconst cooked--box-direction-quadrant 6)
 
 (defun cooked--box-block-p (bits)
   "Whether descriptor BITS names a block element rather than a line glyph."

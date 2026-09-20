@@ -32,7 +32,10 @@
 
 ;;; Code:
 
+(require 'seq)
 (require 'cooked-util)
+;; `cooked--wire-constants' and `cooked--key-names', for `cooked--check-wire-drift'.
+(require 'cooked-wire)
 
 (cooked--declare-core)
 
@@ -501,6 +504,51 @@ file, so the file is what gets asked."
     (message "cooked: the native core was rebuilt after this session loaded it%s"
              " -- restart Emacs if anything looks wrong")))
 
+(defvar cooked--wire-checked nil
+  "Non-nil once `cooked--check-wire-drift' has compared this session's core.
+A session is married to the core it mapped, so the answer cannot change under
+it and the walk is worth doing exactly once.")
+
+(defun cooked--check-wire-drift ()
+  "Say so if the loaded core's wire layout differs from lisp/cooked-wire.el.
+
+The other half of generating that file.  Every stride, bit value and tuning
+default has one owner -- the `wire_layout' tables in src/ -- and `make wire'
+prints the Lisp from them, so the two cannot disagree in a checkout that has
+just been built.  They can disagree in every other case: a `.so' loaded before
+a `git pull', a downloaded prebuilt core beside newer Lisp, a checkout whose
+core was built and whose generated file was not regenerated.  What that looks
+like without this check is not an error but wrong output -- spans read at the
+wrong stride, so the buffer comes out miscoloured with nothing to point at --
+which is exactly the failure the old hand-written mirror and its test existed
+to catch, and this catches it on a user's machine rather than only in the
+suite.
+
+A message and not an error, for `cooked--check-core-drift''s reason: Emacs
+cannot unload a module, so there is nothing to be done from here but say which
+numbers moved and let the user rebuild.
+
+Returns the names that moved, nil when the two agree, so a test can ask the
+question without reading the echo area."
+  (unless cooked--wire-checked
+    (setq cooked--wire-checked t)
+    (let ((core (cooked--wire-layout))
+          (drifted nil))
+      (pcase-dolist (`(,name . ,value) cooked--wire-constants)
+        (unless (equal (cdr (assq name core)) value)
+          (push name drifted)))
+      (let ((table (cooked--key-table)))
+        (unless (and (equal (mapcar #'car table) cooked--key-names)
+                     (equal (mapcar #'car (seq-filter #'cdr table))
+                            cooked--kitty-only-keys))
+          (push 'key-names drifted)))
+      (setq drifted (nreverse drifted))
+      (when drifted
+        (message "cooked: the native core disagrees with lisp/cooked-wire.el on %s%s"
+                 (mapconcat #'symbol-name drifted ", ")
+                 " -- rebuild it and restart Emacs"))
+      drifted)))
+
 (defun cooked--map-core (file)
   "Map FILE as the native core and record that this session did.
 Every `module-load' of ours goes through here, so that nothing can map a core
@@ -543,7 +591,8 @@ command, and every path that finds no usable core ends by naming it."
          (ours (and source t))
          (built (or cooked-native-module source (cooked--prebuilt-core))))
     (if (featurep 'cooked-core)
-        (cooked--check-core-drift built)
+        (progn (cooked--check-core-drift built)
+               (cooked--check-wire-drift))
       ;; Before `module-load', and that ordering is the point.  Once a core is
       ;; mapped this session is married to it, so the only useful place to
       ;; refuse a stale one is here, where refusing still leaves this Emacs
@@ -557,7 +606,8 @@ command, and every path that finds no usable core ends by naming it."
                  (if (file-exists-p built) "older than its sources" "not built")
                  "M-x cooked builds it"))
         (cooked--build-module root built))
-      (cooked--map-core built))))
+      (cooked--map-core built)
+      (cooked--check-wire-drift))))
 
 ;;; Downloading a prebuilt core
 

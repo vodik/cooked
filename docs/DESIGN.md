@@ -826,8 +826,12 @@ What they share, they share deliberately and in the two places it costs nothing.
 `emu::sgr::apply` decodes `CSI Ps m` for both performers, so a rendition cannot mean one
 thing on a grid and another in a stream. And both hand Emacs the same packed style
 records, resolved through the same per-buffer vector of faces by rendition id — which
-is what keeps `cooked-face.el` below both of them, and why `cooked--style-record` lives
-there rather than beside either reader.
+is what keeps `cooked-face.el` below both of them. `cooked--style-record` itself is not
+written there or anywhere else in `lisp/`: it and every other number both halves of the
+wire have to agree on come from the `wire_layout` tables in `src/`, which `make wire`
+prints into the checked-in `lisp/cooked-wire.el`. `make lint` fails while that file
+differs from the tables, and `cooked--check-wire-drift` says so at load time when the
+core a session actually mapped disagrees with it.
 
 ## `cooked-osc-eval-request`: why the verbs are a closed set
 

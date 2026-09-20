@@ -9,6 +9,7 @@ use super::image::Placement;
 use super::link::LinkId;
 use super::style::StyleId;
 use super::units::{Bytes, Chars, Cols};
+use crate::wire::WireConst;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Hash)]
 pub enum Color {
@@ -104,36 +105,111 @@ impl Not for Attrs {
     }
 }
 
-/// This module's half of `cooked--wire-layout': the [`Attrs`] bit values, mirrored by
-/// `cooked--attr-*' in lisp/cooked-face.el, and the glyph and image record layouts
-/// [`Deco::pack_into`] writes, mirrored in lisp/cooked-deco.el. `wire::wire_layout` in
-/// wire.rs carries the style-record half, and `glyph::wire_layout` in glyph.rs the
-/// box-glyph bit layout; `cooked--wire-layout' in lib.rs concatenates all three.
+/// This module's half of `cooked--wire-layout': the [`Attrs`] bit values, which become
+/// `cooked--attr-*' in lisp/cooked-wire.el, and the glyph and image record layouts
+/// [`Deco::pack_into`] writes. `wire::wire_layout` in wire.rs carries the style-record
+/// half, and `glyph::wire_layout` in glyph.rs the box-glyph bit layout;
+/// `cooked--wire-layout' in lib.rs concatenates all four.
 ///
-/// NAME matches the corresponding Lisp constant with its `cooked--' prefix removed,
-/// so `("attr-bold", _)' here is `cooked--attr-bold' there.
-pub(crate) fn wire_layout() -> Vec<(&'static str, u32)> {
+/// A [`WireConst`]'s name is the Lisp constant with its `cooked--' prefix removed, so
+/// `attr-bold` here is `cooked--attr-bold' there.
+pub(crate) fn wire_layout() -> Vec<WireConst> {
+    let attr = |name, bits: u16, doc| WireConst::new(name, u32::from(bits), doc);
     vec![
-        ("attr-bold", u32::from(Attrs::BOLD.bits())),
-        ("attr-faint", u32::from(Attrs::FAINT.bits())),
-        ("attr-italic", u32::from(Attrs::ITALIC.bits())),
-        ("attr-underline", u32::from(Attrs::UNDERLINE.bits())),
-        ("attr-blink", u32::from(Attrs::BLINK.bits())),
-        ("attr-reverse", u32::from(Attrs::REVERSE.bits())),
-        ("attr-conceal", u32::from(Attrs::CONCEAL.bits())),
-        ("attr-strike", u32::from(Attrs::STRIKE.bits())),
-        ("attr-underline-shift", u32::from(Attrs::UL_SHIFT)),
-        ("attr-underline-style", u32::from(Attrs::UL_MASK)),
-        ("attr-overline", u32::from(Attrs::OVERLINE.bits())),
-        ("glyph-record", Deco::GLYPH_RECORD as u32),
-        ("glyph-bits", Deco::GLYPH_BITS as u32),
-        ("glyph-count", Deco::GLYPH_COUNT as u32),
-        ("image-record", Deco::IMAGE_RECORD as u32),
-        ("image-id", Deco::IMAGE_ID as u32),
-        ("image-row", Deco::IMAGE_ROW as u32),
-        ("image-col", Deco::IMAGE_COL as u32),
-        ("image-cols", Deco::IMAGE_COLS as u32),
-        ("image-rows", Deco::IMAGE_ROWS as u32),
+        attr("attr-bold", Attrs::BOLD.bits(), "SGR 1, bold."),
+        attr("attr-faint", Attrs::FAINT.bits(), "SGR 2, faint."),
+        attr("attr-italic", Attrs::ITALIC.bits(), "SGR 3, italic."),
+        attr(
+            "attr-underline",
+            Attrs::UNDERLINE.bits(),
+            "SGR 4, underlined at all, whatever the style.",
+        ),
+        attr("attr-blink", Attrs::BLINK.bits(), "SGR 5, blinking."),
+        attr(
+            "attr-reverse",
+            Attrs::REVERSE.bits(),
+            "SGR 7, foreground and background swapped.",
+        ),
+        attr(
+            "attr-conceal",
+            Attrs::CONCEAL.bits(),
+            "SGR 8, drawn in the background colour.",
+        ),
+        attr(
+            "attr-strike",
+            Attrs::STRIKE.bits(),
+            "SGR 9, struck through.",
+        ),
+        attr(
+            "attr-underline-shift",
+            Attrs::UL_SHIFT,
+            "Bit position of the underline-style field.  See `Attrs' in src/emu/cell.rs.",
+        ),
+        attr(
+            "attr-underline-style",
+            Attrs::UL_MASK,
+            "Mask of the underline-style field, kitty's `SGR 4:1' to `SGR 4:5'.",
+        ),
+        attr(
+            "attr-overline",
+            Attrs::OVERLINE.bits(),
+            "SGR 53, above the underline-style field.  See `Attrs' in src/emu/cell.rs.",
+        ),
+        WireConst::new(
+            "glyph-record",
+            Deco::GLYPH_RECORD as u32,
+            "Bytes in one packed glyph-run record.  See `Deco::packed' in src/emu/cell.rs.\n\
+             \n\
+             The stride a reader steps by to find the next record; the fields are `u16's at\n\
+             the offsets the constants below name.  The Rust side asserts the same number,\n\
+             so a field added to the record on one side without widening it on both\n\
+             desynchronises the two at the second record of the first affected run.",
+        ),
+        WireConst::new(
+            "glyph-bits",
+            Deco::GLYPH_BITS as u32,
+            "Offset of the bit pattern in a glyph record.",
+        ),
+        WireConst::new(
+            "glyph-count",
+            Deco::GLYPH_COUNT as u32,
+            "Offset of the run length in a glyph record.",
+        ),
+        WireConst::new(
+            "image-record",
+            Deco::IMAGE_RECORD as u32,
+            "Bytes in one packed image-placement record.\n\
+             \n\
+             See `Deco::packed' in src/emu/cell.rs.  One record per character, unlike a\n\
+             glyph run's one record per shape, because a placement is not one decision\n\
+             repeated: every cell carries its own place in the picture.  The fields are a\n\
+             `u32' then four `u16's at the offsets the constants below name.",
+        ),
+        WireConst::new(
+            "image-id",
+            Deco::IMAGE_ID as u32,
+            "Offset of the image id in an image record.",
+        ),
+        WireConst::new(
+            "image-row",
+            Deco::IMAGE_ROW as u32,
+            "Offset of the cell row in an image record.",
+        ),
+        WireConst::new(
+            "image-col",
+            Deco::IMAGE_COL as u32,
+            "Offset of the cell column in an image record.",
+        ),
+        WireConst::new(
+            "image-cols",
+            Deco::IMAGE_COLS as u32,
+            "Offset of the column span in an image record.",
+        ),
+        WireConst::new(
+            "image-rows",
+            Deco::IMAGE_ROWS as u32,
+            "Offset of the row span in an image record.",
+        ),
     ]
 }
 

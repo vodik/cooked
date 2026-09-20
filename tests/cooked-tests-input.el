@@ -4125,19 +4125,6 @@ half of every Meta chord and stays the byte.  A graphical frame's Delete is
   (should (equal (cooked--key-parts ?\C-a) '(97 control)))
   (should (equal (cooked--key-parts ?A) '(97 shift))))
 
-(ert-deftest cooked-key-names-match-the-core ()
-  "The keys Lisp binds are exactly the keys the core spells.
-
-`cooked--key-names' is a second copy of the core's own table, kept because
-`cooked--build-passthrough-map' runs before the module is loaded.  A key added
-to one side and forgotten on the other would bind a key that encodes to nothing,
-or spell a key nothing ever sends, so the two are held against each other here."
-  (cooked-tests--with-session '("/bin/sh" "-c" "sleep 5")
-    (let ((table (cooked--key-table)))
-      (should (equal (mapcar #'car table) cooked--key-names))
-      (should (equal (mapcar #'car (seq-filter #'cdr table))
-                     cooked--kitty-only-keys)))))
-
 (ert-deftest cooked-backtab-follows-negotiation-like-any-other-literal-key ()
   "Regression: `backtab' could never be spelled any way but the classical
 `ESC [ Z', negotiation or override notwithstanding.  A program that switched

@@ -568,16 +568,68 @@ const STYLE_ID: usize = 8;
 /// Byte offset of LINK within a style record; `cooked--style-link'.
 const STYLE_LINK: usize = 12;
 
+/// One number both halves of the wire name, with the docstring the Lisp side shows.
+///
+/// The core owns the value and the prose about it; [`crate::wire_gen`] prints
+/// lisp/cooked-wire.el from these, and `cooked--wire-layout' hands the same names and
+/// values to a loaded session so `cooked--check-wire-drift' can tell a stale `.so' from
+/// a fresh one. NAME is the Lisp constant with its `cooked--' prefix removed, so
+/// `WireConst::new("attr-bold", ...)' is `cooked--attr-bold' there.
+pub(crate) struct WireConst {
+    pub(crate) name: &'static str,
+    pub(crate) value: u32,
+    pub(crate) doc: &'static str,
+}
+
+impl WireConst {
+    /// NAME is the unprefixed Lisp name, DOC the docstring of the generated `defconst'.
+    pub(crate) fn new(name: &'static str, value: u32, doc: &'static str) -> Self {
+        Self { name, value, doc }
+    }
+}
+
 /// This module's half of `cooked--wire-layout': the style-record layout above. See
 /// [`crate::emu::cell::wire_layout`], [`crate::emu::glyph::wire_layout`] and
 /// [`crate::session::wire_layout`] for the rest.
-pub(crate) fn wire_layout() -> Vec<(&'static str, u32)> {
+pub(crate) fn wire_layout() -> Vec<WireConst> {
     vec![
-        ("style-record", STYLE_RECORD as u32),
-        ("style-start", STYLE_START as u32),
-        ("style-end", STYLE_END as u32),
-        ("style-id", STYLE_ID as u32),
-        ("style-link", STYLE_LINK as u32),
+        WireConst::new(
+            "style-record",
+            STYLE_RECORD as u32,
+            "Bytes in one packed style span.  See `Block::push_style' in src/wire.rs.\n\
+             \n\
+             The stride *is* the format: a reader finds the next span by adding this and\n\
+             never by decoding a length.  The Rust side asserts the same number, so a field\n\
+             added to the record on one side without widening it on both desynchronises the\n\
+             two at the second span of the first styled row, where every later span reads\n\
+             its neighbour's bytes and the buffer comes out miscoloured with nothing to\n\
+             point at.\n\
+             \n\
+             The fields are `u32's at the offsets the constants below name: START and END\n\
+             as character offsets, then the ids of the span's rendition and link.  They are\n\
+             available at compile time so that `cooked--do-style-spans' adds literals rather\n\
+             than look up variables on the render path.",
+        ),
+        WireConst::new(
+            "style-start",
+            STYLE_START as u32,
+            "Offset of START in a style record.",
+        ),
+        WireConst::new(
+            "style-end",
+            STYLE_END as u32,
+            "Offset of END in a style record.",
+        ),
+        WireConst::new(
+            "style-id",
+            STYLE_ID as u32,
+            "Offset of the rendition id in a style record.",
+        ),
+        WireConst::new(
+            "style-link",
+            STYLE_LINK as u32,
+            "Offset of the link id in a style record, 0 for none.",
+        ),
     ]
 }
 

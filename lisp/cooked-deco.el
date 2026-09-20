@@ -27,6 +27,9 @@
 (require 'cooked-face)
 (require 'cooked-color)
 (require 'cooked-glyph)
+;; `cooked--glyph-*' and `cooked--image-*': the two record layouts
+;; `Deco::pack_into' writes, printed from the core's own constants.
+(require 'cooked-wire)
 
 (cooked--declare-core)
 
@@ -390,17 +393,6 @@ The tier `cooked--box-glyph-bits' tiles rather than redraws: see
 `cooked--box-glyph-cell-cache' for why this one is safe to leave unbounded."
   (cooked--cached cooked--box-glyph-cell-cache (list bits (car size) (cdr size))
     (cooked--render-box-glyph-cell bits (car size) (cdr size))))
-
-(defconst cooked--glyph-record 4
-  "Bytes in one packed glyph-run record.  See `Deco::packed' in src/emu/cell.rs.
-
-The stride a reader steps by to find the next record; the fields are `u16's at
-the offsets the constants below name.  The Rust side asserts the same number,
-so a field added to the record on one side without widening it on both
-desynchronises the two at the second record of the first affected run.")
-
-(defconst cooked--glyph-bits 0 "Offset of the bit pattern in a glyph record.")
-(defconst cooked--glyph-count 2 "Offset of the run length in a glyph record.")
 
 (defun cooked--glyph-pattern (bits count)
   "A one-record run pattern: COUNT adjacent cells drawing shape BITS.
@@ -1346,21 +1338,6 @@ reaches all three callers, which is the property that mattered."
                        (car size))))
       (when-let* ((image (cooked--deco-image deco size window count)))
         (cooked--deco-display deco image size count)))))
-
-(defconst cooked--image-record 12
-  "Bytes in one packed image-placement record.  See `Deco::packed' in
-src/emu/cell.rs.
-
-One record per character, unlike a glyph run's one record per shape, because a
-placement is not one decision repeated: every cell carries its own place in
-the picture.  The fields are a `u32' then four `u16's at the offsets the
-constants below name.")
-
-(defconst cooked--image-id 0 "Offset of the image id in an image record.")
-(defconst cooked--image-row 4 "Offset of the cell row in an image record.")
-(defconst cooked--image-col 6 "Offset of the cell column in an image record.")
-(defconst cooked--image-cols 8 "Offset of the column span in an image record.")
-(defconst cooked--image-rows 10 "Offset of the row span in an image record.")
 
 (defun cooked--apply-image-deco (start packed size)
   "Apply image decoration PACKED from START: twelve bytes per character.

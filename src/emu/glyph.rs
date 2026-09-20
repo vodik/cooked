@@ -10,6 +10,7 @@
 //! (U+2571-U+257F), and block elements/shades/quadrants (U+2580-U+259F) — every
 //! assigned codepoint in the Box Drawing and Block Elements blocks.
 
+use crate::wire::WireConst;
 use Weight::{Double as D, Heavy as H, Light as L, None as Z};
 
 /// Line weight, or the absence of an edge.
@@ -64,50 +65,93 @@ const DIAG_BACKWARD: u16 = 1 << 10;
 const DASH_SHIFT: u16 = 11;
 const DASH_MASK: u16 = 0b11 << DASH_SHIFT;
 
-/// This module's half of `cooked--wire-layout': the bit layout above, mirrored by
-/// `cooked--box-*' in lisp/cooked-glyph.el, and the weight and direction codes
-/// [`weight_bits`] and [`direction_bits`] assign, mirrored by the same file's
+/// This module's half of `cooked--wire-layout': the bit layout above, which becomes
+/// `cooked--box-*' in lisp/cooked-wire.el, and the weight and direction codes
+/// [`weight_bits`] and [`direction_bits`] assign, which become the same file's
 /// `cooked--box-weight-*' and `cooked--box-direction-*'. See
 /// [`crate::emu::cell::wire_layout`] and [`crate::wire::wire_layout`] for the rest.
 ///
 /// A light weight has no entry: light is the bit pattern every other weight is stated
 /// relative to (`cooked--box-weight-none' 0, `-heavy' 2, `-double' 3), and nothing on
 /// either side spells 1 by name.
-pub(crate) fn wire_layout() -> Vec<(&'static str, u32)> {
+pub(crate) fn wire_layout() -> Vec<WireConst> {
+    let bits = |name, value: u16, doc| WireConst::new(name, u32::from(value), doc);
+    let weight = |name, weight, doc| bits(name, weight_bits(weight), doc);
+    let direction = |name, direction, doc| bits(name, direction_bits(direction), doc);
     vec![
-        ("box-kind-block", u32::from(KIND_BLOCK)),
-        ("box-arc", u32::from(ARC)),
-        ("box-diag-forward", u32::from(DIAG_FORWARD)),
-        ("box-diag-backward", u32::from(DIAG_BACKWARD)),
-        ("box-dash-shift", u32::from(DASH_SHIFT)),
-        ("box-dash-mask", u32::from(DASH_MASK)),
-        ("box-weight-none", u32::from(weight_bits(Weight::None))),
-        ("box-weight-heavy", u32::from(weight_bits(Weight::Heavy))),
-        ("box-weight-double", u32::from(weight_bits(Weight::Double))),
-        ("box-direction-up", u32::from(direction_bits(Direction::Up))),
-        (
+        bits(
+            "box-kind-block",
+            KIND_BLOCK,
+            "Set in a descriptor that names a block element rather than a line glyph.",
+        ),
+        bits("box-arc", ARC, "Set in a rounded corner (U+256D-U+2570)."),
+        bits(
+            "box-diag-forward",
+            DIAG_FORWARD,
+            "U+2571, a straight line from the bottom-left corner to the top-right.",
+        ),
+        bits(
+            "box-diag-backward",
+            DIAG_BACKWARD,
+            "U+2572, a straight line from the top-left corner to the bottom-right.",
+        ),
+        bits(
+            "box-dash-shift",
+            DASH_SHIFT,
+            "Bit position of the dash code in a line descriptor.",
+        ),
+        bits(
+            "box-dash-mask",
+            DASH_MASK,
+            "Mask of the dash code in a line descriptor.\n\
+             \n\
+             The code is 0 solid, 1 double, 2 triple, 3 quadruple; the count itself does\n\
+             not fit two bits, so `cooked--box-dash-counts' decodes it.",
+        ),
+        weight(
+            "box-weight-none",
+            Weight::None,
+            "Edge weight of a side the glyph does not draw.\n\
+             \n\
+             Light has no constant of its own: it is the weight every other one is stated\n\
+             relative to, and nothing on either side of the wire spells 1 by name.",
+        ),
+        weight("box-weight-heavy", Weight::Heavy, "A heavy edge."),
+        weight("box-weight-double", Weight::Double, "A double edge."),
+        direction(
+            "box-direction-up",
+            Direction::Up,
+            "A block filled from the top edge downwards.",
+        ),
+        direction(
             "box-direction-down",
-            u32::from(direction_bits(Direction::Down)),
+            Direction::Down,
+            "A block filled from the bottom edge upwards.",
         ),
-        (
+        direction(
             "box-direction-left",
-            u32::from(direction_bits(Direction::Left)),
+            Direction::Left,
+            "A block filled from the left edge rightwards.",
         ),
-        (
+        direction(
             "box-direction-right",
-            u32::from(direction_bits(Direction::Right)),
+            Direction::Right,
+            "A block filled from the right edge leftwards.",
         ),
-        (
+        direction(
             "box-direction-full",
-            u32::from(direction_bits(Direction::Full)),
+            Direction::Full,
+            "A block covering the whole cell (U+2588).",
         ),
-        (
+        direction(
             "box-direction-shade",
-            u32::from(direction_bits(Direction::Shade)),
+            Direction::Shade,
+            "One of the three shade densities (U+2591-U+2593), a dither rather than a fill.",
         ),
-        (
+        direction(
             "box-direction-quadrant",
-            u32::from(direction_bits(Direction::Quadrant)),
+            Direction::Quadrant,
+            "One of the 2x2 quadrant glyphs (U+2596-U+259F), whose fill is a 4-bit mask.",
         ),
     ]
 }

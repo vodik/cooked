@@ -91,7 +91,7 @@ SHA256 := $(shell command -v sha256sum >/dev/null 2>&1 && echo sha256sum || echo
 
 .PHONY: all test rust-test lisp-test lisp-test-quick lisp-test-parallel lisp-test-stress \
         lint checkdoc citations escapes \
-        compile bench bench-quick clean module terminfo \
+        compile bench bench-quick clean module terminfo wire wire-check \
         dist dist-checksums dist-digests fuzz
 
 all: test
@@ -271,6 +271,28 @@ target/test-stamps/%.stamp: tests/%.el $(TEST_SHARED) $(wildcard lisp/*.el) $(MO
 	  --eval '(cooked-tests-run-file "$<")'
 	@touch $@
 
+# lisp/cooked-wire.el, printed from the `wire_layout' tables in src/ and from
+# `NamedKey'.  Run it after changing a stride, a bit value, a tuning default or
+# the key table; `wire-check' below fails `lint' if you forget.
+#
+# Written through a staging name so an interrupted or failing run cannot leave a
+# truncated file in lisp/, where the next byte-compile would read it.
+wire:
+	@cargo run --quiet --example gen-wire > lisp/cooked-wire.el.new && \
+	  mv -f lisp/cooked-wire.el.new lisp/cooked-wire.el
+
+# The generated file is checked in, because a package installed from straight or
+# ELPA byte-compiles on a machine with no cargo -- see the commentary in
+# lisp/cooked-wire.el.  So it can go stale the way terminfo/db can, and is caught
+# the same way: here against the tables it came from, and at load time by
+# `cooked--check-wire-drift' against whichever core the session actually mapped.
+#
+# Inside `lint' because `lint' already needs cargo for `fmt' and `clippy'; a
+# checkout without a toolchain never reaches this target.
+wire-check:
+	@cargo run --quiet --example gen-wire | diff -u lisp/cooked-wire.el - || { \
+	  echo 'lisp/cooked-wire.el is stale -- run `make wire'"'" >&2; exit 1; }
+
 # The compiled database we ship, so that a machine with no `tic' still gets a
 # terminal that describes what we implement.  Both subdirectory spellings are
 # written: ncurses is built to name them either for the entry's first letter or
@@ -398,7 +420,7 @@ dist-digests:
 	@echo '    )'
 	@echo '  "...")'
 
-lint: compile checkdoc citations escapes
+lint: compile checkdoc citations escapes wire-check
 	cargo fmt --check
 	cargo clippy --all-targets -- -D warnings
 

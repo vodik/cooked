@@ -103,6 +103,31 @@ Skipped where there is no checkout, as the terminfo digest test is."
       (should (equal (sort (delete-dups registered) #'string<)
                      (sort (copy-sequence cooked--core-functions) #'string<))))))
 
+(ert-deftest cooked-the-loaded-core-agrees-with-the-generated-wire-file ()
+  "`cooked--check-wire-drift' finds nothing between this core and this Lisp.
+
+lisp/cooked-wire.el is printed from the `wire_layout' tables in src/ and
+checked in, because a package installed from straight or ELPA byte-compiles
+where there is no cargo.  `make lint' holds it against those tables; this holds
+it against the core the session actually mapped, which is the half no build
+step can answer -- a `.so' from before a pull, or a downloaded prebuilt one
+beside newer Lisp, disagrees with a file that is perfectly up to date.
+
+The second half is the check failing when it should.  A gate that cannot fail
+is worth nothing, and this one walks an alist looking for absences, which is
+exactly the shape that silently passes when the alist is empty or the names
+have been renamed out from under it."
+  (should-not (let ((cooked--wire-checked nil)) (cooked--check-wire-drift)))
+  (let ((cooked--wire-checked nil)
+        (cooked--wire-constants (cons '(style-record . 15) cooked--wire-constants))
+        (cooked--key-names (cdr cooked--key-names))
+        (inhibit-message t))
+    (should (equal (cooked--check-wire-drift) '(style-record key-names))))
+  ;; And once per session: the core cannot change under a running Emacs.
+  (let ((cooked--wire-checked t)
+        (cooked--wire-constants '((style-record . 15))))
+    (should-not (cooked--check-wire-drift))))
+
 (ert-deftest cooked-an-artifact-with-no-pinned-digest-is-not-downloaded ()
   "An asset absent from the table is refused, not fetched and hoped about.
 

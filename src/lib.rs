@@ -23,6 +23,7 @@ pub(crate) mod pty;
 pub(crate) mod replies;
 pub(crate) mod session;
 mod wire;
+pub mod wire_gen;
 
 use emu::{
     Assumed, Button, CellMetrics, ColorScheme, FrameSize, ImageFormat, ImageId, Key, Modifiers,
@@ -327,9 +328,11 @@ pub unsafe extern "C" fn emacs_module_init(runtime: *mut Runtime) -> std::ffi::c
         ///
         /// SYMBOL is the name Emacs gives the key, and KITTY-ONLY is t for a key with no
         /// spelling outside the kitty keyboard protocol -- Pause and Print Screen, which
-        /// send nothing in xterm and have no terminfo capability.  `cooked--key-names'
-        /// carries the same list for the keymap builder, which runs before this module
-        /// is loaded; the two are held against each other by a test.
+        /// send nothing in xterm and have no terminfo capability.  The keymap builder runs
+        /// before this module is loaded and so cannot ask, and reads `cooked--key-names'
+        /// and `cooked--kitty-only-keys' in lisp/cooked-wire.el instead -- printed from
+        /// this same table, and checked against a loaded core by
+        /// `cooked--check-wire-drift'.
         "cooked--key-table" 0..=0 => key_table;
 
         /// Hand TEXT to SESSION's child as a paste, or refuse to.
@@ -672,15 +675,15 @@ pub unsafe extern "C" fn emacs_module_init(runtime: *mut Runtime) -> std::ffi::c
         /// NAME is a symbol matching the corresponding `cooked--*' constant in Lisp with
         /// its `cooked--' prefix removed -- `attr-bold' here is `cooked--attr-bold' there,
         /// `style-record' is `cooked--style-record' -- so the two can be walked side by
-        /// side. Everything named here is written a second time by hand somewhere in
-        /// lisp/: the `Attrs' bit values (`cooked-face.el'), the style record
-        /// `Block::push_style' packs and its four field offsets, the glyph-run and
-        /// image-placement records `Deco::pack_into' writes, the box-glyph bit layout
-        /// (`cooked-glyph.el'), and the two tuning defaults `Options::default' falls back
-        /// to when `cooked--spawn' gets no interval or limit. `cooked--key-table' is the
-        /// precedent for holding a second copy against the core by way of a test rather
-        /// than reading it from here: `cooked-wire-layout-matches-the-core' does that for
-        /// every entry this returns.
+        /// side. That is the `Attrs' bit values, the style record `Block::push_style'
+        /// packs and its four field offsets, the glyph-run and image-placement records
+        /// `Deco::pack_into' writes, the box-glyph bit layout, and the two tuning defaults
+        /// `Options::default' falls back to when `cooked--spawn' gets no interval or limit.
+        ///
+        /// Nothing in lisp/ types any of them: `cargo run --example gen-wire' prints
+        /// lisp/cooked-wire.el from this same table, and this defun is what a *loaded*
+        /// core says, so `cooked--check-wire-drift' can tell that the `.so' in memory
+        /// predates the generated file beside it.
         "cooked--wire-layout" 0..=0 => wire_layout;
 
         /// Tell SESSION that Emacs has dealt with the last drain, APPLIED saying whether it
@@ -1206,17 +1209,13 @@ fn key_table<'e>(env: Env<'e>, _args: &[Value<'e>]) -> Result<Value<'e>> {
 
 /// See `cooked--wire-layout'.
 ///
-/// Four modules each name their own half of the layout as constants and hand back
-/// (LABEL, VALUE) pairs; this just chains and converts them, so adding a fifth mirrored
-/// number is a one-line change to whichever module owns it plus one line here, not a
-/// rewrite of this function.
+/// The same table [`wire_gen`] prints lisp/cooked-wire.el from, as (NAME . VALUE) pairs:
+/// what the *loaded* core says, against what the generated file said when it was last
+/// written. `cooked--check-wire-drift' compares the two.
 fn wire_layout<'e>(env: Env<'e>, _args: &[Value<'e>]) -> Result<Value<'e>> {
-    emu::cell::wire_layout()
+    wire_gen::layout()
         .into_iter()
-        .chain(emu::glyph::wire_layout())
-        .chain(wire::wire_layout())
-        .chain(session::wire_layout())
-        .map(|(name, value)| env.cons(env.intern(name)?, env.into_lisp(value)?))
+        .map(|entry| env.cons(env.intern(entry.name)?, env.into_lisp(entry.value)?))
         .collect::<Result<Vec<_>>>()
         .and_then(|rows| env.into_lisp(rows))
 }

@@ -16,6 +16,8 @@
 (require 'cl-lib)
 (require 'cooked-util)
 (require 'cooked-module)
+;; The two tuning defaults below are the core's, not this file's.
+(require 'cooked-wire)
 (require 'cooked-state)
 (require 'cooked-deco)
 (require 'cooked-screen)
@@ -72,7 +74,7 @@ running at whatever rate it was last told."
                           (round (* 1000 cooked-min-redisplay-interval))
                           cooked-backlog-limit))))
 
-(defcustom cooked-min-redisplay-interval 0.008
+(defcustom cooked-min-redisplay-interval (/ cooked--min-redisplay-interval-ms 1000.0)
   "Floor, in seconds, on how often a session triggers a redisplay.
 
 Without one, a child that rewrites the same line rapidly -- a spinner, a
@@ -111,12 +113,16 @@ docs/DESIGN.md.
 
 Lower it if the terminal feels less responsive than it should; raise it if a
 program that rewrites one line very fast still flickers.  Takes effect at once,
-on sessions already running as well as on the next one."
+on sessions already running as well as on the next one.
+
+The standard value is the core's own fallback in milliseconds,
+`cooked--min-redisplay-interval-ms', so a session given no interval is paced
+exactly as this says."
   :type 'number
   :set #'cooked--set-tuning-option
   :group 'cooked)
 
-(defcustom cooked-backlog-limit 8000
+(defcustom cooked-backlog-limit cooked--backlog-limit
   "Items awaiting collection before the child is left to block on its writes.
 
 Counts scrolled-off lines plus undelivered events.  Raising it does not make
@@ -135,7 +141,8 @@ actually paces a session is Emacs' own readiness to draw again, and the
 interval is only a floor under that -- so size this against the slowest
 cadence the pair allows and leave it alone.
 
-Takes effect at once, on sessions already running as well as on the next one."
+Takes effect at once, on sessions already running as well as on the next one.
+The standard value is the core's own high-water mark, `cooked--backlog-limit'."
   :type 'natnum
   :set #'cooked--set-tuning-option
   :group 'cooked)

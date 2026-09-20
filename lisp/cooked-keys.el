@@ -22,6 +22,10 @@
 (require 'cooked-cursor)
 (require 'cooked-pending)
 (require 'cooked-peek)
+;; `cooked--key-names' and `cooked--kitty-only-keys', printed from the core's
+;; `NamedKey' table.  Needed before the module is loaded, which is why they are in
+;; a generated file rather than read from `cooked--key-table'.
+(require 'cooked-wire)
 
 (cooked--declare-core)
 
@@ -35,36 +39,6 @@
 ;; in the encoding the child had just stopped reading.  What is left here is the half
 ;; that is Emacs': which key an event names, and which protocol to assume for a program
 ;; that reads one without ever asking for it.
-
-(defconst cooked--key-names
-  '(up down right left home end
-    f1 f2 f3 f4 prior next insert deletechar
-    f5 f6 f7 f8 f9 f10 f11 f12
-    return tab escape backspace backtab begin
-    kp-0 kp-1 kp-2 kp-3 kp-4 kp-5 kp-6 kp-7 kp-8 kp-9
-    kp-decimal kp-add kp-subtract kp-multiply kp-divide kp-separator kp-enter
-    kp-home kp-up kp-prior kp-left kp-begin kp-right kp-end kp-down kp-next
-    kp-insert kp-delete
-    f13 f14 f15 f16 f17 f18 f19 f20 f21 f22 f23 f24
-    menu pause print)
-  "Every non-character key cooked speaks for, by the symbol Emacs names it with.
-
-The spelling of each is the core's, in `NamedKey'; this list is the same set of
-names in the same order, because `cooked--build-passthrough-map' has to bind
-every one of them, in every modified spelling, before the module is loaded and
-so before `cooked--key-table' could be asked.  The test
-`cooked-key-names-match-the-core' holds the two against each other, so a key
-added on one side and forgotten on the other fails rather than encoding to
-nothing.")
-
-(defconst cooked--kitty-only-keys '(pause print)
-  "Keys with no spelling outside the kitty keyboard protocol.
-
-Pause and Print Screen send nothing in xterm and have no capability in
-terminfo, and inventing a sequence for them would put bytes in a program's
-input that it never agreed to read.  The protocol gives each a code point of
-its own, so `cooked--build-passthrough-map' binds them only while it is
-negotiated; see `cooked--kitty-only'.")
 
 (defconst cooked--key-event-aliases
   '((delete . deletechar))
