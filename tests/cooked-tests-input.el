@@ -5818,17 +5818,18 @@ every layer invited onto that hook inherits it."
       (should (cooked-tests--settle (lambda () (not (eq seen 'never)))))
       (should (equal seen '(t t))))))
 
-(ert-deftest cooked-evil-last-insertion-does-not-pick-up-the-childs-output ()
-  "A background job's output, arriving mid-insert, must not become `.=insertion'.
+(ert-deftest cooked-evil-last-insertion-follows-the-line-past-the-childs-output ()
+  "A background job's output, arriving mid-insert, moves the line, not the text.
 
 `evil-track-last-insertion' hangs on `after-change-functions', which
 `cooked--apply' runs live by design -- see
 `cooked-state-change-hook-runs-inside-the-childs-edit'.  It does not ask who
 made a change, so a line the child printed while the user was still in insert
-state at the prompt used to be folded into `evil-current-insertion' along
-with what was actually typed: leaving insert state left `evil-last-insertion',
-and so the \\=`\". register, holding the output rather than the two
-characters typed.
+state used to be folded into `evil-current-insertion' along with what was
+actually typed, leaving `evil-last-insertion' and the \\=`\". register
+holding the output instead.  `cooked-evil--relocate-insertion' now moves the
+tracked range with the input line instead, so it survives correctly rather
+than merely not being wrong.
 
 `.' is not on this path at all -- evil-repeat replays the keys pressed, via
 `evil-repeat-info', regardless of what the buffer did meanwhile -- so it
@@ -5853,11 +5854,32 @@ covering both."
     (should (cooked-tests--settle
              (lambda () (string-match-p "BACKGROUND-OUTPUT" (cooked-tests--text)))))
     (cooked-tests--type "<escape>")
-    (should-not (and evil-last-insertion
-                     (string-match-p "BACKGROUND-OUTPUT" evil-last-insertion)))
+    (should (equal evil-last-insertion "ab"))
+    (should (equal (evil-get-register ?.) "ab"))
     ;; `.' still replays the two characters actually typed.
     (cooked-tests--type ".")
     (should (cooked-tests--settle (lambda () (string-match-p "aabb" (cooked-tests--text)))))))
+
+(ert-deftest cooked-evil-does-not-track-a-forwarded-keys-own-echo ()
+  "Over a full-screen program, a forwarded key's echo is not an insertion.
+
+The child owns the line there, so a keystroke's echo and anything else the
+child prints arrive through `cooked--apply' the same way, byte for byte --
+there is no signal left to tell them apart, unlike at a prompt where
+`cooked-evil--relocate-insertion' has the input line to follow.
+`evil-track-last-insertion' is therefore left off for every drain, and
+`evil-last-insertion' stays nil rather than picking up the echo."
+  :tags '(evil)
+  (skip-unless (require 'evil nil t))
+  (require 'cooked-evil)
+  (evil-mode 1)
+  (cooked-tests--with-echoing-child ""
+    (evil-insert-state)
+    (let ((last-command-event ?x)) (cooked-send-key))
+    (should (cooked-tests--settle (lambda () (string-match-p "x\\'" (cooked-tests--text)))))
+    (should-not evil-current-insertion)
+    (evil-normal-state)
+    (should-not evil-last-insertion)))
 
 (ert-deftest cooked-evil-insert-state-forwards-what-a-program-needs ()
   "Insert state over a child that owns the keyboard forwards like emacs state.
