@@ -246,7 +246,7 @@ impl LinkStore {
 /// [`StyleStore::collect`](super::style::StyleStore::collect)'s own growth helper does,
 /// and for the same reason, but clamped at [`LINK_MAX`] rather than `StyleStore`'s
 /// `STYLE_MAX`. The link id is the narrower of the two fields a
-/// [`Cell`](super::cell::Cell) packs -- 21 bits against the rendition's 22 -- so the
+/// [`Cell`] packs -- 21 bits against the rendition's 22 -- so the
 /// same worst case that only strains the rendition table's ceiling can cross this one:
 /// an `OSC 8` wrapped around every character (not just every rendition) of a 200x400
 /// grid plus its default 8,000 rows of undrained scrollback comes to the same
