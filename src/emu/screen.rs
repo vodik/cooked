@@ -1587,8 +1587,8 @@ impl Screen {
     /// Characters of row 0's logical line that are already in Emacs.
     ///
     /// See [`Screen::carried`](Self#structfield.carried). Reported in characters rather
-    /// than rows so the other end never has to reconstruct it from a width, and so it
-    /// stays meaningful if a departed row is ever not exactly `cols` wide.
+    /// than columns so the other end never has to reconstruct it from a width: a wide
+    /// character is one character on two columns.
     pub fn head(&self) -> Chars {
         self.carried_chars
     }

@@ -130,10 +130,12 @@ fn a_wrapped_row_keeps_the_blanks_that_are_interior_to_its_line() {
     assert_eq!(runs_text(&delta.scrolled[1]), "def");
 }
 
-/// The invariant [`Screen::carried`] rests on: every row that leaves for Emacs while
-/// its line continues is exactly `cols` characters, so `carried * cols` measures the
-/// head. A rewrap blank-pads its chunks out to the full width, so this is what keeps
-/// the seam from drifting once a resize has evicted padded rows.
+/// Every row that leaves for Emacs while its line continues fills its width, padding
+/// and all. A rewrap blank-pads its chunks out to the full width, so this is what keeps
+/// the seam from drifting once a resize has evicted padded rows. (The one row that
+/// does not is the one a wide character wrapped early, whose last columns are that
+/// character's room rather than cells of the line; [`Screen::carried`] counts columns
+/// for it.)
 #[test]
 fn every_wrapped_row_handed_over_is_exactly_a_full_row_wide() {
     let mut t = Term::new(4, 10);
