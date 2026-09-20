@@ -1392,7 +1392,7 @@ impl Term {
     pub fn touch_all(&mut self) {
         self.state.screen_mut().touch_all();
         self.state.marks_dirty = true;
-        self.state.forget_sent(None);
+        self.state.forget_front(None);
     }
 
     /// Emacs has edited its own text for screen row INDEX, or for every row when INDEX is
@@ -1400,8 +1400,8 @@ impl Term {
     /// was sent last. The width guard deleting characters off a row that wrapped is the
     /// edit this exists for, and a theme change is the reason for the whole-screen form: a
     /// repaint of the same cells has to pick up the new colours.
-    pub fn forget_sent(&mut self, index: Option<usize>) {
-        self.state.forget_sent(index);
+    pub fn forget_front(&mut self, index: Option<usize>) {
+        self.state.forget_front(index);
     }
 
     /// Remove `count` grid rows starting at `first`; see [`Screen::remove_rows`].

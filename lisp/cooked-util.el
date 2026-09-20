@@ -36,7 +36,7 @@
       cooked--live-p cooked--make-filter cooked--pid
       cooked--osc-reply cooked--prompt-text cooked--ready cooked--redraw
       cooked--remove-rows cooked--reply cooked--reply-focus cooked--resize
-      cooked--row-unsent
+      cooked--row-edited
       cooked--sample-mode cooked--screen-text
       cooked--send cooked--send-key cooked--send-line cooked--send-mouse-report
       cooked--send-paste-text cooked--set-attended
@@ -391,7 +391,7 @@ The three that edit one today, and which of them owes anything:
 
   - `cooked--guard-row-width' deletes characters off a row Emacs laid out wider
     than the grid budgeted, and the buffer's row then differs from what the core
-    sent for as long as it stands.  It owes `cooked--row-unsent' for that row,
+    sent for as long as it stands.  It owes `cooked--row-edited' for that row,
     and calls it.
   - `cooked--pad-to-cursor' appends the trailing blanks the render trimmed.  The
     grid has those blanks, so the row matches the copy again and nothing is

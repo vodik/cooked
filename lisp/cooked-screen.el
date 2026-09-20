@@ -1606,7 +1606,7 @@ which has no such seam at all."
                   ;; The guard deleted characters off the row, so what Emacs shows
                   ;; is no longer what the core sent, and a repaint of the same
                   ;; cells has to be sent rather than matched against its copy.
-                  (cooked--row-unsent cooked--session (+ index i)))
+                  (cooked--row-edited cooked--session (+ index i)))
                 (goto-char pos)
                 ;; After the guard, which is the one thing in this loop that can
                 ;; shorten a row -- and so move the newline this is about.

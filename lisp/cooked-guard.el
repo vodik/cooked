@@ -803,7 +803,7 @@ that per row would run `select-window' advice in the middle of a render; see
 docs/DESIGN.md.
 
 Returns non-nil when characters were deleted, which makes the buffer's row
-differ from what the core sent; the caller says so with `cooked--row-unsent'.
+differ from what the core sent; the caller says so with `cooked--row-edited'.
 
 The cut is marked with the truncation bitmap `truncate-lines' would show, by
 hand, because `cooked-rejoin-wrapped-lines' keeps `truncate-lines' off

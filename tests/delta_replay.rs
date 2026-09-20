@@ -103,7 +103,7 @@ enum Step {
     /// Emacs discarded its transcript, so the grid's top row continues nothing.
     ForgetHistory,
     /// The width guard deleted a character off the end of screen row `row` after
-    /// rendering it, and said so with `forget_sent`.
+    /// rendering it, and said so with `forget_front`.
     ///
     /// The one edit Lisp makes to a live row's text by itself. The shadow takes the edit,
     /// so a later drain that leaves the row out on the strength of the core's copy -- a
@@ -1068,7 +1068,7 @@ impl Replay {
                     return;
                 }
                 self.trimmed[row] = true;
-                self.term.forget_sent(Some(row));
+                self.term.forget_front(Some(row));
                 return;
             }
         }
@@ -1104,7 +1104,7 @@ impl Replay {
             self.announced[0].canonical(self.term.drain_promoting())
         };
         self.withheld = false;
-        self.reference.forget_sent(None);
+        self.reference.forget_front(None);
         let reference = self.announced[1].canonical(self.reference.drain());
         self.absorb(delta, reference);
     }

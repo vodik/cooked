@@ -83,7 +83,7 @@ fn a_row_changed_before_it_leaves_is_sent_and_so_is_everything_after_it() {
 #[test]
 fn a_row_emacs_trimmed_is_sent() {
     let mut t = settled(3, 10, b"one\r\ntwo\r\nthree");
-    t.forget_sent(Some(0));
+    t.forget_front(Some(0));
     t.feed(b"\r\nfour");
     assert_eq!(t.drain_promoting().promoted, None);
 }
@@ -92,7 +92,7 @@ fn a_row_emacs_trimmed_is_sent() {
 fn a_row_emacs_trimmed_after_it_left_is_sent() {
     let mut t = settled(3, 10, b"one\r\ntwo\r\nthree");
     t.feed(b"\r\nfour");
-    t.forget_sent(None);
+    t.forget_front(None);
     assert_eq!(t.drain_promoting().promoted, None);
 }
 

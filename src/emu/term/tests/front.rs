@@ -98,7 +98,7 @@ fn a_row_emacs_edited_is_sent_even_when_its_cells_match() {
     // The width guard trimmed row 0 after rendering it, so the buffer no longer holds
     // what the core sent.
     let mut t = settled(2, 10, b"status");
-    t.forget_sent(Some(0));
+    t.forget_front(Some(0));
     t.feed(b"\x1b[1;1H\x1b[2Kstatus");
     assert_eq!(sent(&mut t), vec![0]);
 }
@@ -107,7 +107,7 @@ fn a_row_emacs_edited_is_sent_even_when_its_cells_match() {
 fn forgetting_every_row_sends_a_repaint_of_the_same_cells() {
     // A theme change: the faces in the buffer were resolved against the old theme.
     let mut t = settled(2, 10, b"one\r\ntwo");
-    t.forget_sent(None);
+    t.forget_front(None);
     t.feed(b"\x1b[H\x1b[2Kone\r\n\x1b[2Ktwo");
     assert_eq!(sent(&mut t), vec![0, 1]);
 }
@@ -368,7 +368,7 @@ fn a_forgotten_row_the_cursor_cut_is_redrawn_when_the_cursor_leaves() {
         40,
         "a \u{250c}\u{2500}\u{2500}\u{2510} b\x1b[1;4H".as_bytes(),
     );
-    t.forget_sent(Some(0));
+    t.forget_front(Some(0));
     t.feed(b"\x1b[3;1H");
     assert_eq!(sent(&mut t), vec![0]);
     // Sent whole and recorded with the cursor elsewhere, so the next move sends nothing.

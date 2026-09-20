@@ -1800,7 +1800,7 @@ drains, and a scroll after a region scroll all arrive as text."
       (should (equal (plist-get (drained "one\r\ntwo\r\nthree\r\nfour") :promoted) nil))
       (should (equal (plist-get (drained "\r\nfive") :promoted) '(2 (3 . t))))
       ;; The guard trimmed the top row.
-      (cooked--row-unsent cooked--session 0)
+      (cooked--row-edited cooked--session 0)
       (let ((update (drained "\r\nsix")))
         (should-not (plist-get update :promoted))
         (should (plist-get update :scrolled)))
@@ -4564,7 +4564,7 @@ text it sent, which is no longer what the buffer holds."
     (let ((cooked-rejoin-wrapped-lines t)
           (unsent nil))
       (cl-letf (((symbol-function 'cooked--guard-row-width) (lambda (&rest _) t))
-                ((symbol-function 'cooked--row-unsent)
+                ((symbol-function 'cooked--row-edited)
                  (lambda (_session row) (push row unsent))))
         (cooked--redraw cooked--session)
         (cooked--apply (cooked--drain cooked--session t)))
@@ -4590,7 +4590,7 @@ half of this: that the screen is right afterwards, which is why it can be left
 alone."
   (cooked-tests--with-session '("/bin/sh" "-c" "printf 'one'; sleep 5")
     (let ((told nil))
-      (cl-letf (((symbol-function 'cooked--row-unsent)
+      (cl-letf (((symbol-function 'cooked--row-edited)
                  (lambda (&rest args) (push args told)))
                 ((symbol-function 'cooked--redraw)
                  (lambda (&rest args) (push args told))))

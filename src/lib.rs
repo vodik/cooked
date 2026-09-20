@@ -493,7 +493,7 @@ pub unsafe extern "C" fn emacs_module_init(runtime: *mut Runtime) -> std::ffi::c
         /// time it is damaged, whatever it holds.  ROW nil forgets every row, for a theme
         /// change, after which a repaint of the same cells has to arrive in the new
         /// colours.
-        "cooked--row-unsent" 2..=2 => row_unsent;
+        "cooked--row-edited" 2..=2 => row_edited;
 
         /// Set SESSION's redisplay interval to MILLISECONDS and its backlog to LIMIT.
         ///
@@ -1360,13 +1360,13 @@ fn ready<'e>(env: Env<'e>, args: &[Value<'e>]) -> Result<Value<'e>> {
     // the reader hand Lisp another drain, and one taken against a copy this call is about
     // to throw away would leave out rows Emacs never got.
     if args.get(1).is_none_or(|applied| env.is_nil(*applied)) {
-        session.term().forget_sent(None);
+        session.term().forget_front(None);
     }
     session.ready();
     Ok(env.nil())
 }
 
-fn row_unsent<'e>(env: Env<'e>, args: &[Value<'e>]) -> Result<Value<'e>> {
+fn row_edited<'e>(env: Env<'e>, args: &[Value<'e>]) -> Result<Value<'e>> {
     // A negative row names no row, which is the same no-op as one past the bottom.
     let row = if env.is_nil(args[1]) {
         None
@@ -1376,7 +1376,7 @@ fn row_unsent<'e>(env: Env<'e>, args: &[Value<'e>]) -> Result<Value<'e>> {
             Err(_) => return Ok(env.nil()),
         }
     };
-    env.from_lisp::<&Session>(args[0])?.term().forget_sent(row);
+    env.from_lisp::<&Session>(args[0])?.term().forget_front(row);
     Ok(env.nil())
 }
 

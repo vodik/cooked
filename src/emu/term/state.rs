@@ -421,7 +421,7 @@ impl State {
         // evicts too, and re-anchoring a mark where it already was costs one `set-marker'.
         self.marks_dirty = true;
         // Every row is re-laid and sent whole, so nothing the copy holds is worth trusting.
-        self.forget_sent(None);
+        self.forget_front(None);
         let evicted = self.screens.primary.resize(rows, cols, Resize::Rewrap);
         // The alt screen contributes no scrollback -- it is a fixed-size scratch grid,
         // never transcript -- so its rewrap has nothing to hand anyone.
@@ -738,10 +738,10 @@ impl State {
 
     /// Emacs has changed its own text for row INDEX, or for every row when INDEX is `None`,
     /// so the next time the row is damaged it has to be sent whatever it holds.
-    pub(super) fn forget_sent(&mut self, index: Option<usize>) {
+    pub(super) fn forget_front(&mut self, index: Option<usize>) {
         match index {
             Some(index) => self.front.forget(index),
-            None => self.front.forget_from(0),
+            None => self.front.forget_all(),
         }
         // A row the front stops knowing may have left the grid already, so the prefix of
         // departing rows Emacs was going to keep ends at the first one forgotten.

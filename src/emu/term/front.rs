@@ -143,7 +143,7 @@ impl Front {
     /// 5. each row that is left is measured against the copy as an [`Edit`] of the part
     ///    that changed, and only then recorded -- the copy it is measured against is the
     ///    one the record overwrites;
-    /// 6. the copy stops claiming the rows Emacs trims off the bottom of its region.
+    /// 6. the copy stops claiming the rows below where Emacs' region now ends.
     ///
     /// A changed row whose change is small is sent as an edit on the primary screen, and
     /// on the alternate screen only when it has no changed neighbour; see [`Front::edit`].
@@ -267,6 +267,11 @@ impl Front {
             used
         };
         rows
+    }
+
+    /// Stop claiming to know any row.
+    pub(super) fn forget_all(&mut self) {
+        self.forget_from(0);
     }
 
     /// Stop claiming to know the rows from FIRST down.
