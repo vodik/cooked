@@ -31,7 +31,7 @@ impl<T> LockExt<T> for Mutex<T> {
 /// A wait ends by taking the mutex again, so it can refuse for the same reason and must
 /// recover for the same one: the single waiter in this crate is a second reaper waiting
 /// for the first's status, and refusing there would leave it reporting a child lost that
-/// somebody had just collected. See `Shared::reap_after_hangup` in `session.rs`.
+/// somebody had just collected. See `Reap::awaited` in `session.rs`.
 pub(crate) trait CondvarExt {
     fn awaited<'a, T>(&self, guard: MutexGuard<'a, T>) -> MutexGuard<'a, T>;
 }
