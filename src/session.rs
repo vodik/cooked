@@ -963,6 +963,19 @@ struct Shared {
     /// a decoder; see [`Shared::run_reader`]. Compiled out of a release build.
     #[cfg(test)]
     panic_on_read: AtomicBool,
+    /// Make the very next turn of the read loop sample the foreground program even
+    /// though the interrupt, not a quiet tick, is what woke it. Compiled out of a
+    /// release build.
+    ///
+    /// The tick's own deadline backs off under [`Shared::base_poll_wait`] and a test
+    /// waiting for the backed-off tick to expire is a test waiting on the wall, which is
+    /// no better than the real-time bound `Pty::reap` used to carry; see
+    /// `a_silent_exec_that_keeps_the_pid_is_noticed_on_the_next_tick`. A forced tick asks
+    /// the very same [`Shared::sample_foreground`] a real one would, on the reader
+    /// thread and under its usual locks, so it proves the tick's own logic rather than
+    /// standing in for it.
+    #[cfg(test)]
+    force_sample: AtomicBool,
 }
 
 /// A claim on [`Shared::lisp_waiters`], held from just before a thread blocks on the
@@ -1270,6 +1283,8 @@ impl Session {
             exited: Mutex::new(None),
             #[cfg(test)]
             panic_on_read: AtomicBool::new(false),
+            #[cfg(test)]
+            force_sample: AtomicBool::new(false),
         });
 
         let reader = std::thread::Builder::new()
@@ -2081,12 +2096,21 @@ impl Shared {
             // `shutdown_hangs_up_the_shell_rather_than_its_foreground_job` missing its
             // hangup grace about once in a hundred runs. Nothing is lost by waiting: a
             // child that is writing has not finished, and the tick after it stops is
-            // where a silent `exec` was always going to be caught.
+            // where a silent `exec` was always going to be caught. A test may also force
+            // this turn to sample regardless, through `Shared::force_sample`, so it can
+            // watch the tick's own logic run without waiting on its backoff.
             if self.sample_mode() {
                 self.announce();
             }
-            if !ready
-                && !interrupted
+            // A test's escape hatch from the tick's own backoff, compiled out of a
+            // release build: see `Shared::force_sample`. Consumed here rather than at
+            // the top of the loop, so a forced turn samples the foreground exactly where
+            // an ordinary tick would.
+            #[cfg(test)]
+            let forced_tick = self.force_sample.swap(false, Ordering::SeqCst);
+            #[cfg(not(test))]
+            let forced_tick = false;
+            if (!ready && !interrupted || forced_tick)
                 && self.sample_foreground()
                 && !self.hidden.load(Ordering::Relaxed)
             {
@@ -2574,6 +2598,38 @@ mod tests {
         }
     }
 
+    /// Force ticks of the read loop until one wakes Emacs or `patience` runs out,
+    /// reporting which.
+    ///
+    /// For a test whose deadline is about a *real* child's own scheduling, such as an
+    /// `exec` completing, rather than about the reader's tick: the tick backs off under
+    /// [`Shared::base_poll_wait`] and can be seconds away by the time this is called, so
+    /// waiting for one to land on its own is a real-time bound, the same shape `Pty::reap`
+    /// used to carry before it started reading its deadline from a [`Clock`], and no less
+    /// flaky under load. Forcing one through [`Shared::force_sample`] every two
+    /// milliseconds instead makes the wait only as long as the child takes, not however
+    /// long the tick had already backed off to.
+    fn woken_by_forcing_ticks(session: &Session, read: &OwnedFd, patience: Duration) -> bool {
+        nix::fcntl::fcntl(
+            read.as_fd(),
+            nix::fcntl::F_SETFL(nix::fcntl::OFlag::O_NONBLOCK),
+        )
+        .expect("nonblock");
+        let deadline = Instant::now() + patience;
+        let mut byte = [0u8; 1];
+        loop {
+            session.shared.force_sample.store(true, Ordering::SeqCst);
+            session.shared.interrupt.raise();
+            match nix::unistd::read(read.as_fd(), &mut byte) {
+                Ok(1) => return byte[0] == 1,
+                _ if Instant::now() >= deadline => return false,
+                // Polled rather than blocking on the fd: the point is to give up, and to
+                // force another tick if the last one landed before the exec did.
+                _ => std::thread::sleep(Duration::from_millis(2)),
+            }
+        }
+    }
+
     /// A deadline of `seconds`, stretched by [`crate::pty::timeout_scale`].
     ///
     /// For the tests with a real child in them, which are the only ones left that wait on
@@ -2689,6 +2745,36 @@ mod tests {
         .expect("nonblock");
         let mut byte = [0u8; 1];
         matches!(nix::unistd::read(read.as_fd(), &mut byte), Ok(1))
+    }
+
+    /// Bring the notifier back to a state with nothing owed, so a later assertion on a
+    /// wake byte cannot be paid by one setup already earned.
+    ///
+    /// `woke` alone empties the pipe a raw read watches, but a wake byte's own accounting
+    /// -- [`Pending`] -- is only settled by [`Session::drain`], which is what a real
+    /// caller does with the byte once it arrives. A notification the reader sends *after*
+    /// the last drain a setup loop happened to do, and *before* `woke` sweeps the pipe, is
+    /// physically gone but still marked [`Pending::Notified`] in the notifier's own
+    /// bookkeeping, which then silently absorbs the next `note` -- the one the test
+    /// actually means to catch -- because nothing told it the byte it is holding a slot
+    /// open for was already taken. Draining and sweeping together, until the notifier
+    /// itself says there is nothing left pending, closes that gap without guessing how
+    /// long it takes: on an idle setup it is one iteration, and under load it is however
+    /// many the straggler needs to land in.
+    fn settle(session: &Session, read: &OwnedFd) {
+        let deadline = Instant::now() + patience(2.0);
+        loop {
+            session.drain();
+            while woke(read) {}
+            if session.shared.notifier.state.held().pending == Pending::Clean {
+                return;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "the notifier never settled to Pending::Clean"
+            );
+            std::thread::sleep(Duration::from_millis(2));
+        }
     }
 
     fn wait_for(session: &Session, done: impl FnMut(&Update) -> bool) -> Update {
@@ -3745,19 +3831,25 @@ mod tests {
     /// Raw with no echo *before* the read, so that writing `go` to the child produces no
     /// output at all -- the line discipline would otherwise echo it, and an output-driven
     /// refresh, not the tick, would be what this test measured.
+    ///
+    /// The wakeup is watched for by forcing ticks rather than waiting for one on its own;
+    /// see [`woken_by_forcing_ticks`]. What is on the wall here is only the child's own
+    /// scheduling between the write below and its `exec` -- a handful of microseconds
+    /// even loaded -- not the reader's tick, whose backoff had no bound worth trusting a
+    /// deadline to.
     #[test]
     fn a_silent_exec_that_keeps_the_pid_is_noticed_on_the_next_tick() {
         let (session, read) = session(&["/bin/sh", "-c", "stty raw -echo; read -r _; exec cat"]);
         wait_for(&session, |u| foreground_name(u) == Some("sh"));
-        // The wakeups the setup earned -- the mode going raw among them -- so the one
-        // below is this change's and not a leftover.
-        while woke(&read) {}
+        // The wakeups the setup earned -- the mode going raw among them -- settled so
+        // the one below is this change's and not a leftover; see `settle`.
+        settle(&session, &read);
 
         session
             .send(b"go\n", Input::Other, &|| false)
             .expect("send");
         assert!(
-            woke_within(&read, patience(2.0)),
+            woken_by_forcing_ticks(&session, &read, patience(2.0)),
             "the exec woke nobody: a quiet program started at a prompt keeps the shell's \
              name until some unrelated event"
         );
