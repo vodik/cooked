@@ -868,6 +868,34 @@ fn remaining(
     deadline.and_then(|t| t.checked_duration_since(now))
 }
 
+/// Everything the reader thread and Emacs' thread share, and the order they take its
+/// locks in.
+///
+/// Five mutexes live here -- `term`, `writer`, `replies`, `state` and `exited` -- with
+/// three more behind [`Notifier`] and [`Interrupt`]. The order below is not a convention
+/// anyone is asked to keep: it is what every acquisition in this file actually does, and
+/// it was checked against each of them.
+///
+/// 1. `writer` before `replies`. [`Session::send`] holds the writer for the length of its
+///    write and takes the queue under it; [`Shared::flush_replies`] `try_lock`s the writer
+///    and then takes the queue. Nothing takes the queue and then *blocks* on the writer:
+///    [`Shared::awaits_room`] reads the queue, lets it go, and only then `try_lock`s the
+///    writer, which is why the two directions cannot make a cycle.
+/// 2. `term` is never held across any of the others. Every path that reaches it -- the
+///    drains, [`Session::resize`], [`Session::ready`], [`Shared::refresh_sync`],
+///    [`Shared::feed`] -- takes it for one statement or one block and lets it go before it
+///    queues a reply or announces anything. It is the lock Emacs waits on for a frame, so
+///    nothing may be waited for underneath it.
+/// 3. `state` is a leaf; see [`ReaderState`]. Nothing is taken under it and no syscall is
+///    made under it, so a `resize` or a `send` on Emacs' thread never waits on more than
+///    the few field writes another thread is making.
+/// 4. `exited` is taken alone, with one deliberate exception:
+///    [`Shared::reap_after_hangup`] holds it across the reap and the kill, so that `alive`
+///    cannot answer yes about a child that has already been collected. Nothing is taken
+///    under it there either.
+/// 5. `notifier.state` is a leaf, and `notifier.wake` is only ever taken with it let go;
+///    see [`Notifier::notify`]. `interrupt.ends` is a leaf, held for a `clone` and no
+///    longer.
 struct Shared {
     pty: Pty,
     term: Mutex<Term>,
@@ -906,25 +934,10 @@ struct Shared {
     /// waiting for it must not let the first one's exemption lapse.
     sending: AtomicUsize,
     mode: AtomicMode,
-    /// What the tty has in the foreground, as the reader last sampled it; see
-    /// [`Shared::sample_foreground`] and [`Watched`].
-    ///
-    /// A mutex rather than an atomic because it carries a name, and behind a mutex
-    /// rather than beside `mode` in `Term` because it is a fact about the tty, which is
-    /// the reader's to sample and Emacs' only to read at a drain.
-    foreground: Mutex<Watched>,
-    /// A size the child is not yet known to have, for the reader thread to keep applying
-    /// until it sticks. `None` once the tty agrees. See `Session::resize`.
-    pending_resize: Mutex<Option<Winsize>>,
+    /// The small facts the reader's turn consults, under one lock; see [`ReaderState`].
+    state: Mutex<ReaderState>,
     /// Everything to do with telling Emacs there is something to draw; see [`Notifier`].
     notifier: Notifier,
-    /// Where the deadlines below are read against; see [`Clock`]. The same clock the
-    /// notifier holds, so the two never disagree about when a tick is due.
-    clock: Clock,
-    /// When to take one extra termios sample in the wake of output; see
-    /// [`RESAMPLE_DELAY`]. `None` whenever no burst is outstanding, which is most of the
-    /// time and is what keeps an idle session from arming anything at all.
-    resample_at: Mutex<Option<std::time::Instant>>,
     /// Pending items -- scrolled-off lines plus undelivered events -- at which the reader
     /// stops pulling from the pty and lets the child block. Raising it does not make
     /// rendering faster, since Emacs bounds throughput; it lets a child run ahead and exit
@@ -951,12 +964,6 @@ struct Shared {
     /// Whether no window shows this session's buffer; see [`Session::set_hidden`]. Starts
     /// false, for the reason `attended` starts true.
     hidden: AtomicBool,
-    /// When the eager tick, restored by input, stops being owed to an unattended session;
-    /// see [`INTERACTION_WINDOW`]. `None` until something is sent to the child.
-    ///
-    /// A deadline rather than a flag so nothing has to remember to clear it: a gesture
-    /// that ends because the user let go decays on its own.
-    interacted_until: Mutex<Option<std::time::Instant>>,
     interrupt: Interrupt,
     exited: Mutex<Option<Exit>>,
     /// Make the next read from the pty panic, to stand in for a defect in the parser or
@@ -976,6 +983,41 @@ struct Shared {
     /// standing in for it.
     #[cfg(test)]
     force_sample: AtomicBool,
+}
+
+/// The three small facts the reader's turn consults, under one lock.
+///
+/// Named for the thread that reads all of it on every turn, not for exclusive ownership:
+/// Emacs writes `pending_resize` and `interacted_until` and reads `foreground`. Three
+/// one-field mutexes before this, each an `Option` taken once a turn, which is three
+/// uncontended futex round trips where one does, and three separate places to have to
+/// reason about an order between.
+///
+/// A leaf, and it has to be: [`Session::resize`] and [`Session::send`] reach it from the
+/// thread holding the `emacs_env`, so nothing may be waited for under it. That is why
+/// [`Shared::apply_pending_resize`] lets it go across its two winsize ioctls rather than
+/// holding it the way the single-field version could afford to.
+///
+/// `resample_at` is not here. It was the fourth such mutex and it had no second thread at
+/// all -- [`Shared::poll_timeout`] read it and the read loop armed and retired it -- so it
+/// is a local in [`Shared::read_loop`] now; see [`RESAMPLE_DELAY`].
+struct ReaderState {
+    /// What the tty has in the foreground, as the reader last sampled it; see
+    /// [`Shared::sample_foreground`] and [`Watched`].
+    ///
+    /// Not an atomic because it carries a name, and not beside `mode` in `Term` because it
+    /// is a fact about the tty, which is the reader's to sample and Emacs' only to read at
+    /// a drain.
+    foreground: Watched,
+    /// A size the child is not yet known to have, for the reader thread to keep applying
+    /// until it sticks. `None` once the tty agrees. See [`Session::resize`].
+    pending_resize: Option<Winsize>,
+    /// When the eager tick, restored by input, stops being owed to an unattended session;
+    /// see [`INTERACTION_WINDOW`]. `None` until something is sent to the child.
+    ///
+    /// A deadline rather than a flag so nothing has to remember to clear it: a gesture
+    /// that ends because the user let go decays on its own.
+    interacted_until: Option<std::time::Instant>,
 }
 
 /// A claim on [`Shared::lisp_waiters`], held from just before a thread blocks on the
@@ -1267,18 +1309,18 @@ impl Session {
             writer: Mutex::new(()),
             sending: AtomicUsize::new(0),
             mode: AtomicMode::new(mode),
-            foreground: Mutex::new(Watched::Unseen),
-            pending_resize: Mutex::new(None),
-            clock: options.clock.clone(),
+            state: Mutex::new(ReaderState {
+                foreground: Watched::Unseen,
+                pending_resize: None,
+                interacted_until: None,
+            }),
             notifier: Notifier::new(wake, &options),
-            resample_at: Mutex::new(None),
             backlog_limit: AtomicUsize::new(options.backlog_limit),
             quiet_ticks: AtomicU32::new(0),
             throttled: AtomicBool::new(false),
             shutdown: AtomicBool::new(false),
             attended: AtomicBool::new(true),
             hidden: AtomicBool::new(false),
-            interacted_until: Mutex::new(None),
             interrupt: Interrupt::new()?,
             exited: Mutex::new(None),
             #[cfg(test)]
@@ -1436,10 +1478,13 @@ impl Session {
         };
         drop(term);
         self.shared.unthrottle();
+        // One at a time rather than two guards alive at once in the struct literal, so
+        // that `state` and `exited` are never held together; see [`Shared`].
+        let foreground = self.shared.state.held().foreground.program();
         Update {
             delta,
             mode: self.shared.mode.load(),
-            foreground: self.shared.foreground.held().program(),
+            foreground,
             exit: *self.shared.exited.held(),
         }
     }
@@ -1462,7 +1507,7 @@ impl Session {
         Update {
             delta,
             mode: self.shared.mode.load(),
-            foreground: self.shared.foreground.held().program(),
+            foreground: self.shared.state.held().foreground.program(),
             exit,
         }
     }
@@ -1584,7 +1629,7 @@ impl Session {
             self.shared
                 .term_for_lisp()
                 .set_size(size.rows.into(), size.cols.into(), size.cell);
-        *self.shared.pending_resize.held() = Some(size);
+        self.shared.state.held().pending_resize = Some(size);
         // Wake the reader rather than leaving the retry to its next tick, which under
         // [`UNATTENDED_TICK_CAP`] can be seconds away for a buffer resized while off
         // screen. Resizes are rare, so the extra wakeup costs nothing.
@@ -1792,20 +1837,20 @@ impl Shared {
         self.notifier.set_sync(deadline);
     }
 
-    /// How long this iteration may sleep: the notifier's answer, cut short by a pending
-    /// one-shot resample if that lands sooner.
+    /// How long the next poll may sleep -- the notifier's answer, cut short by RESAMPLE_AT
+    /// if that lands sooner -- and whether that is the quiet tick itself rather than a
+    /// nearer deadline that happens to be shorter. Only the tick counts as quiet when it
+    /// expires; see [`Shared::quiet_tick`].
     ///
-    /// Combined here rather than in [`Notifier`] because one deadline is about drawing and
-    /// the other about termios, which the notifier has no business knowing.
+    /// The resample is combined here rather than in [`Notifier`] because one deadline is
+    /// about drawing and the other about termios, which the notifier has no business
+    /// knowing. It is a parameter rather than a field because the read loop is the only
+    /// thread that arms it, retires it or reads it; see [`ReaderState`].
     ///
     /// `min`, because an earlier deadline is a reason to wake sooner. [`remaining`] answers
     /// `None` once a deadline has passed, so an expired resample cannot pin the timeout at
     /// zero and spin this thread. The unattended stretch is only the base, so pending
     /// deadlines still cut it short.
-    /// How long the next poll may sleep, and whether that is the quiet tick itself
-    /// rather than a nearer deadline -- a held frame, a throttled notification, a
-    /// resample -- that happens to be shorter. Only the tick counts as quiet when it
-    /// expires; see [`Shared::quiet_tick`].
     ///
     /// A `Duration` rather than a `PollTimeout`, because the deadlines here are shorter
     /// than the millisecond `poll` counts in: [`QUIESCENCE`] is half of one, and the tail
@@ -1814,10 +1859,10 @@ impl Shared {
     /// round its whole iteration, `tcgetattr` and the terminal lock included, as fast as
     /// it could until the deadline passed. `platform::poll` waits to the precision the
     /// platform has.
-    fn poll_timeout(&self) -> (std::time::Duration, bool) {
+    fn poll_timeout(&self, resample_at: Option<std::time::Instant>) -> (std::time::Duration, bool) {
         let tick = self.base_poll_wait();
         let mut wait = self.notifier.poll_wait(tick);
-        if let Some(left) = remaining(*self.resample_at.held(), self.clock.now()) {
+        if let Some(left) = remaining(resample_at, self.now()) {
             wait = wait.min(left);
         }
         (wait, wait >= tick)
@@ -1834,10 +1879,18 @@ impl Shared {
     /// ride on the tick and neither is a thing to let a quiet session decay.
     fn base_poll_wait(&self) -> std::time::Duration {
         let base = std::time::Duration::from_millis(u64::from(POLL_TIMEOUT_MS));
-        if self.pending_resize.held().is_some() || self.awaits_room() {
+        // Both questions this lock answers are read in one go and the lock let go again
+        // before `awaits_room` reaches for another; see [`Shared`] for the order.
+        let (resizing, interacted_until) = {
+            let state = self.state.held();
+            (state.pending_resize.is_some(), state.interacted_until)
+        };
+        if resizing || self.awaits_room() {
             return base;
         }
-        let cap = if self.attended.load(Ordering::Relaxed) || self.interacting() {
+        let cap = if self.attended.load(Ordering::Relaxed)
+            || remaining(interacted_until, self.now()).is_some()
+        {
             ATTENDED_TICK_CAP
         } else {
             UNATTENDED_TICK_CAP
@@ -1864,11 +1917,6 @@ impl Shared {
             });
     }
 
-    /// Whether input has been sent recently enough to owe this session the eager tick.
-    fn interacting(&self) -> bool {
-        remaining(*self.interacted_until.held(), self.clock.now()).is_some()
-    }
-
     /// Note that the user just did something to this session, whoever is looking at it.
     ///
     /// Called from the one place every byte bound for the child passes through, so no
@@ -1883,30 +1931,15 @@ impl Shared {
         if self.attended.load(Ordering::Relaxed) {
             return;
         }
-        let mut until = self.interacted_until.held();
-        let now = self.clock.now();
-        let was_interacting = remaining(*until, now).is_some();
-        *until = Some(now + INTERACTION_WINDOW);
-        drop(until);
+        // The clock is read before the lock, and the interrupt raised after it is let go:
+        // `state` is a leaf, and this runs on the thread holding the `emacs_env`.
+        let now = self.now();
+        let mut state = self.state.held();
+        let was_interacting = remaining(state.interacted_until, now).is_some();
+        state.interacted_until = Some(now + INTERACTION_WINDOW);
+        drop(state);
         if !was_interacting {
             self.interrupt.raise();
-        }
-    }
-
-    /// Ask again shortly, because the child just wrote something; see [`RESAMPLE_DELAY`].
-    fn arm_resample(&self) {
-        *self.resample_at.held() = Some(self.clock.now() + RESAMPLE_DELAY);
-    }
-
-    /// Retire an armed resample once its moment has come and gone.
-    ///
-    /// The sample itself is [`Shared::sample_mode`]'s, taken unconditionally on every tick
-    /// -- this only decides *when* the tick happens, so once the deadline is behind us
-    /// there is nothing left for it to bring forward.
-    fn retire_resample(&self) {
-        let mut at = self.resample_at.held();
-        if at.is_some_and(|t| t <= self.clock.now()) {
-            *at = None;
         }
     }
 
@@ -1953,9 +1986,17 @@ impl Shared {
 
     /// Whether the reader should watch the pty for room: replies are waiting, and no
     /// sender is about to write them itself.
+    ///
+    /// The queue is let go before the writer is asked about, which is the one place in
+    /// this file that read the two in the opposite order to everywhere else. It could not
+    /// deadlock -- the writer was only ever `try_lock`ed here, so the cycle had a side
+    /// that never blocks -- but holding both bought nothing either: a sender takes the
+    /// writer *before* it touches the queue, so a queue held across the `try_lock` does
+    /// not make the pair of readings any less of a snapshot. Two statements, and the order
+    /// at [`Shared`] is then true with no exception to remember.
     fn awaits_room(&self) -> bool {
-        !self.replies.held().is_empty()
-            && !matches!(self.writer.try_lock(), Err(TryLockError::WouldBlock))
+        let waiting = !self.replies.held().is_empty();
+        waiting && !matches!(self.writer.try_lock(), Err(TryLockError::WouldBlock))
     }
 
     /// [`Session::send`]'s write, after the replies queued ahead of it.
@@ -1996,6 +2037,12 @@ impl Shared {
     fn read_loop(&self) {
         block_sigpipe();
         let mut buf = vec![0u8; READ_CHUNK];
+        // When to take one extra termios sample in the wake of output; see
+        // [`RESAMPLE_DELAY`]. `None` whenever no burst is outstanding, which is most of the
+        // time and is what keeps an idle session from arming anything at all. A local
+        // rather than a field on [`Shared`] because this loop is the only thread that ever
+        // arms it, retires it or asks about it.
+        let mut resample_at: Option<std::time::Instant> = None;
 
         while !self.shutdown.load(Ordering::SeqCst) {
             // Backpressure: with a full backlog, leave the bytes in the pty. Its buffer
@@ -2044,7 +2091,7 @@ impl Shared {
                 PollFd::new(pty.master.as_fd(), events),
                 PollFd::new(interrupt.read.as_fd(), PollFlags::POLLIN),
             ];
-            let (wait, is_tick) = self.poll_timeout();
+            let (wait, is_tick) = self.poll_timeout(resample_at);
             match crate::platform::poll(&mut fds, wait) {
                 Err(nix::errno::Errno::EINTR) => continue,
                 Err(_) => break,
@@ -2092,7 +2139,8 @@ impl Shared {
             // at all -- no data, no interrupt -- which is the tick and the resample it
             // arms. `Pty::foreground_program` costs a `tcgetpgrp` and a small `/proc`
             // read, and taking those before every read puts them between the poll and the
-            // bytes: under a saturated machine that showed up as
+            // bytes:
+            // under a saturated machine that showed up as
             // `shutdown_hangs_up_the_shell_rather_than_its_foreground_job` missing its
             // hangup grace about once in a hundred runs. Nothing is lost by waiting: a
             // child that is writing has not finished, and the tick after it stops is
@@ -2116,7 +2164,13 @@ impl Shared {
             {
                 self.note();
             }
-            self.retire_resample();
+            // Retire an armed resample once its moment has come and gone. The sample
+            // itself is the one above, taken unconditionally on every tick -- this only
+            // decides *when* the tick happens, so once the deadline is behind us there is
+            // nothing left for it to bring forward.
+            if resample_at.is_some_and(|at| at <= self.now()) {
+                resample_at = None;
+            }
 
             // A resize the tty has not taken yet is retried on every tick; see
             // `Session::resize`.
@@ -2168,7 +2222,7 @@ impl Shared {
                     // shortly: the prompt of a secret read lands here, and the
                     // `tcsetattr` behind it a fraction of a millisecond later. See
                     // [`RESAMPLE_DELAY`].
-                    self.arm_resample();
+                    resample_at = Some(self.now() + RESAMPLE_DELAY);
                     // A child that changes mode almost always writes at the same moment, so
                     // re-sampling here catches the common case at once. A change goes out
                     // without waiting on the frame, because a password prompt is only
@@ -2331,11 +2385,16 @@ impl Shared {
     /// The instant every deadline in this session is measured from; see [`Clock`].
     ///
     /// The notifier owns the clock because the pacing rules are what it exists for, and
-    /// the two deadlines outside it -- the write timeout in [`Session::send`] and the
-    /// kitty transfer sweep in [`Term::sweep`] -- read it through here rather than calling
-    /// `Instant::now` past it. One clock per session is what lets a test drive all of
-    /// them, and a session with two notions of now would have rules that cannot be
-    /// related to each other.
+    /// every deadline outside it -- the write timeout in [`Session::send`], the kitty
+    /// transfer sweep in [`Term::sweep`], the resample, the interaction window, the reap
+    /// grace -- reads it through here rather than calling `Instant::now` past it. One
+    /// clock per session is what lets a test drive all of them, and a session with two
+    /// notions of now would have rules that cannot be related to each other.
+    ///
+    /// One field, too. `Shared` kept a second `Clock` beside the notifier's -- the same
+    /// `Arc`, cloned from the same [`Options`], so never a bug, but it meant the deadlines
+    /// on this side were read from one handle and the pacing from another, and a reader
+    /// checking that a test's [`Clock`] reached everything had two places to look.
     fn now(&self) -> std::time::Instant {
         self.notifier.clock.now()
     }
@@ -2468,10 +2527,11 @@ impl Shared {
     ///
     /// The first sample is not a change, however it comes out; see [`Watched`].
     fn sample_foreground(&self) -> bool {
+        // The `tcgetpgrp` and the `/proc` read happen before the lock, not under it.
         let sampled = self.pty.foreground_program();
-        let mut held = self.foreground.held();
-        let changed = matches!(&*held, Watched::Seen(last) if *last != sampled);
-        *held = Watched::Seen(sampled);
+        let mut state = self.state.held();
+        let changed = matches!(&state.foreground, Watched::Seen(last) if *last != sampled);
+        state.foreground = Watched::Seen(sampled);
         changed
     }
 
@@ -2481,20 +2541,31 @@ impl Shared {
     /// succeeds: the child's own initialisation can overwrite a successful set, and the
     /// difference between those two is invisible without reading it back. See
     /// `Session::resize`.
+    ///
+    /// The lock is let go across both ioctls and taken again to clear, rather than held
+    /// the way it could be when it guarded this field alone. `Session::resize` runs on the
+    /// thread holding the `emacs_env` and writes the same field, and a window edge being
+    /// dragged must not wait behind two winsize ioctls of the reader's; see
+    /// [`ReaderState`]. The size acted on is compared before it is cleared, so a resize
+    /// that landed while the ioctls ran is still pending rather than dropped -- which is
+    /// what holding the lock used to arrange by making that resize wait.
     fn apply_pending_resize(&self) {
-        let mut pending = self.pending_resize.held();
-        let Some(size) = *pending else { return };
-        if self.pty.winsize().is_ok_and(|current| current == size) {
-            *pending = None;
+        let Some(size) = self.state.held().pending_resize else {
             return;
-        }
-        // `ENOTTY` is the transient this exists for (macOS, before the child opens the
-        // slave) and is worth retrying. Any other error will not change by asking again, so
-        // give up on this size rather than repeating the ioctl on every poll.
-        if let Err(e) = self.pty.resize(size)
-            && !e.is(Errno::ENOTTY)
-        {
-            *pending = None;
+        };
+        let settled = if self.pty.winsize().is_ok_and(|current| current == size) {
+            true
+        } else {
+            // `ENOTTY` is the transient this exists for (macOS, before the child opens the
+            // slave) and is worth retrying. Any other error will not change by asking
+            // again, so give up on this size rather than repeating the ioctl on every poll.
+            matches!(self.pty.resize(size), Err(e) if !e.is(Errno::ENOTTY))
+        };
+        if settled {
+            let mut state = self.state.held();
+            if state.pending_resize == Some(size) {
+                state.pending_resize = None;
+            }
         }
     }
 }
