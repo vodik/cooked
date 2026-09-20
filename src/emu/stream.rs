@@ -325,31 +325,78 @@ impl Stream {
     /// Blank COUNT columns from AT with the pen's background, the `bce` rule.
     fn erase(&mut self, at: usize, count: usize) {
         self.pad(at + count);
+        self.clear_torn(at, at + count);
         let blank = Column::new(self.blank_cell());
         for column in &mut self.line[at..at + count] {
             *column = blank.clone();
         }
     }
 
-    /// Detach the column at AT from any wide character it is half of.
+    /// The first column of the character covering AT, which is AT itself unless AT is a
+    /// continuation.
     ///
-    /// Writing to either half of a two-column character destroys the whole of it -- the
-    /// glyph cannot be drawn in one column, so what is left is not half a glyph but a
-    /// blank. The grid does the same thing in [`Row::set`](super::cell::Row); doing it
-    /// here as well is what keeps a backspace into the middle of a CJK character from
-    /// leaving a stray continuation column that renders as nothing and counts as
-    /// something.
-    fn split_wide(&mut self, at: usize) {
-        if at < self.line.len() && self.line[at].is_continuation() {
-            if let Some(base) = self.line[..at].iter().rposition(|c| !c.is_continuation()) {
-                let style = self.line[base].cell.style();
-                self.line[base] = Column::new(Cell::blank(style));
-            }
+    /// Where a cut inside a wide character has to fall: the half left behind cannot be
+    /// drawn, and this line has no right margin to blank it out to, so it goes with the
+    /// rest. See [`Stream::csi_dispatch`]'s `CSI K`.
+    fn lead_of(&self, at: usize) -> usize {
+        if !self.line.get(at).is_some_and(Column::is_continuation) {
+            return at;
         }
-        if at + 1 < self.line.len() && self.line[at + 1].is_continuation() {
-            let style = self.line[at + 1].cell.style();
-            self.line[at + 1] = Column::new(Cell::blank(style));
+        self.line[..at]
+            .iter()
+            .rposition(|column| !column.is_continuation())
+            .unwrap_or(at)
+    }
+
+    /// Blank every wide character that straddles either end of START..END, the columns a
+    /// writer is about to overwrite.
+    ///
+    /// [`Row::clear_torn`](super::cell::Row) for the open line, and the same rule: writing
+    /// to either half of a two-column character destroys the whole of it, because the
+    /// glyph cannot be drawn in one column and what is left is not half a glyph but a
+    /// blank. Every writer that replaces part of the line goes through this -- the print,
+    /// the ASCII run, the erases, and both halves of the line editor -- so a backspace or
+    /// a `CSI P` into the middle of a CJK character cannot leave a lead with nothing after
+    /// it, which Emacs still draws two columns wide, or a stray continuation, which
+    /// renders as nothing and counts as something.
+    ///
+    /// END is the first column *not* written, so a continuation there belongs to a
+    /// character whose lead is about to be overwritten; START is tested against the line
+    /// as it stands, which is the only thing that can say whether START was inside a wide
+    /// character at all.
+    fn clear_torn(&mut self, start: usize, end: usize) {
+        let torn = |col: usize| {
+            self.line
+                .get(col)
+                .is_some_and(Column::is_continuation)
+                .then_some(col)
+        };
+        let (start, end) = (torn(start), torn(end));
+        if let Some(col) = start {
+            self.blank_wide(col);
         }
+        if let Some(col) = end {
+            self.blank_wide(col);
+        }
+    }
+
+    /// Blank the whole of the wide character COL is a continuation of.
+    ///
+    /// [`Stream::clear_torn`]'s slow half, out of line for the reason `Row::blank_wide` is:
+    /// an ordinary write pays only the two tests above. The blanks keep the character's
+    /// rendition, so a torn character on a red background leaves a red blank rather than a
+    /// hole, and its combining marks go with it -- there is no longer a character for them
+    /// to ride.
+    #[cold]
+    #[inline(never)]
+    fn blank_wide(&mut self, col: usize) {
+        let lead = self.lead_of(col);
+        let end = self.line[col..]
+            .iter()
+            .position(|column| !column.is_continuation())
+            .map_or(self.line.len(), |n| col + n);
+        let blank = Column::new(Cell::blank(self.line[lead].cell.style()));
+        self.line[lead..end].fill(blank);
     }
 
     /// Write CH at the cursor, WIDTH columns wide, and advance.
@@ -359,9 +406,7 @@ impl Stream {
             self.retire();
         }
         self.pad(self.col + width);
-        for offset in 0..width {
-            self.split_wide(self.col + offset);
-        }
+        self.clear_torn(self.col, self.col + width);
         let cell = self.pen_cell(ch);
         self.line[self.col] = Column::new(cell);
         // The columns a wide character stands on beyond its first hold no character of
@@ -400,10 +445,11 @@ impl Stream {
             // stood there -- which is what a terminal does, and here can only be blanks
             // or text this same line already wrote past.
             self.pad(base + after);
-            for offset in before.max(1)..after {
-                self.split_wide(base + offset);
-                let continuation = Column::new(self.line[base].cell.with_char(CONTINUATION));
-                self.line[base + offset] = continuation;
+            let (from, to) = (base + before.max(1), base + after);
+            self.clear_torn(from, to);
+            let continuation = Column::new(self.line[base].cell.with_char(CONTINUATION));
+            for column in &mut self.line[from..to] {
+                *column = continuation.clone();
             }
             self.col = self.col.max(base + after);
         }
@@ -664,8 +710,7 @@ impl Stream {
             self.retire();
         }
         self.pad(self.col + plain);
-        self.split_wide(self.col);
-        self.split_wide(self.col + plain - 1);
+        self.clear_torn(self.col, self.col + plain);
         let cell = self.pen_cell(BLANK);
         for (offset, &b) in run.as_bytes().iter().enumerate() {
             self.line[self.col + offset] = Column::new(cell.with_char(char::from(b)));
@@ -749,7 +794,13 @@ impl Perform for Stream {
                 // a line erased and then ended carries no trailing spaces into the
                 // buffer; a screen has a right margin to blank out to and this has not.
                 Some(2) => self.line.clear(),
-                _ => self.line.truncate(self.col.min(self.line.len())),
+                // The cut falls at the start of the character it lands in, so a wide one
+                // it lands *inside* goes whole rather than leaving a lead Emacs would
+                // still draw two columns wide; see [`Stream::lead_of`].
+                _ => {
+                    let to = self.lead_of(self.col.min(self.line.len()));
+                    self.line.truncate(to);
+                }
             },
             // ECH: blank N columns without moving the cursor.
             'X' => self.erase(self.col, n),
@@ -757,12 +808,15 @@ impl Perform for Stream {
             'P' => {
                 if self.col < self.line.len() {
                     let to = (self.col + n).min(self.line.len());
+                    self.clear_torn(self.col, to);
                     self.line.drain(self.col..to);
                 }
             }
             // ICH: open a gap, the other half of the same line editing. Declined past
-            // the end of the line, where there is nothing to push rightward.
+            // the end of the line, where there is nothing to push rightward. Nothing
+            // falls off a line that grows, so only the insertion point can tear.
             '@' if self.col <= self.line.len() => {
+                self.clear_torn(self.col, self.col);
                 let (blank, at) = (Column::new(self.blank_cell()), self.col);
                 self.line.splice(at..at, std::iter::repeat_n(blank, n));
             }
@@ -1127,6 +1181,29 @@ mod tests {
         // Column 2 is the second half of the first character; writing there destroys the
         // whole character rather than leaving half a glyph.
         assert_eq!(Buffer::new().feed("漢字\x1b[2Gx\n"), " x字\n");
+    }
+
+    /// Every operator that writes over part of a wide character takes the whole of it, as
+    /// the grid's `Row::clear_torn` makes the terminal do.
+    ///
+    /// The filter used to do this for printing alone, so the four operators below each
+    /// left half a character behind: an `ECH` or an `ICH` on the second column left the
+    /// character standing, where a terminal blanks it; a `DCH` over the first column left
+    /// a continuation that renders as nothing; a `CSI K` inside one kept a lead Emacs
+    /// draws two columns wide. Checked against `Screen` for each: `Row::fill`,
+    /// `Row::delete` and `Row::insert_blank` all clear the tear first, which is xterm's
+    /// behaviour and the only one that leaves a drawable row.
+    #[test]
+    fn an_editing_operator_takes_a_wide_character_whole_or_not_at_all() {
+        // ECH, on the second column of the character and on the first.
+        assert_eq!(Buffer::new().feed("漢\x1b[2G\x1b[1X\n"), "  \n");
+        assert_eq!(Buffer::new().feed("ab漢\x1b[3G\x1b[1X\n"), "ab  \n");
+        // DCH deleting the character's first column, and ICH opening a gap inside it.
+        assert_eq!(Buffer::new().feed("a漢b\x1b[2G\x1b[1P\n"), "a b\n");
+        assert_eq!(Buffer::new().feed("漢\x1b[2G\x1b[1@\n"), "   \n");
+        // EL 0 cutting the line inside it: the line ends before the character, since
+        // there is no right margin here to blank the surviving half out to.
+        assert_eq!(Buffer::new().feed("ab漢cd\x1b[4G\x1b[K\n"), "ab\n");
     }
 
     #[test]
