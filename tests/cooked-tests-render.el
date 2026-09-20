@@ -4571,18 +4571,31 @@ text it sent, which is no longer what the buffer holds."
       (should (member 0 unsent))
       (should (member 1 unsent)))))
 
-(ert-deftest cooked-a-theme-change-makes-the-core-send-every-row-again ()
-  "A theme change leaves faces resolved against the old theme on every row.
+(ert-deftest cooked-a-theme-change-costs-the-core-nothing ()
+  "A theme change says nothing to the core at all, and owes it nothing.
 
-So the core is told its copy of the screen is out of date, and a child
-repainting the same cells afterwards gets them in the new colours."
+It used to clear the core's copy of the screen, so that a child repainting the
+same cells would be made to send them again and have them drawn in the new
+colours.  The text no longer holds a colour to be stale: a cell in an indexed
+colour wears `cooked-fg-*', which `cooked--sync-ansi-faces' moves under it, so
+the rows already rendered follow the theme where they are and a repaint would
+cost a frame to produce the same characters with an equal face.  The two things
+that do bake a colour or a measurement have their own, stronger answer, which
+damages the rows rather than only forgetting them: `cooked--bakes-an-indexed-color-p'
+for an indexed SGR 58 underline, and `cooked--wrap-cache' for a theme that
+moves the default font.
+
+`cooked-a-theme-change-recolours-a-still-screen-with-no-redraw' is the other
+half of this: that the screen is right afterwards, which is why it can be left
+alone."
   (cooked-tests--with-session '("/bin/sh" "-c" "printf 'one'; sleep 5")
-    (let ((unsent nil)
-          (session cooked--session))
+    (let ((told nil))
       (cl-letf (((symbol-function 'cooked--row-unsent)
-                 (lambda (handle row) (push (cons handle row) unsent))))
+                 (lambda (&rest args) (push args told)))
+                ((symbol-function 'cooked--redraw)
+                 (lambda (&rest args) (push args told))))
         (cooked--flush-face-cache))
-      (should (member (cons session nil) unsent)))))
+      (should-not told))))
 
 (ert-deftest cooked-a-theme-change-recolours-a-still-screen-with-no-redraw ()
   "A screen nothing writes to shows the new theme's colours, and is not redrawn.

@@ -1623,8 +1623,16 @@ which has no such seam at all."
                       pos (min (1+ eol) (point-max)))))))))
     (nreverse rendered)))
 
-;; A theme changes how the same cells are drawn; see `cooked--forget-sent-rows'.
-(add-hook 'cooked-theme-change-hook #'cooked--forget-sent-rows)
+;; A theme change used to clear the core's copy of the screen from here, so that a
+;; repaint of the same cells would arrive to be drawn in the new colours.  It does not
+;; any more, and nothing replaces it: a cell in an indexed colour wears `cooked-fg-*'
+;; and `cooked-bg-*', which `cooked--sync-ansi-faces' moves under the text, so the rows
+;; already rendered follow the theme where they are.  Re-rendering them would produce
+;; the same characters with an equal face, at the price of a frame.  The one attribute
+;; that does bake a colour, an indexed SGR 58 underline, is caught by
+;; `cooked--bakes-an-indexed-color-p', which damages every row rather than only
+;; forgetting it; a theme that changes the default font moves `cooked--layout-stamp'
+;; and is caught by `cooked--wrap-cache' the same way.
 
 (defun cooked--notify-rows-rendered (bounds)
   "Hand BOUNDS, this drain's rewritten live rows, to the optional layers.
