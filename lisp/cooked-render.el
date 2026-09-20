@@ -980,8 +980,8 @@ two chances to disagree."
     ;; Decoded into a record at the boundary, like the cursor and the grid; see
     ;; `cooked-mouse-state'.  cooked-mouse.el owns it because it is the only
     ;; reader, and re-gates its own keymap on the way through.
-    (`(mouse ,enabled ,sgr ,drag ,motion ,pixels)
-     (cooked--set-mouse-state enabled sgr drag motion pixels))
+    (`(mouse ,enabled ,drag ,motion)
+     (cooked--set-mouse-state enabled drag motion))
     ((or `(prompt-start ,_ . ,_) `(prompt-continuation ,_ . ,_)
          `(prompt-end ,_ . ,_))
      (cooked--handle-semantic event batch-start))
@@ -1040,7 +1040,7 @@ nothing reports it once the child is dead, so a kept buffer went on holding
   (when cooked--pointer-stacks (cooked--reset-pointer-shapes))
   (when exited
     (cooked--set-cursor-color nil)
-    (cooked--set-mouse-state nil nil nil nil nil)
+    (cooked--set-mouse-state nil nil nil)
     (cooked--run-seam 'cooked-exit-hook)))
 
 (defcustom cooked-exit-hook nil

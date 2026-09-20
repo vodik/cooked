@@ -2456,10 +2456,10 @@ while [ ! -e %s ]; do sleep 0.05; done; seq 100 160; echo scrolled; exec sleep 3
                        (cooked--screen-start-position))))
           ;; Reporting off drops the shape; back on restores it, since the child
           ;; did not pop it.
-          (cooked--set-mouse-state nil nil nil nil nil)
+          (cooked--set-mouse-state nil nil nil)
           (should-not cooked--pointer-overlay)
           (should-not (get-char-property (cooked--screen-start-position) 'pointer))
-          (cooked--set-mouse-state t nil nil nil nil)
+          (cooked--set-mouse-state t nil nil)
           (should (eq (get-char-property (cooked--screen-start-position) 'pointer) 'hand)))
       (ignore-errors (delete-file go)))))
 
@@ -2511,7 +2511,7 @@ change without waiting for a drain."
         (should (cooked-tests--settle (lambda () (cooked--update-mouse-grab)
                                         cooked--mouse-grab)))
         (should-not (shown)))
-      (cooked--set-mouse-state t nil nil nil nil)
+      (cooked--set-mouse-state t nil nil)
       (should cooked--mouse-grab)
       (should (eq (shown) 'arrow))
       (should (eq (get-char-property (cooked--screen-start-position) 'pointer) 'arrow))
@@ -2525,7 +2525,7 @@ change without waiting for a drain."
       (should-not (shown))
       (kill-local-variable 'cooked-grabbed-pointer-shape)
       (should (eq (shown) 'arrow))
-      (cooked--set-mouse-state nil nil nil nil nil)
+      (cooked--set-mouse-state nil nil nil)
       (should-not (shown)))))
 
 (ert-deftest cooked-osc-22-stacks-per-screen-and-honours-the-knob ()
@@ -3469,7 +3469,7 @@ keyboard."
     (cooked-mouse-state-motion cooked--mouse-state)
     (and (cooked-tests--text-has "next\\$")
          (not (cooked-mouse-state-enabled cooked--mouse-state))
-         (not (cooked-mouse-state-sgr cooked--mouse-state)))))
+         (not (cooked-mouse-state-motion cooked--mouse-state)))))
 
 (ert-deftest cooked-command-end-ends-focus-reports ()
   "Left on, every change of window types `ESC [ I' into bash."

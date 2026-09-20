@@ -951,20 +951,17 @@ fn event_to_lisp<'e>(
                 *id,
             ]
         ),
-        // (mouse ENABLED SGR DRAG MOTION PIXELS). Not a single "wants the mouse" bit,
-        // because 1002 and 1003 ask to be told where the pointer went, which the sender
-        // cannot know otherwise. The format is two booleans because the sender asks which
-        // frame and which unit in two different places.
+        // (mouse ENABLED DRAG MOTION). Not a single "wants the mouse" bit, because 1002
+        // and 1003 ask to be told where the pointer went, which the sender cannot know
+        // otherwise. The report's spelling -- X10, SGR or SGR in pixels -- used to ride
+        // along as two more booleans here, but nothing in Lisp decided from them, so a
+        // click landing between the child changing its mind and Emacs' next drain was
+        // encoded against the stale answer. `cooked--send-mouse-report' now reads the
+        // spelling fresh, under the lock, at the moment each report is built; see
+        // `Mouse::report' in src/emu/term/mouse.rs.
         Event::Mouse(m) => list!(
             env,
-            [
-                sym!(env, "mouse")?,
-                m.enabled(),
-                m.sgr(),
-                m.drag(),
-                m.motion(),
-                m.pixels(),
-            ]
+            [sym!(env, "mouse")?, m.enabled(), m.drag(), m.motion()]
         ),
         Event::Reply(bytes, _) => env.cons(sym!(env, "reply")?, env.into_lisp(bytes.as_slice())?),
         Event::EraseScrollback => list!(env, [sym!(env, "erase-scrollback")?]),

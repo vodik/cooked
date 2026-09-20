@@ -209,35 +209,47 @@ keymap gate is recomputed only when something calls
 
 (cl-defstruct (cooked-mouse-state (:constructor cooked--mouse-state-make)
                                   (:copier nil))
-  "What the child has asked for about the mouse, as of the last drain.
+  "What Lisp needs to decide about the mouse, as of the last drain.
 
 The same wire shape `cooked-cursor' and `cooked-grid' get, decoded at the same
 boundary and for the same reason -- see \"What the two ends exchange\" in
-cooked-state.el.
+cooked-state.el.  Deliberately smaller than what the child has actually asked
+for: how a report is *spelled* -- X10, SGR, or SGR in pixels -- is read fresh
+from the core in `cooked--send-mouse-report' rather than kept here, because a
+report built from a copy of the format that is a drain old is read by the
+child as an event it never asked for.  Only what Lisp itself decides from
+stays: whether to grab the mouse at all, and the two hints below.
 
 Never mutated in place.  `cooked--set-mouse-state' replaces it wholesale on
 every `mouse' event, which is what makes `cooked--mouse-state-none' safe to
 share as the default across every buffer that has never been told anything."
-  (enabled nil :documentation "Whether the child asked for mouse reports at all.")
-  (sgr nil :documentation "\
-Whether to encode reports as SGR (1006), in cells or in pixels.")
+  (enabled nil :documentation "Whether the child asked for mouse reports at all.
+Gates `cooked--mouse-grab', which is what the keymap and the click-selection
+suppression key off; see `cooked--update-mouse-grab'.")
   (drag nil :documentation "\
-DEC mode 1002: report the pointer while a button is held.")
+DEC mode 1002: report the pointer while a button is held.
+
+A hint, not a decision the core is asked to make again: it saves a module call
+per pointer moved by deciding, once, whether a press is worth following with
+`cooked--mouse-track'.  Stale in the same narrow window `motion' is -- see its
+docstring -- and bounded the same way: wrong only for a press landing between
+the child asking and Emacs' next drain, and only for the motion of that one
+gesture, since the press and the eventual release are still reported either
+way.")
   (motion nil :documentation "\
 DEC mode 1003: report the pointer whether or not a button is held.
 
 Kept apart from `drag' even though cooked drives both from the same tracking
 loop, because the child asked two different questions and `cooked--mouse-track'
 can only honestly answer one of them; see its docstring.  The other one is
-`cooked-mouse-hover', and only under `cooked-mouse-hover-motion'.")
-  (pixels nil :documentation "\
-DEC mode 1016: SGR reports carry the pointer's pixel instead of its cell.
+`cooked-mouse-hover', and only under `cooked-mouse-hover-motion'.
 
-Never set without `sgr': the core keeps the coordinate modes mutually
-exclusive, as xterm does, so 1016 is a unit for the SGR form rather than a form
-of its own.  Read here only to decide whether a click is worth measuring in
-pixels at all; the report that carries them is the core's, in
-`cooked--send-mouse-report'."))
+Also a hint, read on every candidate hover movement in `cooked--hover-report'
+rather than asked of the core each time, for the same call-per-motion reason
+`drag' is.  Unlike `drag', a wrong answer here does not survive past the next
+drain: the check runs again on the very next movement, so what a stale `nil'
+costs is at most the hover reports between the child's request and Emacs
+noticing it, never a whole gesture."))
 
 (defconst cooked--mouse-state-none (cooked--mouse-state-make)
   "The state of a child that has asked for nothing.
@@ -252,18 +264,17 @@ reader.")
 (defvar-local cooked--mouse-state cooked--mouse-state-none
   "What the child last asked for about the mouse; see `cooked-mouse-state'.")
 
-(defun cooked--set-mouse-state (enabled sgr drag motion pixels)
-  "Adopt ENABLED, SGR, DRAG, MOTION and PIXELS, and re-gate the keymap.
+(defun cooked--set-mouse-state (enabled drag motion)
+  "Adopt ENABLED, DRAG and MOTION, and re-gate the keymap.
 
-The five fields of the drain's `mouse' event, in the order it carries them.
+The three fields of the drain's `mouse' event, in the order it carries them.
 
 Called from `cooked--handle-event', which is in cooked-render.el and requires
 this file, so the call is an ordinary one -- but it is still a notification that
 something changed rather than a question asked upward, which is why the state
 and the keymap it gates both live on this side of it."
   (setq cooked--mouse-state (cooked--mouse-state-make
-                             :enabled enabled :sgr sgr :drag drag :motion motion
-                             :pixels pixels))
+                             :enabled enabled :drag drag :motion motion))
   ;; The keymap that outranks `pixel-scroll-precision-mode' is gated on this, so
   ;; it has to move when the child changes its mind about the mouse.
   (cooked--update-mouse-grab))
@@ -571,11 +582,17 @@ pixels wider than its grid has blank space past it that is not a cell."
                (max (cdr cell) (1- cooked--cols))))))
 
 (defun cooked--mouse-offset (posn &optional glyph)
-  "Where in its cell POSN points, as (DX . DY) pixels, if the child wants to know.
+  "Where in its cell POSN points, as (DX . DY) pixels, if the frame can measure it.
 
 GLYPH is what `cooked--mouse-glyph' answers for POSN, for a caller that
-already has it.  Nil unless the child asked for pixel reports, so that a session
-reporting cells pays nothing for a measurement it would throw away.
+already has it.  Nil where GLYPH is, which is a posn over no text -- a fringe,
+a margin -- rather than anything about whether the child wants pixels: DEC
+mode 1016 is the core's mode to honour or ignore, in
+`cooked--send-mouse-report', against whatever it holds at the moment the
+report is built.  Measuring here whether or not it will be used is what
+closes the window a cached `pixels' bit used to leave open -- a child that
+had just turned 1016 on got the cell's top-left pixel, every offset it was
+owed until Emacs next drained, because Lisp's copy of the flag still said no.
 
 Only the offset *within* the cell is taken from Emacs; the cell it sits in is
 still `cooked--mouse-cell's, and `cooked--send-mouse-report' scales that by
@@ -585,9 +602,8 @@ find that origin in pixels, and it is not a constant: row 0 is wherever
 `window-start' and the header line.  A glyph-relative offset needs none of
 that, and `cooked--mouse-glyph' has already divided the part of it that is
 whole cells out into the column."
-  (when (cooked-mouse-state-pixels cooked--mouse-state)
-    (when-let* ((glyph (or glyph (cooked--mouse-glyph posn))))
-      (cons (cddr glyph) (or (cdr (posn-object-x-y posn)) 0)))))
+  (when-let* ((glyph (or glyph (cooked--mouse-glyph posn))))
+    (cons (cddr glyph) (or (cdr (posn-object-x-y posn)) 0))))
 
 (defun cooked--send-mouse (button row col pressed &optional offset keep-region)
   "Send one report for BUTTON at ROW/COL, PRESSED or not, and drop the region.
@@ -596,16 +612,16 @@ OFFSET is where in the cell the pointer is, as the (DX . DY) returned by
 `cooked--mouse-offset', for a child reporting pixels.  With KEEP-REGION, leave
 the region alone; only hover motion asks for that.
 
-The report itself is spelled by the core, in `cooked--send-mouse-report':
-which of X10, SGR and SGR-in-pixels the child reads, and the cell size a pixel
-report is measured in, are both the child's to change at any moment, and
-`cooked--mouse-state' is only as fresh as the last drain.  The tracking mode
-is read there for the same reason, so a motion report the mode in force does
-not cover -- a drag under 1000, a hover under anything but 1003 -- is dropped
-by the core and `cooked--send-mouse-report' answers nil.  Everything above
-here -- which cell the pointer is over, whether the gesture is Emacs' to
-forward at all, what happens to the region -- is a question about Emacs and
-stays on this side.
+The report itself is spelled by the core, in `cooked--send-mouse-report': which
+of X10, SGR and SGR-in-pixels the child reads, and the cell size a pixel report
+is measured in, are both the child's to change at any moment, and are read
+there fresh rather than from anything Lisp remembers between drains -- see
+that function's own docstring.  The tracking mode is read there for the same
+reason, so a motion report the mode in force does not cover -- a drag under
+1000, a hover under anything but 1003 -- is dropped by the core and
+`cooked--send-mouse-report' answers nil.  Everything above here -- which cell
+the pointer is over, whether the gesture is Emacs' to forward at all, what
+happens to the region -- is a question about Emacs and stays on this side.
 
 Deactivating the mark is the point of routing every report through here.  A
 click that the child answers is the child's click, and leaving a region behind
@@ -1033,7 +1049,9 @@ into by the time it comes up."
                               (or cooked--mouse-last-cell (cooked--cursor-cell))))))
                ;; Only a cell that is the pointer's own has a pixel offset to go
                ;; with it; one standing in for the pointer reports its corner.
-               (offset (and cell here (cooked-mouse-state-pixels cooked--mouse-state)
+               ;; Measured whether or not the child has asked for pixels -- see
+               ;; `cooked--mouse-offset' -- and left for the core to use or drop.
+               (offset (and cell here
                             (equal cell (cooked--mouse-cell posn))
                             (cooked--mouse-offset posn))))
           (cond

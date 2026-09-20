@@ -281,11 +281,11 @@ half that matters: the pair is spliced onto a list the caller already holds."
 (defun cooked-tests--mouse (&rest keys)
   "Set this buffer's mouse state from KEYS, as a drain's `mouse' event would.
 
-KEYS are `cooked--mouse-state-make' keywords: :enabled, :sgr, :drag, :motion
-and :pixels.  A field not named is off, deliberately -- the child's request
-arrives as one event rather than five independent switches, so a test naming
-only `:sgr' is describing a child that asked for SGR and nothing else.  Where
-a test means \"and keep the mouse on\", it says `:enabled t' as well."
+KEYS are `cooked--mouse-state-make' keywords: :enabled, :drag and :motion.  A
+field not named is off, deliberately -- the child's request arrives as one
+event rather than three independent switches, so a test naming only `:drag'
+is describing a child that asked for 1002 and nothing else.  Where a test
+means \"and keep the mouse on\", it says `:enabled t' as well."
   (setq-local cooked--mouse-state (apply #'cooked--mouse-state-make keys)))
 
 (defmacro cooked-tests--recording-reports (var &rest body)
