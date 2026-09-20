@@ -31,6 +31,27 @@ fn skipped(label: &str) -> bool {
     std::env::var("COOKED_BENCH_ONLY").is_ok_and(|only| !label.contains(&only))
 }
 
+/// The grid size for a row whose geometry is otherwise a literal in this file.
+///
+/// `COOKED_BENCH_GRID=50x200` overrides `(default_rows, default_cols)` for the rows that
+/// consult this, so a profile can be taken at a grid other than the one hard-coded for it
+/// without editing the file. The default is unchanged: with the variable unset this returns
+/// exactly what the row asked for.
+fn bench_grid(default_rows: usize, default_cols: usize) -> (usize, usize) {
+    let Ok(spec) = std::env::var("COOKED_BENCH_GRID") else {
+        return (default_rows, default_cols);
+    };
+    let (rows, cols) = spec
+        .split_once('x')
+        .unwrap_or_else(|| panic!("COOKED_BENCH_GRID must be ROWSxCOLS, got {spec:?}"));
+    (
+        rows.parse()
+            .unwrap_or_else(|e| panic!("COOKED_BENCH_GRID rows {rows:?}: {e}")),
+        cols.parse()
+            .unwrap_or_else(|e| panic!("COOKED_BENCH_GRID cols {cols:?}: {e}")),
+    )
+}
+
 /// Plain text, the `cat a big file` case.
 fn plain(lines: usize) -> Vec<u8> {
     (0..lines)
@@ -114,14 +135,15 @@ fn repaint(frames: usize, rows: usize, cols: usize) -> Vec<u8> {
 #[test]
 #[ignore = "benchmark"]
 fn feed_only() {
-    for (label, data) in [
-        ("plain, parse only", plain(200_000)),
-        ("styled, parse only", styled(200_000)),
-        ("wide, parse only", wide(200_000)),
+    for (label, build) in [
+        ("plain, parse only", (|| plain(200_000)) as fn() -> Vec<u8>),
+        ("styled, parse only", || styled(200_000)),
+        ("wide, parse only", || wide(200_000)),
     ] {
         if skipped(label) {
             continue;
         }
+        let data = build();
         let mut term = Term::new(50, 200);
         let mut forced = 0usize;
         timed(label, data.len(), || {
@@ -146,10 +168,18 @@ fn feed_only() {
 #[test]
 #[ignore = "benchmark"]
 fn feed_and_drain() {
-    for (label, data, chunk) in [
-        ("plain, drain every 64KB", plain(200_000), 64 * 1024),
-        ("styled, drain every 64KB", styled(200_000), 64 * 1024),
+    for (label, build, chunk) in [
+        (
+            "plain, drain every 64KB",
+            (|| plain(200_000)) as fn() -> Vec<u8>,
+            64 * 1024,
+        ),
+        ("styled, drain every 64KB", || styled(200_000), 64 * 1024),
     ] {
+        if skipped(label) {
+            continue;
+        }
+        let data = build();
         let mut term = Term::new(50, 200);
         let mut runs = 0usize;
         timed(label, data.len(), || {
@@ -256,21 +286,28 @@ fn repaint_mostly_unchanged() {
 #[test]
 #[ignore = "benchmark"]
 fn scroll_region() {
-    let body = plain(50_000);
+    let (rows, cols) = bench_grid(200, 400);
+    let mut body: Option<Vec<u8>> = None;
     for (label, setup) in [
-        ("scroll 200x400, full screen", b"\x1b[200;1H".to_vec()),
         (
-            "scroll 200x400, region 2..199",
-            b"\x1b[2;199r\x1b[199;1H".to_vec(),
+            format!("scroll {rows}x{cols}, full screen"),
+            format!("\x1b[{rows};1H").into_bytes(),
+        ),
+        (
+            format!("scroll {rows}x{cols}, region 2..{}", rows - 1),
+            format!("\x1b[2;{}r\x1b[{};1H", rows - 1, rows - 1).into_bytes(),
         ),
     ] {
-        if skipped(label) {
+        if skipped(&label) {
             continue;
         }
-        let mut term = Term::new(200, 400);
+        // Shared by both rows, so build it once, the first time a selected row needs it,
+        // rather than once per row regardless of the filter.
+        let body = body.get_or_insert_with(|| plain(50_000));
+        let mut term = Term::new(rows, cols);
         term.feed(&setup);
         let mut scrolled = 0usize;
-        timed(label, body.len(), || {
+        timed(&label, body.len(), || {
             for piece in body.chunks(READ_CHUNK) {
                 term.feed(piece);
                 let delta = term.drain_promoting();
@@ -293,16 +330,17 @@ fn scroll_region() {
 #[test]
 #[ignore = "benchmark"]
 fn grid_work() {
-    let (rows, cols) = (200, 400);
+    let (rows, cols) = bench_grid(200, 400);
     let fills = 20_000;
-    if !skipped("fill 200x400, erase the screen") {
+    let fill_label = format!("fill {rows}x{cols}, erase the screen");
+    if !skipped(&fill_label) {
         // `ED 2` in a coloured pen, so the fill writes a cell the row cannot shortcut as
         // already blank, and the cursor addressing keeps the erase from being elided.
         let data: Vec<u8> = (0..fills)
             .flat_map(|i| format!("\x1b[4{}m\x1b[H\x1b[2J", i % 8).into_bytes())
             .collect();
         let mut term = Term::new(rows, cols);
-        timed("fill 200x400, erase the screen", data.len(), || {
+        timed(&fill_label, data.len(), || {
             for piece in data.chunks(READ_CHUNK) {
                 term.feed(piece);
                 term.drain();
@@ -310,12 +348,13 @@ fn grid_work() {
         });
         println!("{:>44}({fills} screens erased)", "");
     }
-    if !skipped("resize 200x400, alternating") {
+    let resize_label = format!("resize {rows}x{cols}, alternating");
+    if !skipped(&resize_label) {
         let resizes = 2_000;
         let mut term = Term::new(rows, cols);
         term.feed(&plain(rows));
         term.drain();
-        timed("resize 200x400, alternating", 0, || {
+        timed(&resize_label, 0, || {
             for i in 0..resizes {
                 let wider = i % 2 == 0;
                 term.resize(rows, if wider { cols + 40 } else { cols });
@@ -571,31 +610,34 @@ fn kitty_video() {
 #[test]
 #[ignore = "benchmark"]
 fn kitty_animation() {
-    let frames = animation(30, 826, 647, 61, 23);
-    let fed: usize = frames.iter().map(Vec::len).sum();
+    let mut frames: Option<Vec<Vec<u8>>> = None;
     for behind in [1usize, 2, 4, 8] {
+        let label = format!("animation, {behind} frame(s) per drain");
+        if skipped(&label) {
+            continue;
+        }
+        // Shared by every `behind` value, so build it once, the first time a selected row
+        // needs it, rather than once per row regardless of the filter.
+        let frames = frames.get_or_insert_with(|| animation(30, 826, 647, 61, 23));
+        let fed: usize = frames.iter().map(Vec::len).sum();
         // Two loops, so the second one measures the content-addressed path.
         let mut term = Term::new(24, 80);
         let (mut crossed, mut drains, mut peak) = (0usize, 0usize, 0usize);
-        timed(
-            &format!("animation, {behind} frame(s) per drain"),
-            fed * 2,
-            || {
-                for _ in 0..2 {
-                    for batch in frames.chunks(behind) {
-                        for frame in batch {
-                            for piece in frame.chunks(READ_CHUNK) {
-                                term.feed(piece);
-                            }
+        timed(&label, fed * 2, || {
+            for _ in 0..2 {
+                for batch in frames.chunks(behind) {
+                    for frame in batch {
+                        for piece in frame.chunks(READ_CHUNK) {
+                            term.feed(piece);
                         }
-                        let delta = term.drain();
-                        crossed += delta.images.iter().map(|i| i.bytes.len()).sum::<usize>();
-                        drains += 1;
-                        peak = peak.max(delta.images.len());
                     }
+                    let delta = term.drain();
+                    crossed += delta.images.iter().map(|i| i.bytes.len()).sum::<usize>();
+                    drains += 1;
+                    peak = peak.max(delta.images.len());
                 }
-            },
-        );
+            }
+        });
         println!(
             "{:>44}({drains} drains, {:.0} MB to Lisp, {peak} frames queued at worst)",
             "",
@@ -607,17 +649,23 @@ fn kitty_animation() {
 #[test]
 #[ignore = "benchmark"]
 fn hyperlinks() {
-    for (label, data) in [
+    for (label, build) in [
         // Reuse, but of a store that is already full: one URI re-emitted per line with
         // several thousand others behind it. `distinct == 1` would exercise the same
         // code against a single entry, where any ordering is O(1) and a scan that had
         // crept back in would cost nothing measurable.
         (
             "OSC 8, one link reused, store full",
-            [hyperlinked(8_000, 8_000), hyperlinked(200_000, 1)].concat(),
+            (|| [hyperlinked(8_000, 8_000), hyperlinked(200_000, 1)].concat()) as fn() -> Vec<u8>,
         ),
-        ("OSC 8, 100k distinct links", hyperlinked(200_000, 100_000)),
+        ("OSC 8, 100k distinct links", || {
+            hyperlinked(200_000, 100_000)
+        }),
     ] {
+        if skipped(label) {
+            continue;
+        }
+        let data = build();
         let mut term = Term::new(50, 200);
         let mut links = 0usize;
         timed(label, data.len(), || {
