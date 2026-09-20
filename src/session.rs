@@ -1579,10 +1579,25 @@ impl Session {
     ///
     /// Both paths out of a session start here. What they differ on is who waits out the
     /// grace afterwards.
+    ///
+    /// The write half goes first, and it goes as a move: from here on nothing can obtain
+    /// one, so [`Session::send`], [`Session::reply`] and [`Session::resize`] answer
+    /// [`Error::Closed`](crate::error::Error::Closed) by having nothing to borrow rather
+    /// than by remembering to test a flag. The replies still queued go with it -- the
+    /// child is being hung up on, and an answer it can no longer be given is an answer
+    /// nobody will come for -- which is what [`ReplyQueue::flush`] already does with a
+    /// queue whose write failed.
+    ///
+    /// The descriptors themselves stay: the reader is still polling the master and
+    /// waiting on the exit watch through the grace, and [`Session::shutdown`] releases
+    /// them once it has reaped. That is the whole reason the write half is a second thing
+    /// to take rather than [`Pty::close`] moved earlier.
     fn begin_shutdown(&self) -> bool {
         if self.shared.shutdown.swap(true, Ordering::SeqCst) {
             return false;
         }
+        drop(self.shared.pty.take_write_half());
+        self.shared.replies.held().clear();
         let _ = self.shared.pty.hangup();
         self.shared.interrupt.raise();
         self.shared.notifier.close();
@@ -1817,7 +1832,7 @@ impl Session {
         // offer the queue once more. The writer is released with the queue still locked:
         // a reply queued after that finds the writer free and goes out on its own.
         let mut queue = self.shared.replies.held();
-        let _ = queue.flush(|b| self.shared.pty.write_some(b));
+        self.shared.offer_replies(&mut queue);
         drop(writer);
         let waiting = !queue.is_empty();
         drop(queue);
@@ -1879,7 +1894,7 @@ impl Session {
         // screen. Resizes are rare, so the extra wakeup costs nothing.
         self.shared.activity();
         self.shared.interrupt.raise();
-        let result = match self.shared.pty.resize(size) {
+        let result = match self.shared.pty.write_half().and_then(|w| w.resize(size)) {
             // Not ours to set yet; the reader thread keeps trying.
             Err(e) if e.is(Errno::ENOTTY) => Ok(()),
             result => result,
@@ -2217,9 +2232,25 @@ impl Shared {
             Err(TryLockError::WouldBlock) => return false,
         };
         let mut queue = self.replies.held();
-        let _ = queue.flush(|bytes| self.pty.write_some(bytes));
+        self.offer_replies(&mut queue);
         drop(writer);
         !queue.is_empty()
+    }
+
+    /// Hand QUEUE to the child as far as it will take it, or throw it away once there is
+    /// no write half left to hand it on; see [`WriteHalf`].
+    ///
+    /// Teardown empties the queue as it takes the half, so what this drops is a reply
+    /// queued after that -- a drain in flight answering a query the child asked before it
+    /// was hung up on. Dropping it is what [`ReplyQueue::flush`] already does with a queue
+    /// whose write failed, and for the same reason: nobody is left to read it.
+    fn offer_replies(&self, queue: &mut ReplyQueue) {
+        match self.pty.write_half() {
+            Ok(writer) => {
+                let _ = queue.flush(|bytes| writer.write_some(bytes));
+            }
+            Err(_) => queue.clear(),
+        }
     }
 
     /// A drain has emptied the backlog: wake a reader that stopped on it.
@@ -2249,17 +2280,22 @@ impl Shared {
     }
 
     /// [`Session::send`]'s write, after the replies queued ahead of it.
+    ///
+    /// The write half is taken once for the whole of it, so a teardown arriving part-way
+    /// cannot leave half the input in the child: the send either starts with the right to
+    /// write or fails before a byte of it goes out.
     fn write_after_replies(&self, bytes: &[u8], wait: &Wait<'_>) -> Result<()> {
+        let writer = self.pty.write_half()?;
         loop {
             let mut queue = self.replies.held();
-            queue.flush(|b| self.pty.write_some(b))?;
+            queue.flush(|b| writer.write_some(b))?;
             if queue.is_empty() {
                 break;
             }
             drop(queue);
-            self.pty.wait_writable(wait)?;
+            writer.wait_writable(wait)?;
         }
-        self.pty.write(bytes, wait)
+        writer.write(bytes, wait)
     }
 
     /// The reader thread's body: [`Shared::read_loop`], with a panic in it ending the
@@ -2800,8 +2836,12 @@ impl Shared {
         } else {
             // `ENOTTY` is the transient this exists for (macOS, before the child opens the
             // slave) and is worth retrying. Any other error will not change by asking
-            // again, so give up on this size rather than repeating the ioctl on every poll.
-            matches!(self.pty.resize(size), Err(e) if !e.is(Errno::ENOTTY))
+            // again -- `Error::Closed`, once teardown has taken the write half, least of
+            // all -- so give up on this size rather than repeating the ioctl on every poll.
+            matches!(
+                self.pty.write_half().and_then(|w| w.resize(size)),
+                Err(e) if !e.is(Errno::ENOTTY)
+            )
         };
         if settled {
             let mut state = self.state.held();
@@ -4207,8 +4247,8 @@ mod tests {
     /// `Instant::now` and `Wait::check` compared against `Instant::now` again, both past
     /// the injected [`Clock`]. Both now read the session's clock, so this steps the
     /// deadline past instead -- a ticker thread winding the clock on while Emacs' thread
-    /// is blocked in `Pty::write`, which is the one shape a test for this can take, since
-    /// the thread under test is the one that would otherwise do the stepping.
+    /// is blocked in `WriteHalf::write`, which is the one shape a test for this can take,
+    /// since the thread under test is the one that would otherwise do the stepping.
     ///
     /// Raw mode with no echo and a child that reads nothing, so the pty's input queue
     /// fills and the write has to wait; `stop` says no, so the deadline is the only way
@@ -4252,11 +4292,12 @@ mod tests {
 
     /// A paste bigger than the backlog must not deadlock against the reader's throttle.
     ///
-    /// `send` blocks Emacs' thread in `Pty::write`, so nothing drains while it waits. A
-    /// child that echoes the paste back fills the backlog, the reader stops pulling from
-    /// the pty to let the child block, and the child then stops reading -- so the write
-    /// waits out `WRITE_TIMEOUT` and the paste is cut short with an error. A backlog of
-    /// one line and a paste of a few thousand is the shortest way to that state.
+    /// `send` blocks Emacs' thread in `WriteHalf::write`, so nothing drains while it
+    /// waits. A child that echoes the paste back fills the backlog, the reader stops
+    /// pulling from the pty to let the child block, and the child then stops reading --
+    /// so the write waits out `WRITE_TIMEOUT` and the paste is cut short with an error. A
+    /// backlog of one line and a paste of a few thousand is the shortest way to that
+    /// state.
     ///
     /// Raw mode with no echo so the line discipline neither chops the paste at
     /// `MAX_INPUT` nor doubles it; `cat` alone is what sends it back.
@@ -4845,6 +4886,86 @@ mod tests {
             Err(Errno::ESRCH),
             "the child outlived the grace it ignored"
         );
+    }
+
+    /// Nothing sent after teardown has begun reaches the child, even while it is still in
+    /// its grace.
+    ///
+    /// The descriptors deliberately outlive the shutdown flag -- the reader needs the
+    /// master and the exit watch to wait the grace out, kill and reap -- so `send` could
+    /// borrow them too, and a keystroke racing `cooked--kill' went to a child that was
+    /// already being hung up on. [`Session::begin_shutdown`] takes the write half
+    /// instead, so there is nothing left to borrow and the send is refused with
+    /// [`Error::Closed`](crate::error::Error::Closed), the same answer a call on an
+    /// already-closed session has always had.
+    ///
+    /// The echo is what proves it rather than the error alone: the line discipline echoes
+    /// whatever is written to the master straight back out of it, so a byte that got
+    /// through is a byte this test can read. Nothing else is taking those bytes -- the
+    /// reader broke out of its loop on the interrupt the shutdown raised, and the child
+    /// is a `sleep`.
+    #[test]
+    fn a_send_after_the_shutdown_began_reaches_nothing() {
+        let clock = TestClock::new();
+        let (session, _read) = session_with(
+            // `exec`, so the ignored disposition is the sleep's own and the child stays in
+            // its grace until the SIGKILL at the end of it.
+            &["/bin/sh", "-c", "trap '' HUP; exec sleep 30"],
+            Options {
+                clock: clock.clock(),
+                ..Options::default()
+            },
+        );
+        // Long enough for the shell to have installed the trap and reached the `exec`.
+        std::thread::sleep(Duration::from_millis(150));
+        // Taken while the pty is open: the read half survives the whole grace, which is
+        // the asymmetry under test.
+        let fds = session.shared.pty.fds().expect("the pty is open");
+
+        std::thread::scope(|scope| {
+            let shutting = scope.spawn(|| session.shutdown());
+            // `begin_shutdown` sets the flag first, so this is the reaping thread on its
+            // way to the grace; the sleep covers the hangup and the wakeup in between.
+            let deadline = Instant::now() + patience(5.0);
+            while !session.shared.shutdown.load(Ordering::SeqCst) {
+                assert!(Instant::now() < deadline, "the shutdown never started");
+                std::thread::sleep(Duration::from_millis(1));
+            }
+            std::thread::sleep(patience(0.1));
+
+            let (answered, answer) = std::sync::mpsc::channel();
+            let sender = &session;
+            scope.spawn(move || {
+                let start = Instant::now();
+                let sent = sender.send(b"rm -rf /\r", Input::Keyboard, &|| false);
+                let _ = answered.send((start.elapsed(), sent));
+            });
+            let probe = answer.recv_timeout(patience(1.0));
+
+            // A write that succeeded is echoed and waiting on the master by now, since the
+            // send it came from has already answered.
+            std::thread::sleep(patience(0.1));
+            let mut buf = [0u8; 256];
+            let echoed = nix::unistd::read(fds.master.as_fd(), &mut buf).unwrap_or(0);
+
+            // Let the grace expire whatever the probe said, so that a regression fails on
+            // the assertions below rather than leaving the shutdown on a stopped clock.
+            let winding = Winding::on(&clock, HangupGrace::explicit().into());
+            assert!(shutting.join().expect("the shutdown thread panicked"));
+            drop(winding);
+
+            let (elapsed, sent) = probe.expect("nothing answered: `send` is waiting out the reap");
+            assert_eq!(sent, Err(crate::error::Error::Closed));
+            assert!(
+                elapsed < patience(0.05),
+                "the refusal took {elapsed:?}, which is a wait and not a refusal"
+            );
+            assert_eq!(
+                &buf[..echoed],
+                b"",
+                "the child's tty was written to after the shutdown began"
+            );
+        });
     }
 
     /// A reap that unwinds answers the reapers waiting on it instead of stranding them.

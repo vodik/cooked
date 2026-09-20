@@ -237,11 +237,30 @@ pub(crate) struct Fds {
     exit_watch: Option<platform::ExitWatch>,
 }
 
+/// The right to write to the child: the master end, as the half of it that sends.
+///
+/// The same descriptor [`Pty::fds`] hands out, behind a type only [`Pty::write_half`] can
+/// produce — and only for as long as [`Pty::take_write_half`] has not taken it. That is
+/// the whole point of it being a type rather than a flag: teardown begins by taking the
+/// write half away, so a `Session::send`, a queued reply or a resize arriving afterwards
+/// has nothing to borrow and answers [`Error::Closed`], while the reader keeps the
+/// descriptors it polls, reads and waits for the exit on until it has reaped the child.
+/// There is no spelling for writing to a child teardown has already hung up on.
+///
+/// A clone of the `Arc` rather than a borrow through the lock, exactly as [`Pty::fds`] is:
+/// the lock is a leaf, and a write already in flight when teardown arrives finishes on the
+/// half it took out rather than being cut in two.
+#[derive(Debug, Clone)]
+pub(crate) struct WriteHalf(std::sync::Arc<Fds>);
+
 /// A forked child attached to a pty we own the master end of.
 #[derive(Debug)]
 pub(crate) struct Pty {
     /// `None` once [`Pty::close`] has released them; see [`Fds`].
     fds: std::sync::Mutex<Option<std::sync::Arc<Fds>>>,
+    /// The right to write, which teardown takes back before the descriptors; see
+    /// [`WriteHalf`].
+    write: std::sync::Mutex<Option<WriteHalf>>,
     /// The pid the fork returned, which outlives the child: `cooked--pid' answers with it
     /// after the exit, and [`Child::Collected`] is what says it is no longer ours to aim
     /// a signal at.
@@ -321,7 +340,7 @@ impl Live<'_> {
     }
 }
 
-/// How long [`Pty::write`] waits on a child that is not draining its input before it
+/// How long [`WriteHalf::write`] waits on a child that is not draining its input before it
 /// gives up and reports an error rather than blocking Emacs' single thread further.
 /// Generous enough that a legitimate large bracketed paste to a briefly slow reader
 /// (a shell about to start echoing) never trips it; short enough that a genuinely
@@ -557,18 +576,20 @@ impl Pty {
         };
 
         // Non-blocking, so a reply can be offered to a child that is not reading without
-        // waiting on it; see `Pty::write_some`. Nothing here ever relied on blocking: the
-        // reader polls before it reads and `Pty::write` polls before it writes. Set on the
+        // waiting on it; see `WriteHalf::write_some`. Nothing here ever relied on blocking: the
+        // reader polls before it reads and `WriteHalf::write` polls before it writes. Set on the
         // parent's side after the fork, since the flag belongs to the open file and the
         // child has closed its copy of the master either way.
         let flags = OFlag::from_bits_retain(fcntl(&master, FcntlArg::F_GETFL)?);
         fcntl(&master, FcntlArg::F_SETFL(flags | OFlag::O_NONBLOCK))?;
 
+        let fds = std::sync::Arc::new(Fds {
+            master,
+            exit_watch: platform::ExitWatch::new(child),
+        });
         Ok(Self {
-            fds: std::sync::Mutex::new(Some(std::sync::Arc::new(Fds {
-                master,
-                exit_watch: platform::ExitWatch::new(child),
-            }))),
+            write: std::sync::Mutex::new(Some(WriteHalf(std::sync::Arc::clone(&fds)))),
+            fds: std::sync::Mutex::new(Some(fds)),
             child,
             state: std::sync::Mutex::new(Child::Running),
         })
@@ -630,6 +651,27 @@ impl Pty {
         self.fds.held().clone().ok_or(Error::Closed)
     }
 
+    /// The right to write to the child, for the length of the caller's own call, or
+    /// [`Error::Closed`] once teardown has taken it; see [`WriteHalf`].
+    pub(crate) fn write_half(&self) -> Result<WriteHalf> {
+        self.write.held().clone().ok_or(Error::Closed)
+    }
+
+    /// Take the right to write away, so that nothing can offer the child another byte.
+    ///
+    /// Called by `Session::begin_shutdown`, which is where both paths out of a session
+    /// start: the child has been hung up on, and input typed after that is input for a
+    /// terminal that is closing. The descriptors themselves stay, since the reader is
+    /// still polling the master and waiting on the exit watch through the grace; this is
+    /// the half of them that nobody has any business using again.
+    ///
+    /// The taken half is returned rather than dropped here, so the release is one move at
+    /// the call site and a write already in flight -- holding a clone of its own -- is
+    /// still finished rather than torn in half.
+    pub(crate) fn take_write_half(&self) -> Option<WriteHalf> {
+        self.write.held().take()
+    }
+
     /// Release the descriptors, leaving the pid and the exit status this pty recorded.
     ///
     /// Called by [`crate::session::Session::shutdown`] once the child has been reaped, so
@@ -643,7 +685,12 @@ impl Pty {
     /// descriptors open until it returns; see [`Fds`]. Every call after this answers
     /// [`Error::Closed`], which is what a caller acting on a session that is over should
     /// hear anyway.
+    ///
+    /// The write half goes with them. Teardown has always taken it first -- this is
+    /// reached only from `Session::shutdown`, after `begin_shutdown` -- but leaving it
+    /// behind would leave an `Arc` holding the very descriptors this exists to release.
     pub(crate) fn close(&self) {
+        drop(self.take_write_half());
         drop(self.fds.held().take());
     }
 
@@ -686,18 +733,6 @@ impl Pty {
         })
     }
 
-    /// Match the emulator's idea of the terminal size to `size`.
-    ///
-    /// A single attempt, deliberately: this can be called synchronously from Lisp, and a
-    /// native module function must never block the thread holding the `emacs_env` on a
-    /// retry loop. Immediately after `spawn`, before the child has opened its slave,
-    /// macOS's ptmx master answers no termios/winsize ioctl at all — `session::Session`
-    /// is the layer that knows what to do with that `ENOTTY`, by way of its already-running
-    /// reader thread; see `Session::resize`.
-    pub(crate) fn resize(&self, size: Winsize) -> Result<()> {
-        set_winsize(self.fds()?.master.as_fd(), size)
-    }
-
     /// The size the tty currently reports, which is not always the size we last set.
     ///
     /// `child_exec` sets the initial winsize on its own slave fd, and that runs after the
@@ -714,60 +749,6 @@ impl Pty {
                 ws.ws_ypixel / ws.ws_row.max(1),
             ),
         })
-    }
-
-    /// Write to the child, without blocking Emacs' only thread forever on it.
-    ///
-    /// `write(2)` on a tty cannot complete once its input queue is full -- a stopped job
-    /// (`C-z`/`SIGSTOP`), a full-screen program not reading, or flow control all fill it.
-    /// This function is called directly on the thread holding the `emacs_env` (see
-    /// `env.rs`'s own rule that such a thread must never block), so it polls for
-    /// writability and gives up at DEADLINE rather than waiting on the child indefinitely.
-    /// A short individual poll keeps the common case (plenty of room) indistinguishable
-    /// from an unconditional write; the bound only ever bites when the child truly cannot
-    /// make progress, and WAIT says how long that may go on and who may cut it short.
-    pub(crate) fn write(&self, mut buf: &[u8], wait: &Wait<'_>) -> Result<()> {
-        while !buf.is_empty() {
-            self.wait_writable(wait)?;
-            buf = &buf[self.write_some(buf)?..];
-        }
-        Ok(())
-    }
-
-    /// Wait until the child's input queue has room, or WAIT says to stop.
-    pub(crate) fn wait_writable(&self, wait: &Wait<'_>) -> Result<()> {
-        loop {
-            let remaining = wait.check()?;
-            let held = self.fds()?;
-            let mut fds = [PollFd::new(held.master.as_fd(), PollFlags::POLLOUT)];
-            match nix::poll::poll(&mut fds, poll_timeout(remaining)) {
-                // Timed out this round; the loop re-checks the deadline.
-                Ok(0) | Err(Errno::EINTR) => continue,
-                Ok(_) => {}
-                Err(e) => return Err(e.into()),
-            }
-            // Anything but POLLOUT is an error or a hangup, which the write itself reports
-            // more precisely than the event bits do.
-            if fds[0].revents().is_some_and(|r| !r.is_empty()) {
-                return Ok(());
-            }
-        }
-    }
-
-    /// Write as much of BUF as the child's input queue has room for, without waiting.
-    ///
-    /// Answers how many bytes went, which is 0 when the queue is full. The master is
-    /// non-blocking, so this can never park the calling thread; it is how a reply is
-    /// offered to a child that may have stopped reading.
-    pub(crate) fn write_some(&self, buf: &[u8]) -> Result<usize> {
-        loop {
-            return match nix::unistd::write(self.fds()?.master.as_fd(), buf) {
-                Ok(n) => Ok(n),
-                Err(Errno::EAGAIN) => Ok(0),
-                Err(Errno::EINTR) => continue,
-                Err(e) => Err(e.into()),
-            };
-        }
     }
 
     /// Read available output. An empty slice means the child closed the slave end.
@@ -873,8 +854,14 @@ impl Pty {
     }
 
     /// Exit status if the child has terminated, without blocking.
+    ///
+    /// [`Self::collect`] with the two ways of having nothing to report collapsed, for the
+    /// callers that do not care which it was.
     pub(crate) fn try_wait(&self) -> Result<Option<i32>> {
-        self.waitpid(WaitPidFlag::WNOHANG)
+        Ok(match self.collect()? {
+            Collected::Here(status) => Some(status),
+            Collected::Elsewhere | Collected::NotYet => None,
+        })
     }
 
     /// Reap the child, giving it until WAIT's deadline to become reapable.
@@ -899,15 +886,12 @@ impl Pty {
         // Whether the watch has already said the child is gone; see the match below.
         let mut exited = false;
         loop {
-            // Collected already, by whoever got there first: there is nothing to wait
-            // for, and `try_wait` cannot say so, since `None` is also "still running".
-            if self.reaped() {
-                return None;
-            }
-            match self.try_wait() {
-                Ok(Some(status)) => return Some(status),
-                Ok(None) => {}
-                Err(_) => return None,
+            match self.collect() {
+                Ok(Collected::Here(status)) => return Some(status),
+                // Nothing left to wait for: whoever got there first collected it, and its
+                // status is theirs to report rather than this call's.
+                Ok(Collected::Elsewhere) | Err(_) => return None,
+                Ok(Collected::NotYet) => {}
             }
             let slice = wait.slice()?;
             match self
@@ -937,25 +921,119 @@ impl Pty {
         self.reap(&Wait::new(patience, &now, &|| false))
     }
 
-    fn waitpid(&self, flags: WaitPidFlag) -> Result<Option<i32>> {
+    /// One non-blocking attempt at collecting the child, under one take of its lock.
+    ///
+    /// The three answers [`Self::reap`] has to tell apart on every turn. It asked
+    /// `reaped()` and then `try_wait()` before, which is the same lock twice a turn to
+    /// distinguish "somebody else collected it" from "still running" -- the very
+    /// distinction the state already carries, and one the second take could see change
+    /// under it.
+    fn collect(&self) -> Result<Collected> {
         // The same lock a signal holds, and for the same reason: this call (always
         // `WNOHANG`, so never blocking) is what takes the child away from a concurrent
         // `killpg`. See [`Live`].
         let mut state = self.state.held();
         let Child::Running = *state else {
-            return Ok(None);
+            return Ok(Collected::Elsewhere);
         };
-        let collected = match waitpid(self.child, Some(flags))? {
+        let collected = match waitpid(self.child, Some(WaitPidFlag::WNOHANG))? {
             WaitStatus::Exited(_, code) => code,
             // The shell convention, and what `cooked-last-exit-code' renders.
             WaitStatus::Signaled(_, sig, _) => 128 + sig as i32,
             // Still alive, or merely stopped or continued: the child is still ours.
-            _ => return Ok(None),
+            _ => return Ok(Collected::NotYet),
         };
         // One write, so there is no order to keep between the status and the fact that
         // there is one.
         *state = Child::Collected(collected);
-        Ok(Some(collected))
+        Ok(Collected::Here(collected))
+    }
+}
+
+/// What one attempt at collecting the child found; see [`Pty::collect`].
+enum Collected {
+    /// This call collected it, and this is the status `waitpid` handed over.
+    Here(i32),
+    /// Somebody else collected it, so the pid is no longer ours and there is no status
+    /// here to report; [`Pty::collected`] is where the loser reads it.
+    Elsewhere,
+    /// Still ours, and still running -- or merely stopped, which is not an exit.
+    NotYet,
+}
+
+impl WriteHalf {
+    /// Write to the child, without blocking Emacs' only thread forever on it.
+    ///
+    /// `write(2)` on a tty cannot complete once its input queue is full -- a stopped job
+    /// (`C-z`/`SIGSTOP`), a full-screen program not reading, or flow control all fill it.
+    /// This function is called directly on the thread holding the `emacs_env` (see
+    /// `env.rs`'s own rule that such a thread must never block), so it polls for
+    /// writability and gives up at DEADLINE rather than waiting on the child indefinitely.
+    /// A short individual poll keeps the common case (plenty of room) indistinguishable
+    /// from an unconditional write; the bound only ever bites when the child truly cannot
+    /// make progress, and WAIT says how long that may go on and who may cut it short.
+    pub(crate) fn write(&self, mut buf: &[u8], wait: &Wait<'_>) -> Result<()> {
+        while !buf.is_empty() {
+            self.wait_writable(wait)?;
+            buf = &buf[self.write_some(buf)?..];
+        }
+        Ok(())
+    }
+
+    /// Wait until the child's input queue has room, or WAIT says to stop.
+    pub(crate) fn wait_writable(&self, wait: &Wait<'_>) -> Result<()> {
+        loop {
+            let remaining = wait.check()?;
+            let mut fds = [PollFd::new(self.master(), PollFlags::POLLOUT)];
+            match nix::poll::poll(&mut fds, poll_timeout(remaining)) {
+                // Timed out this round; the loop re-checks the deadline.
+                Ok(0) | Err(Errno::EINTR) => continue,
+                Ok(_) => {}
+                Err(e) => return Err(e.into()),
+            }
+            // Anything but POLLOUT is an error or a hangup, which the write itself reports
+            // more precisely than the event bits do.
+            if fds[0].revents().is_some_and(|r| !r.is_empty()) {
+                return Ok(());
+            }
+        }
+    }
+
+    /// Write as much of BUF as the child's input queue has room for, without waiting.
+    ///
+    /// Answers how many bytes went, which is 0 when the queue is full. The master is
+    /// non-blocking, so this can never park the calling thread; it is how a reply is
+    /// offered to a child that may have stopped reading.
+    pub(crate) fn write_some(&self, buf: &[u8]) -> Result<usize> {
+        loop {
+            return match nix::unistd::write(self.master(), buf) {
+                Ok(n) => Ok(n),
+                Err(Errno::EAGAIN) => Ok(0),
+                Err(Errno::EINTR) => continue,
+                Err(e) => Err(e.into()),
+            };
+        }
+    }
+
+    /// Match the emulator's idea of the terminal size to `size`.
+    ///
+    /// A write in the sense that matters here: the ioctl changes the child's tty and
+    /// delivers it a SIGWINCH, so a session on its way out has no more business resizing
+    /// the child than sending it a keystroke. Reading the size back is [`Pty::winsize`],
+    /// which stays with the read half.
+    ///
+    /// A single attempt, deliberately: this can be called synchronously from Lisp, and a
+    /// native module function must never block the thread holding the `emacs_env` on a
+    /// retry loop. Immediately after `spawn`, before the child has opened its slave,
+    /// macOS's ptmx master answers no termios/winsize ioctl at all — `session::Session`
+    /// is the layer that knows what to do with that `ENOTTY`, by way of its already-running
+    /// reader thread; see `Session::resize`.
+    pub(crate) fn resize(&self, size: Winsize) -> Result<()> {
+        set_winsize(self.master(), size)
+    }
+
+    fn master(&self) -> BorrowedFd<'_> {
+        self.0.master.as_fd()
     }
 }
 
@@ -1106,7 +1184,7 @@ unsafe fn child_exec(
             die();
         }
         // Best-effort: this is the first slave open, which is also the first moment any
-        // termios/winsize ioctl is legal on macOS (see `Pty::resize`), so it happens here
+        // termios/winsize ioctl is legal on macOS (see `WriteHalf::resize`), so it happens here
         // rather than being left to race the parent's own attempt at it. A wrong initial
         // size self-heals at the caller's next `resize`, so it is not worth `die`-ing over.
         let ws = libc::winsize::from(size);
@@ -1506,7 +1584,7 @@ mod tests {
             std::time::Instant::now() + std::time::Duration::from_secs_f64(2.0 * timeout_scale());
         while std::time::Instant::now() < deadline {
             // `mode()` can transiently fail immediately after spawn, before the child has
-            // opened its slave (see `Pty::resize`'s doc comment) — tolerated the same way
+            // opened its slave (see `WriteHalf::resize`'s doc comment) — tolerated the same way
             // `session::sample_mode` tolerates it: an `Err` this cycle just means try again.
             if pty.mode().is_ok_and(|mode| mode == Mode::Secret) {
                 return;
