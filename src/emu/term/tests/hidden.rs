@@ -70,15 +70,9 @@ fn a_hidden_drain_relocates_only_the_marks_that_scrolled_away() {
     t.feed(b"\r\n\r\n");
     let delta = t.drain_hidden();
     assert!(delta.withheld);
-    assert_eq!(
-        delta.marks,
-        vec![(MarkId::from_index(0), Anchor { row: 0, col: 0 })]
-    );
+    assert_eq!(delta.marks, vec![(MarkId::from_index(0), anchor(0, 0))]);
     let whole = t.drain();
-    assert_eq!(
-        whole.marks,
-        vec![(MarkId::from_index(1), Anchor { row: 1, col: 0 })]
-    );
+    assert_eq!(whole.marks, vec![(MarkId::from_index(1), anchor(1, 0))]);
 }
 
 /// Two scroll regions taking turns while nobody drains the moves would grow the log by

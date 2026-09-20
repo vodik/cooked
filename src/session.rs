@@ -4,7 +4,7 @@
 //! the reader never touches Lisp. It parses into the shared [`Term`] and pokes a pipe
 //! descriptor obtained from `open_channel`; Emacs' filter then drains on the main thread.
 
-use crate::emu::{ColorScheme, Delta, Event, Feed, FrameSize, Palette, ReplyKind, Term};
+use crate::emu::{ColorScheme, Delta, Feed, FrameSize, Palette, Reply, ReplyKind, Term};
 use crate::error::Result;
 use crate::lock::LockExt;
 use crate::pty::{
@@ -1775,16 +1775,13 @@ impl Shared {
     }
 
     /// Queue the replies the emulator composed, as [`Term::take_outbound`] hands them over.
-    fn queue_replies(&self, outbound: Vec<Event>) {
+    fn queue_replies(&self, outbound: Vec<Reply>) {
         if outbound.is_empty() {
             return;
         }
         let mut queue = self.replies.held();
-        for event in outbound {
-            match event {
-                Event::Reply(bytes, kind) => queue.push(kind, &bytes),
-                _ => continue,
-            };
+        for reply in outbound {
+            queue.push(reply.kind, &reply.bytes);
         }
     }
 
@@ -2183,7 +2180,7 @@ impl Shared {
     /// arms `sync_until` and [`NotifyState::decide`] holds the wake byte back until the
     /// child ends the frame or [`SYNC_TIMEOUT`](crate::emu::term::SYNC_TIMEOUT) runs out.
     /// A drain the *user* asks for mid-frame was always served at once and still is.
-    fn feed(&self, data: &[u8], hidden: bool) -> (bool, Vec<Event>) {
+    fn feed(&self, data: &[u8], hidden: bool) -> (bool, Vec<Reply>) {
         let limit = self.backlog_limit.load(Ordering::Relaxed);
         let mut term = self.term.held();
         let mut progress = term.feed_start();

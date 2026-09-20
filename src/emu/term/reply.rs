@@ -263,8 +263,10 @@ mod tests {
                     .events
                     .into_iter()
                     .filter_map(|event| match event {
-                        super::super::Event::Reply(bytes, super::super::ReplyKind::Answer) => {
-                            Some(bytes)
+                        super::super::Event::Reply(reply)
+                            if reply.kind == super::super::ReplyKind::Answer =>
+                        {
+                            Some(reply.bytes)
                         }
                         _ => None,
                     })

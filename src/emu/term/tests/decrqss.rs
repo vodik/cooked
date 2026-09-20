@@ -8,8 +8,10 @@ fn dcs_replies(t: &mut Term) -> Vec<String> {
         .events
         .into_iter()
         .filter_map(|e| match e {
-            Event::Reply(bytes, ReplyKind::Answer) if bytes.starts_with(b"\x1bP") => {
-                Some(String::from_utf8(bytes).unwrap())
+            Event::Reply(reply)
+                if reply.kind == ReplyKind::Answer && reply.bytes.starts_with(b"\x1bP") =>
+            {
+                Some(String::from_utf8(reply.bytes).unwrap())
             }
             _ => None,
         })
@@ -178,7 +180,7 @@ fn decrqss_answers_the_conformance_level_da1_claims() {
     assert_eq!(decrqss(&mut t, "\"p"), "\x1bP1$r62;1\"p\x1b\\");
     t.feed(b"\x1b[c");
     let da1 = t.drain().events;
-    assert!(da1.contains(&Event::answer(b"\x1b[?62;4;22c".to_vec())));
+    assert!(da1.contains(&Reply::answer(b"\x1b[?62;4;22c".to_vec()).into()));
 }
 
 #[test]
@@ -208,7 +210,7 @@ fn decrqss_is_not_mistaken_for_a_sixel() {
         !delta
             .events
             .iter()
-            .any(|e| matches!(e, Event::Reply(_, ReplyKind::Answer)))
+            .any(|e| matches!(e, Event::Reply(reply) if reply.kind == ReplyKind::Answer))
     );
 }
 

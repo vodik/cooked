@@ -8,7 +8,7 @@ fn meta_sending_escape_is_permanently_set() {
     // whatever the core is told, so the answer must not follow the request.
     let mut t = term(2, 10, b"\x1b[?1036$p\x1b[?1036l\x1b[?1036$p");
     let replies = t.drain().events;
-    let set = Event::answer(b"\x1b[?1036;3$y".to_vec());
+    let set = Reply::answer(b"\x1b[?1036;3$y".to_vec()).into();
     assert_eq!(replies.iter().filter(|event| **event == set).count(), 2);
 }
 
@@ -202,7 +202,7 @@ fn a_kitty_query_is_answered_with_what_is_honoured() {
             .events
             .into_iter()
             .find_map(|e| match e {
-                Event::Reply(r, ReplyKind::Answer) => Some(r),
+                Event::Reply(reply) if reply.kind == ReplyKind::Answer => Some(reply.bytes),
                 _ => None,
             })
     };

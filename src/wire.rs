@@ -754,14 +754,20 @@ impl Update {
     /// `(scrolled . OFFSET)` — a character offset into this drain's scrollback text, for
     /// a row that scrolled away while this drain was accumulating. `(screen ROW . CHARS)`
     /// — a row on the live grid and the characters of its text before the anchor, for one
-    /// that did not. The drain has already turned the anchor's column into characters;
-    /// see [`Delta::marks`](crate::emu::Delta::marks). Resolved here rather than in
-    /// Lisp because the arithmetic is over Rust's absolute row numbering, which is not
-    /// something the Lisp side should have to hold a copy of.
+    /// that did not. Taking an [`Anchor<Chars>`] is the whole of the unit question here:
+    /// the drain turned the column into characters before building the [`Delta`](crate::emu::Delta), so this
+    /// only has to name which of the two systems the offset belongs to. Resolved here
+    /// rather than in Lisp because the arithmetic is over Rust's absolute row numbering,
+    /// which is not something the Lisp side should have to hold a copy of.
     ///
     /// `nil` when neither applies, which cannot happen while events and scrollback are
     /// taken by the same drain; Lisp then falls back to the cursor.
-    fn anchor_to_lisp<'e>(&self, env: Env<'e>, at: Anchor, rows: &[RowSpan]) -> Result<Value<'e>> {
+    fn anchor_to_lisp<'e>(
+        &self,
+        env: Env<'e>,
+        at: Anchor<Chars>,
+        rows: &[RowSpan],
+    ) -> Result<Value<'e>> {
         let base = self.delta.scrolled_base;
         let on_grid = base + self.delta.scrolled.len();
         if at.row >= on_grid {
@@ -771,13 +777,11 @@ impl Update {
             );
         }
         match at.row.checked_sub(base).and_then(|i| rows.get(i)) {
-            // The drain has already turned the anchor's column into characters, so
-            // naming the unit is the whole of the conversion left here. Trailing blanks
-            // are trimmed out of the runs, so an offset past the end of what the row
-            // actually kept is clamped rather than run off the line.
+            // Trailing blanks are trimmed out of the runs, so an offset past the end of
+            // what the row actually kept is clamped rather than run off the line.
             Some(row) => env.cons(
                 sym!(env, "scrolled")?,
-                env.into_lisp(row.start + Chars::new(at.col).min(row.chars))?,
+                env.into_lisp(row.start + at.col.min(row.chars))?,
             ),
             None => Ok(env.nil()),
         }
@@ -909,7 +913,7 @@ fn event_to_lisp<'e>(
 ) -> Result<Value<'e>> {
     // The tag arrives already resolved, because `sym!` needs the literal at its own
     // call site to do the lookup at compile time -- which is the point of it.
-    let mark = |name: Value<'e>, at: Anchor, id: MarkId| {
+    let mark = |name: Value<'e>, at: Anchor<Chars>, id: MarkId| {
         list!(env, [name, update.anchor_to_lisp(env, at, rows)?, id])
     };
     match event {
@@ -963,7 +967,9 @@ fn event_to_lisp<'e>(
             env,
             [sym!(env, "mouse")?, m.enabled(), m.drag(), m.motion()]
         ),
-        Event::Reply(bytes, _) => env.cons(sym!(env, "reply")?, env.into_lisp(bytes.as_slice())?),
+        Event::Reply(reply) => {
+            env.cons(sym!(env, "reply")?, env.into_lisp(reply.bytes.as_slice())?)
+        }
         Event::EraseScrollback => list!(env, [sym!(env, "erase-scrollback")?]),
         Event::DisplayCleared => list!(env, [sym!(env, "display-cleared")?]),
         Event::Reset => list!(env, [sym!(env, "reset")?]),

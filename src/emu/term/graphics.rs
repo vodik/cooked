@@ -325,7 +325,7 @@ impl State {
         if self.graphics != ShownFormats::ALL
             && let Some(refusal) = crate::emu::kitty::refuse_probe(bytes, self.graphics)
         {
-            self.push_reply(Event::answer(refusal));
+            self.push_reply(Reply::answer(refusal));
             return;
         }
         let (outcome, reply) = self.kitty.feed(bytes);
@@ -335,7 +335,7 @@ impl State {
     /// Act on what a kitty command came to, and answer it.
     fn kitty_outcome(&mut self, outcome: Outcome, reply: Option<Vec<u8>>) {
         if let Some(reply) = reply {
-            self.push_reply(Event::answer(reply));
+            self.push_reply(Reply::answer(reply));
         }
         match outcome {
             // The parser stops here -- see `Perform::terminated` -- so the reader can run

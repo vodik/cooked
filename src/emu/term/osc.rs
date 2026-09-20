@@ -426,16 +426,16 @@ impl State {
             Mark::CommandEnd(_) => self.take_back(),
             Mark::PromptContinuation | Mark::PromptEnd => {}
         }
-        self.events.push(Event::Mark(mark, at, id));
+        self.events.push(Queued::Mark(mark, at, id));
     }
 
     /// Name the mark at ANCHOR and leave it on the cell the anchor points at, which is on
     /// the primary screen, since [`State::semantic`] takes no mark on the alternate one.
-    pub(super) fn take_mark(&mut self, at: Anchor) -> MarkId {
+    pub(super) fn take_mark(&mut self, at: Anchor<Cols>) -> MarkId {
         let id = MarkId::from_index(self.next_mark);
         self.next_mark = self.next_mark.wrapping_add(1);
         if let Some(row) = at.row.checked_sub(self.evicted_total) {
-            self.screens.primary.mark(row, Cols::new(at.col), id);
+            self.screens.primary.mark(row, at.col, id);
         }
         id
     }
@@ -446,7 +446,7 @@ impl State {
     /// -- a resize, a redraw, or an eviction -- it is the marks that left the grid,
     /// recorded as they went, plus every mark still on it. The walk skips a row with no
     /// attachments on a null check.
-    pub(super) fn take_marks(&mut self) -> Vec<(MarkId, Anchor)> {
+    pub(super) fn take_marks(&mut self) -> Vec<(MarkId, Anchor<Chars>)> {
         if !self.marks_dirty {
             return Vec::new();
         }
@@ -468,14 +468,14 @@ impl State {
     pub(super) fn marks_in<'a>(
         rows: impl Iterator<Item = RowRef<'a>>,
         base: usize,
-    ) -> impl Iterator<Item = (MarkId, Anchor)> {
+    ) -> impl Iterator<Item = (MarkId, Anchor<Chars>)> {
         rows.enumerate().flat_map(move |(index, row)| {
             row.into_marks().map(move |(col, id)| {
                 (
                     id,
                     Anchor {
                         row: base + index,
-                        col: row.chars_before(col).get(),
+                        col: row.chars_before(col),
                     },
                 )
             })
@@ -667,7 +667,7 @@ impl State {
             && (code.get() == PALETTE || !self.palette_pending)
         {
             if !query.answer.is_empty() {
-                self.push_reply(Event::answer(query.answer));
+                self.push_reply(Reply::answer(query.answer));
             }
             return;
         }
@@ -684,10 +684,10 @@ impl State {
             .flat_map(|body| body.splitn(MAX_OSC_FIELDS, |&b| b == b';'))
             .map(|p| String::from_utf8_lossy(p).into_owned())
             .collect();
-        let event = Event::Osc(code.get(), parts, Terminator::from_bell(bell_terminated));
-        // A colour sequence Lisp is about to act on, a set above all: until it has, the
-        // defaults are not the answer to a query. See [`Event::moves_a_default_color`].
-        self.palette_pending |= event.moves_a_default_color();
-        self.push_for_lisp(event);
+        self.push_for_lisp(Event::Osc(
+            code.get(),
+            parts,
+            Terminator::from_bell(bell_terminated),
+        ));
     }
 }

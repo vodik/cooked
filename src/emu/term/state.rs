@@ -16,8 +16,8 @@ use super::*;
 /// found. Ids are unique in practice -- an id is on one cell of one row -- so this only
 /// says what happens if they ever are not.
 enum MarkIndex<'a> {
-    Scan(&'a [(MarkId, Anchor)]),
-    Map(HashMap<MarkId, Anchor>),
+    Scan(&'a [(MarkId, Anchor<Chars>)]),
+    Map(HashMap<MarkId, Anchor<Chars>>),
 }
 
 impl<'a> MarkIndex<'a> {
@@ -25,7 +25,7 @@ impl<'a> MarkIndex<'a> {
     ///
     /// The threshold is a product rather than either length: the cost of scanning is one
     /// per pair, and the cost of the map is one per mark plus an allocation.
-    fn of(marks: &'a [(MarkId, Anchor)], events: usize) -> Self {
+    fn of(marks: &'a [(MarkId, Anchor<Chars>)], events: usize) -> Self {
         if marks.len() * events <= 256 {
             return Self::Scan(marks);
         }
@@ -36,7 +36,7 @@ impl<'a> MarkIndex<'a> {
         Self::Map(map)
     }
 
-    fn get(&self, id: MarkId) -> Option<Anchor> {
+    fn get(&self, id: MarkId) -> Option<Anchor<Chars>> {
         match self {
             Self::Scan(marks) => marks
                 .iter()
@@ -166,7 +166,7 @@ impl State {
     /// the window already: there is no transcript there to scroll out of view.
     pub(super) fn cleared_display(&mut self) {
         if !self.shown.is_alternate() {
-            self.events.push(Event::DisplayCleared);
+            self.events.push(Event::DisplayCleared.into());
         }
     }
 
@@ -210,7 +210,7 @@ impl State {
                         id,
                         Anchor {
                             row: base + index,
-                            col: col.get(),
+                            col,
                         },
                     )
                 }));
@@ -258,12 +258,13 @@ impl State {
         self.front.forget_from(first);
     }
 
-    /// Where the cursor is now, in the coordinates an [`Anchor`] keeps.
-    pub(super) fn anchor(&self) -> Anchor {
+    /// Where the cursor is now, in the coordinates an [`Anchor`] keeps: absolute row and
+    /// grid column, which is the unit a mark is queued in.
+    pub(super) fn anchor(&self) -> Anchor<Cols> {
         let cursor = self.screen().cursor();
         Anchor {
             row: self.evicted_total + cursor.row,
-            col: cursor.col,
+            col: Cols::new(cursor.col),
         }
     }
 
@@ -549,14 +550,7 @@ impl State {
         // the child is signalled on a resize and answers by redrawing, and anything it
         // scrolls in between moves every mark still on the grid with its row.
         let marks = self.take_marks();
-        let mut events = std::mem::take(&mut self.events);
-        self.bell_queued = false;
-        let moved = MarkIndex::of(&marks, events.len());
-        for event in &mut events {
-            if let Event::Mark(_, at, id) = event {
-                *at = self.anchor_in_characters(*at, *id, &moved);
-            }
-        }
+        let events = self.settle_events(&marks);
         let levels = Levels::of(self);
         let cursor_chars = cursor_chars(self.screen(), levels.cursor);
         let rows = self.damaged_rows(damaged, promoted, &shifts, levels.cursor);
@@ -611,8 +605,7 @@ impl State {
         // stays up, so the next whole drain still reports the ones on the grid, against
         // rows it has sent by then.
         let marks = std::mem::take(&mut self.evicted_marks);
-        let events = std::mem::take(&mut self.events);
-        self.bell_queued = false;
+        let events = self.settle_events(&marks);
         let images = std::mem::take(&mut self.pending_images);
         let links = std::mem::take(&mut self.pending_links);
         let styles = self.styles.take_unsent();
@@ -644,24 +637,52 @@ impl State {
         }
     }
 
+    /// This drain's queued events as Emacs is handed them, every mark's anchor resolved
+    /// against MARKS, the relocations the same drain reports.
+    ///
+    /// The one place a [`Queued`] becomes an [`Event`], and the only conversion in it is
+    /// the anchor's: nothing else a drain carries changes between being queued and being
+    /// sent. A drain with no events -- every drain of plain output -- allocates nothing
+    /// here, since collecting an empty iterator does not.
+    fn settle_events(&mut self, marks: &[(MarkId, Anchor<Chars>)]) -> Vec<Event> {
+        let events = std::mem::take(&mut self.events);
+        self.bell_queued = false;
+        let moved = MarkIndex::of(marks, events.len());
+        events
+            .into_iter()
+            .map(|queued| match queued {
+                Queued::Mark(mark, at, id) => {
+                    Event::Mark(mark, self.anchor_in_characters(at, id, &moved), id)
+                }
+                Queued::Reply(reply) => Event::Reply(reply),
+                Queued::Settled(event) => event,
+            })
+            .collect()
+    }
+
     /// AT, a mark's anchor as it was taken, with its column turned into characters of the
     /// row's text; see [`Delta::marks`].
     ///
     /// A row still on the grid is measured as it stands. A row that has scrolled away is
     /// no longer anywhere to measure, but the mark ID left on its cell was measured as the
     /// row departed, and MOVED, this drain's relocations, carry that measurement. A mark
-    /// with neither -- its cell overwritten before the row went -- keeps its column,
-    /// which is still right on a row with no wide character before it.
-    fn anchor_in_characters(&self, at: Anchor, id: MarkId, moved: &MarkIndex<'_>) -> Anchor {
+    /// with neither -- its cell overwritten before the row went -- falls back on
+    /// [`Anchor::unmeasured`].
+    fn anchor_in_characters(
+        &self,
+        at: Anchor<Cols>,
+        id: MarkId,
+        moved: &MarkIndex<'_>,
+    ) -> Anchor<Chars> {
         match at.row.checked_sub(self.evicted_total) {
-            Some(index) => Anchor {
-                col: self
-                    .screen()
-                    .row(index)
-                    .map_or(at.col, |row| row.chars_before(Cols::new(at.col)).get()),
-                ..at
+            Some(index) => match self.screen().row(index) {
+                Some(row) => Anchor {
+                    row: at.row,
+                    col: row.chars_before(at.col),
+                },
+                None => at.unmeasured(),
             },
-            None => moved.get(id).unwrap_or(at),
+            None => moved.get(id).unwrap_or_else(|| at.unmeasured()),
         }
     }
 

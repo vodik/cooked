@@ -26,8 +26,8 @@ fn a_reply_needing_nothing_from_lisp_skips_the_drain() {
     assert_eq!(
         t.take_outbound(),
         vec![
-            Event::answer(DA1.to_vec()),
-            Event::size_report(b"\x1b[48;24;80;0;0t".to_vec()),
+            Reply::answer(DA1.to_vec()),
+            Reply::size_report(b"\x1b[48;24;80;0;0t".to_vec()),
         ]
     );
     assert!(replies(&t.drain().events).is_empty());
@@ -39,7 +39,7 @@ fn a_term_nobody_answers_for_keeps_every_reply_in_the_drain() {
     assert!(t.take_outbound().is_empty());
     assert_eq!(
         replies(&t.drain().events),
-        vec![Event::answer(DA1.to_vec())]
+        vec![Reply::answer(DA1.to_vec()).into()]
     );
 }
 
@@ -53,21 +53,21 @@ fn a_term_nobody_answers_for_keeps_every_reply_in_the_drain() {
 #[test]
 fn a_reply_after_a_question_for_lisp_waits_behind_it() {
     let mut t = answering(b"\x1b[5n\x1b]52;c;?\x1b\\\x1b[c");
-    assert_eq!(t.take_outbound(), vec![Event::answer(b"\x1b[0n".to_vec())]);
+    assert_eq!(t.take_outbound(), vec![Reply::answer(b"\x1b[0n".to_vec())]);
     let events = t.drain().events;
     assert!(matches!(&events[0], Event::Osc(52, parts, _) if parts == &["c", "?"]));
-    assert_eq!(events[1], Event::answer(DA1.to_vec()));
+    assert_eq!(events[1], Reply::answer(DA1.to_vec()).into());
 
     // Lisp is answering the drain, so a reply composed meanwhile still waits.
     t.feed(b"\x1b[5n");
     assert!(t.take_outbound().is_empty());
     t.events_handled();
-    assert_eq!(t.take_outbound(), vec![Event::answer(b"\x1b[0n".to_vec())]);
+    assert_eq!(t.take_outbound(), vec![Reply::answer(b"\x1b[0n".to_vec())]);
     assert!(t.drain().events.is_empty());
 
     // And once handled, the next reply goes straight out again.
     t.feed(b"\x1b[c");
-    assert_eq!(t.take_outbound(), vec![Event::answer(DA1.to_vec())]);
+    assert_eq!(t.take_outbound(), vec![Reply::answer(DA1.to_vec())]);
 }
 
 #[test]
@@ -76,16 +76,16 @@ fn only_replies_ahead_of_an_undrained_question_are_released() {
     t.drain();
     t.feed(b"\x1b[5n\x1b]52;c;?\x1b\\\x1b[c");
     t.events_handled();
-    assert_eq!(t.take_outbound(), vec![Event::answer(b"\x1b[0n".to_vec())]);
+    assert_eq!(t.take_outbound(), vec![Reply::answer(b"\x1b[0n".to_vec())]);
     let events = t.drain().events;
     assert!(matches!(&events[0], Event::Osc(52, parts, _) if parts == &["c", "?"]));
-    assert_eq!(events[1], Event::answer(DA1.to_vec()));
+    assert_eq!(events[1], Reply::answer(DA1.to_vec()).into());
 }
 
 #[test]
 fn an_osc_that_asks_nothing_holds_nothing_back() {
     let mut t = answering(b"\x1b]2;title\x07\x1b]7;file://host/tmp?x\x07\x1b[c");
-    assert_eq!(t.take_outbound(), vec![Event::answer(DA1.to_vec())]);
+    assert_eq!(t.take_outbound(), vec![Reply::answer(DA1.to_vec())]);
     // A colour query is not here: the core answers it, so there is nothing for it to
     // hold back. See `a_query_behind_a_set_waits_for_lisp_with_it` for the one that is.
     for query in [&b"\x1b]52;c;?\x07"[..], b"\x1b]22;?pointer\x07"] {
@@ -149,9 +149,9 @@ fn a_colour_query_the_palette_answers_never_reaches_lisp() {
     assert_eq!(
         t.take_outbound(),
         vec![
-            Event::answer(b"\x1b]11;rgb:0b00/0b00/0b00\x1b\\".to_vec()),
-            Event::answer(b"\x1b]4;7;rgb:0700/0700/0700\x07".to_vec()),
-            Event::answer(DA1.to_vec()),
+            Reply::answer(b"\x1b]11;rgb:0b00/0b00/0b00\x1b\\".to_vec()),
+            Reply::answer(b"\x1b]4;7;rgb:0700/0700/0700\x07".to_vec()),
+            Reply::answer(DA1.to_vec()),
         ],
         "each answer framed with the terminator its query used"
     );
@@ -166,9 +166,9 @@ fn each_code_is_answered_from_its_own_slot() {
         .flat_map(|code| format!("\x1b]{code};?\x07").into_bytes())
         .collect();
     let mut t = with_palette(&queries);
-    let expected: Vec<Event> = (10..20)
+    let expected: Vec<Reply> = (10..20)
         .map(|code| {
-            Event::answer(
+            Reply::answer(
                 format!("\x1b]{code};rgb:{code:02x}00/{code:02x}00/{code:02x}00\x07").into_bytes(),
             )
         })
@@ -187,7 +187,7 @@ fn a_chained_query_is_one_answer_per_field() {
     let mut t = with_palette(b"\x1b]10;?;?;?\x07");
     assert_eq!(
         t.take_outbound(),
-        vec![Event::answer(
+        vec![Reply::answer(
             [
                 "\x1b]10;rgb:0a00/0a00/0a00\x07",
                 "\x1b]11;rgb:0b00/0b00/0b00\x07",
@@ -201,7 +201,7 @@ fn a_chained_query_is_one_answer_per_field() {
     let mut t = with_palette(b"\x1b]19;?;?\x07");
     assert_eq!(
         t.take_outbound(),
-        vec![Event::answer(b"\x1b]19;rgb:1300/1300/1300\x07".to_vec())]
+        vec![Reply::answer(b"\x1b]19;rgb:1300/1300/1300\x07".to_vec())]
     );
 }
 
@@ -216,9 +216,9 @@ fn reverse_video_exchanges_the_two_defaults_in_the_answer() {
     assert_eq!(
         t.take_outbound(),
         vec![
-            Event::answer(b"\x1b]10;rgb:0b00/0b00/0b00\x07".to_vec()),
-            Event::answer(b"\x1b]11;rgb:0a00/0a00/0a00\x07".to_vec()),
-            Event::answer(b"\x1b]15;rgb:0f00/0f00/0f00\x07".to_vec()),
+            Reply::answer(b"\x1b]10;rgb:0b00/0b00/0b00\x07".to_vec()),
+            Reply::answer(b"\x1b]11;rgb:0a00/0a00/0a00\x07".to_vec()),
+            Reply::answer(b"\x1b]15;rgb:0f00/0f00/0f00\x07".to_vec()),
         ]
     );
 }
@@ -254,7 +254,7 @@ fn a_query_behind_a_set_waits_for_lisp_with_it() {
     t.feed(b"\x1b]11;?\x07");
     assert_eq!(
         t.take_outbound(),
-        vec![Event::answer(b"\x1b]11;rgb:0b00/0b00/0b00\x07".to_vec())]
+        vec![Reply::answer(b"\x1b]11;rgb:0b00/0b00/0b00\x07".to_vec())]
     );
 }
 
@@ -266,7 +266,7 @@ fn the_indexed_palette_is_answered_even_behind_a_set() {
     let mut t = with_palette(b"\x1b]11;#ff0000\x07\x1b]4;7;?\x07");
     assert_eq!(
         t.take_outbound(),
-        vec![Event::answer(b"\x1b]4;7;rgb:0700/0700/0700\x07".to_vec())]
+        vec![Reply::answer(b"\x1b]4;7;rgb:0700/0700/0700\x07".to_vec())]
     );
 }
 
@@ -276,7 +276,7 @@ fn the_indexed_palette_is_answered_even_behind_a_set() {
 #[test]
 fn a_colour_nobody_reported_is_answered_with_silence() {
     let mut t = answering(b"\x1b]11;?\x07\x1b]4;7;?\x07\x1b[c");
-    assert_eq!(t.take_outbound(), vec![Event::answer(DA1.to_vec())]);
+    assert_eq!(t.take_outbound(), vec![Reply::answer(DA1.to_vec())]);
     assert!(t.drain().events.is_empty());
 }
 
@@ -298,6 +298,6 @@ fn a_malformed_palette_query_asks_nothing() {
     let mut t = with_palette(b"\x1b]4;x;?;7;?\x07");
     assert_eq!(
         t.take_outbound(),
-        vec![Event::answer(b"\x1b]4;7;rgb:0700/0700/0700\x07".to_vec())]
+        vec![Reply::answer(b"\x1b]4;7;rgb:0700/0700/0700\x07".to_vec())]
     );
 }

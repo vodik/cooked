@@ -131,7 +131,9 @@ mod tests {
             .events
             .into_iter()
             .filter_map(|event| match event {
-                Event::Reply(bytes, ReplyKind::Answer) => Some(String::from_utf8(bytes).unwrap()),
+                Event::Reply(reply) if reply.kind == ReplyKind::Answer => {
+                    Some(String::from_utf8(reply.bytes).unwrap())
+                }
                 _ => None,
             })
             .collect()
@@ -154,7 +156,7 @@ mod tests {
         t.feed(b"\x1bP+q5463\x1b\\");
         assert_eq!(
             t.drain().events,
-            vec![Event::answer(b"\x1bP1+r5463\x1b\\".to_vec())]
+            vec![Reply::answer(b"\x1bP1+r5463\x1b\\".to_vec()).into()]
         );
     }
 
@@ -255,7 +257,10 @@ mod tests {
         t.feed(b"\x1bP+q5463;616d\x1b\\");
         let replies = t.drain().events;
         assert_eq!(replies.len(), 2, "{replies:?}");
-        assert_eq!(replies[1], Event::answer(hit("am", b"").into_bytes()));
+        assert_eq!(
+            replies[1],
+            Reply::answer(hit("am", b"").into_bytes()).into()
+        );
     }
 
     #[test]
@@ -266,7 +271,7 @@ mod tests {
         t.feed(b"\x1bP+qrm -rf ~ x;5463\x1b\\");
         assert_eq!(
             t.drain().events,
-            vec![Event::answer(b"\x1bP0+r\x1b\\".to_vec())]
+            vec![Reply::answer(b"\x1bP0+r\x1b\\".to_vec()).into()]
         );
     }
 
@@ -276,7 +281,7 @@ mod tests {
         t.feed(b"\x1bP+q7a7a\x1b\\");
         assert_eq!(
             t.drain().events,
-            vec![Event::answer(b"\x1bP0+r7A7A\x1b\\".to_vec())]
+            vec![Reply::answer(b"\x1bP0+r7A7A\x1b\\".to_vec()).into()]
         );
     }
 
@@ -287,7 +292,7 @@ mod tests {
         t.feed(format!("\x1bP+q{token}\x1b\\").as_bytes());
         assert_eq!(
             t.drain().events,
-            vec![Event::answer(b"\x1bP0+r\x1b\\".to_vec())]
+            vec![Reply::answer(b"\x1bP0+r\x1b\\".to_vec()).into()]
         );
     }
 
@@ -300,7 +305,9 @@ mod tests {
                 !t.drain()
                     .events
                     .iter()
-                    .any(|e| matches!(e, Event::Reply(r, ReplyKind::Answer) if r.starts_with(b"\x1bP1+r"))),
+                    .any(|e| matches!(e, Event::Reply(reply)
+                        if reply.kind == ReplyKind::Answer
+                            && reply.bytes.starts_with(b"\x1bP1+r"))),
                 "{request:?}"
             );
         }
@@ -317,13 +324,13 @@ mod tests {
         // The names cut off are answered with the miss a client reads until.
         assert_eq!(
             replies.pop(),
-            Some(Event::answer(b"\x1bP0+r\x1b\\".to_vec()))
+            Some(Reply::answer(b"\x1bP0+r\x1b\\".to_vec()).into())
         );
         assert_eq!(replies.len(), XTGETTCAP_BODY_LIMIT / 5);
         assert!(
             replies
                 .iter()
-                .all(|r| *r == Event::answer(hit("am", b"").into_bytes()))
+                .all(|r| *r == Reply::answer(hit("am", b"").into_bytes()).into())
         );
     }
 

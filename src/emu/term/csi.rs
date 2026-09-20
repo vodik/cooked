@@ -193,7 +193,7 @@ impl State {
                     (true, DecMode::MouseDrag) => MouseTracking::Drag,
                     (true, _) => MouseTracking::Motion,
                 };
-                self.events.push(Event::Mouse(self.modes.mouse));
+                self.events.push(Event::Mouse(self.modes.mouse).into());
             }
             // xterm's rule, and the reason the format is one field: a set replaces
             // whichever coordinate mode was in force, and a reset is effective only
@@ -211,7 +211,7 @@ impl State {
                 } else if mouse.format == format {
                     mouse.format = MouseFormat::X10;
                 }
-                self.events.push(Event::Mouse(self.modes.mouse));
+                self.events.push(Event::Mouse(self.modes.mouse).into());
             }
             DecMode::AltScreenLegacy | DecMode::AltScreen => self.set_alt(on),
             DecMode::SaveCursor if on => self.save_cursor(),
@@ -264,7 +264,7 @@ impl State {
                 self.set_flag_mode(mode, on);
                 if on {
                     let report = self.current_size_report();
-                    self.push_reply(Event::size_report(report));
+                    self.push_reply(Reply::size_report(report));
                 }
             }
             DecMode::ReverseScreen => {
@@ -435,7 +435,7 @@ impl State {
         }
         self.saved_charsets = PerScreen::default();
         if had_mouse {
-            self.events.push(Event::Mouse(self.modes.mouse));
+            self.events.push(Event::Mouse(self.modes.mouse).into());
         }
     }
 
@@ -502,7 +502,7 @@ impl State {
             let (mouse, reverse_screen) = (self.modes.mouse, self.modes.reverse_screen);
             handover.restore(&mut self.modes);
             if self.modes.mouse != mouse {
-                self.events.push(Event::Mouse(self.modes.mouse));
+                self.events.push(Event::Mouse(self.modes.mouse).into());
             }
             // Counted as a DECSCNM would be, so a command that reversed the screen and died
             // inside one drain still shows as a flash rather than as nothing.
@@ -587,13 +587,13 @@ impl State {
             SavedMode::Tracking(saved) => {
                 if self.modes.mouse.tracking != saved {
                     self.modes.mouse.tracking = saved;
-                    self.events.push(Event::Mouse(self.modes.mouse));
+                    self.events.push(Event::Mouse(self.modes.mouse).into());
                 }
             }
             SavedMode::Format(saved) => {
                 if self.modes.mouse.format != saved {
                     self.modes.mouse.format = saved;
-                    self.events.push(Event::Mouse(self.modes.mouse));
+                    self.events.push(Event::Mouse(self.modes.mouse).into());
                 }
             }
         }
@@ -773,7 +773,7 @@ impl State {
                     self.erase_display(how, pen);
                 }
                 if param == 3 {
-                    self.events.push(Event::EraseScrollback);
+                    self.events.push(Event::EraseScrollback.into());
                 }
             }
             (None, 'K') => {
@@ -964,8 +964,8 @@ impl State {
                         self.csi_reply(format_args!("9;{rows};{cols}t"));
                     }
                 }
-                22 => self.events.push(Event::TitleStack(StackOp::Push)),
-                23 => self.events.push(Event::TitleStack(StackOp::Pop)),
+                22 => self.events.push(Event::TitleStack(StackOp::Push).into()),
+                23 => self.events.push(Event::TitleStack(StackOp::Pop).into()),
                 // A 0 or omitted argument means "leave this dimension", which `arg`'s
                 // fallback of 0 folds together with an absent one. A request to leave
                 // both is no request.
@@ -973,14 +973,15 @@ impl State {
                     let dim = |i| u16::try_from(params.arg(i, 0)).ok().filter(|&n| n != 0);
                     let (rows, cols) = (dim(1), dim(2));
                     if rows.is_some() || cols.is_some() {
-                        self.events.push(Event::ResizeRequest(rows, cols));
+                        self.events.push(Event::ResizeRequest(rows, cols).into());
                     }
                 }
                 // DECSLPP: set lines per page. The row count alone, from the VT340, which
                 // xterm reads any `CSI Ps t` of 24 or more as.
                 lines @ 24.. => {
                     let rows = u16::try_from(lines).unwrap_or(u16::MAX);
-                    self.events.push(Event::ResizeRequest(Some(rows), None));
+                    self.events
+                        .push(Event::ResizeRequest(Some(rows), None).into());
                 }
                 _ => {}
             },
@@ -1087,7 +1088,7 @@ impl State {
             // DSRs such as `CSI ? 15 n` unimplemented rather than swallowed.
             (Some(b'?'), 'n') if params.arg(0, 0) == 996 => {
                 if let Some(scheme) = self.color_scheme {
-                    self.push_reply(Event::answer(color_scheme_report(scheme)));
+                    self.push_reply(Reply::answer(color_scheme_report(scheme)));
                 }
             }
             _ => return false,

@@ -10,7 +10,7 @@ fn osc_133_becomes_semantic_events() {
         b"\x1b]133;A\x07$ \x1b]133;B\x07ls\x1b]133;C\x07out\x1b]133;D;3\x07",
     );
     let events = t.drain().events;
-    let at = |row, col| Anchor { row, col };
+    let at = anchor;
     assert_eq!(
         events,
         vec![
@@ -33,7 +33,7 @@ fn osc_133_becomes_semantic_events() {
 fn osc_133_marks_a_continuation_prompt() {
     let mut t = term(4, 20, b"\x1b]133;A\x07> \x1b]133;A;k=s\x07\x1b]133;B\x07");
     let events = t.drain().events;
-    let at = |row, col| Anchor { row, col };
+    let at = anchor;
     assert_eq!(
         events,
         vec![
@@ -59,7 +59,7 @@ fn osc_133_ignores_the_other_spelling_of_the_prompt_mark() {
         t.drain().events,
         vec![Event::Mark(
             Mark::PromptStart,
-            Anchor { row: 0, col: 0 },
+            anchor(0, 0),
             MarkId::from_index(0)
         )]
     );
@@ -81,7 +81,7 @@ fn osc_133_drops_a_prompt_kind_that_is_neither_initial_nor_a_continuation() {
             t.drain().events,
             vec![Event::Mark(
                 Mark::PromptStart,
-                Anchor { row: 0, col: 0 },
+                anchor(0, 0),
                 MarkId::from_index(0)
             )],
             "k={} should have been dropped whole",
@@ -94,7 +94,7 @@ fn osc_133_drops_a_prompt_kind_that_is_neither_initial_nor_a_continuation() {
 #[test]
 fn osc_133_reads_both_spellings_of_a_continuation() {
     let mut t = term(4, 20, b"\x1b]133;A;k=c\x07\x1b]133;A;k=s\x07");
-    let at = |row, col| Anchor { row, col };
+    let at = anchor;
     assert_eq!(
         t.drain().events,
         vec![
@@ -113,7 +113,7 @@ fn osc_133_treats_an_empty_prompt_kind_as_initial() {
         t.drain().events,
         vec![Event::Mark(
             Mark::PromptStart,
-            Anchor { row: 0, col: 0 },
+            anchor(0, 0),
             MarkId::from_index(0)
         )]
     );
@@ -135,7 +135,7 @@ fn osc_133_ignores_the_options_that_are_not_a_prompt_kind() {
             t.drain().events,
             vec![Event::Mark(
                 Mark::PromptStart,
-                Anchor { row: 0, col: 0 },
+                anchor(0, 0),
                 MarkId::from_index(0)
             )],
             "{} should have been an initial prompt",
@@ -176,7 +176,7 @@ fn osc_133_d_without_a_status() {
         t.drain().events,
         vec![Event::Mark(
             Mark::CommandEnd(None),
-            Anchor { row: 0, col: 0 },
+            anchor(0, 0),
             MarkId::from_index(0)
         )]
     );
@@ -189,7 +189,7 @@ fn osc_133_stays_typed() {
         t.drain().events,
         vec![Event::Mark(
             Mark::PromptStart,
-            Anchor { row: 0, col: 0 },
+            anchor(0, 0),
             MarkId::from_index(0)
         )]
     );
@@ -204,7 +204,7 @@ fn marks_in_one_drain_keep_their_own_positions() {
         20,
         b"\x1b]133;C\x07one\r\n\x1b]133;D;0\x07\x1b]133;C\x07two\r\n\x1b]133;D;0\x07",
     );
-    let starts: Vec<Anchor> = t
+    let starts: Vec<Anchor<Chars>> = t
         .drain()
         .events
         .into_iter()
@@ -213,10 +213,7 @@ fn marks_in_one_drain_keep_their_own_positions() {
             _ => None,
         })
         .collect();
-    assert_eq!(
-        starts,
-        vec![Anchor { row: 0, col: 0 }, Anchor { row: 1, col: 0 }]
-    );
+    assert_eq!(starts, vec![anchor(0, 0), anchor(1, 0)]);
 }
 
 /// The exception in `Row::retire`, and the whole reason marks can be moved at all:
@@ -256,10 +253,7 @@ fn a_rewrap_reports_where_each_mark_moved_to() {
     t.resize(4, 7);
     let delta = t.drain();
     // Offset 12 into the line, re-chunked at seven columns: row 1, column 5.
-    assert_eq!(
-        delta.marks,
-        vec![(MarkId::from_index(0), Anchor { row: 1, col: 5 })]
-    );
+    assert_eq!(delta.marks, vec![(MarkId::from_index(0), anchor(1, 5))]);
 }
 
 /// The other half of the same drain: a rewrap narrow enough pushes rows off the top,
@@ -334,8 +328,8 @@ fn leaving_the_alternate_screen_reports_every_mark() {
         assert_eq!(
             marks,
             vec![
-                (MarkId::from_index(0), Anchor { row: 0, col: 0 }),
-                (MarkId::from_index(1), Anchor { row: 1, col: 0 }),
+                (MarkId::from_index(0), anchor(0, 0)),
+                (MarkId::from_index(1), anchor(1, 0)),
             ],
             "mode {mode}"
         );
@@ -369,8 +363,8 @@ fn a_mark_on_the_alternate_screen_is_dropped() {
         assert_eq!(
             t.drain().marks,
             vec![
-                (MarkId::from_index(0), Anchor { row: 0, col: 0 }),
-                (MarkId::from_index(1), Anchor { row: 1, col: 0 }),
+                (MarkId::from_index(0), anchor(0, 0)),
+                (MarkId::from_index(1), anchor(1, 0)),
             ],
             "mode {mode}"
         );
@@ -536,7 +530,7 @@ fn a_mark_after_a_wide_character_is_anchored_by_characters() {
         events,
         vec![Event::Mark(
             Mark::PromptEnd,
-            Anchor { row: 0, col: 3 },
+            anchor(0, 3),
             MarkId::from_index(0)
         )]
     );
@@ -553,7 +547,7 @@ fn a_mark_scrolled_away_after_a_wide_character_is_anchored_by_characters() {
         "\u{65e5}\u{672c} \x1b]133;B\x07\r\n\r\n\r\n".as_bytes(),
     );
     let delta = t.drain();
-    let anchor = Anchor { row: 0, col: 3 };
+    let anchor = anchor(0, 3);
     assert!(anchor.row < delta.scrolled_base + delta.scrolled.len());
     assert_eq!(
         delta.events,
@@ -575,14 +569,14 @@ fn many_marks_scrolled_away_are_anchored_the_same_way_as_a_few() {
     }
     let mut t = term(2, 20, &input);
     let delta = t.drain();
-    let marks: Vec<(MarkId, Anchor)> = delta.marks.clone();
+    let marks: Vec<(MarkId, Anchor<Chars>)> = delta.marks.clone();
     assert!(
         marks.len() * delta.events.len() > 256,
         "this must be big enough to take the indexed path: {} marks, {} events",
         marks.len(),
         delta.events.len()
     );
-    let anchors: Vec<(MarkId, Anchor)> = delta
+    let anchors: Vec<(MarkId, Anchor<Chars>)> = delta
         .events
         .iter()
         .map(|event| match event {
@@ -595,7 +589,7 @@ fn many_marks_scrolled_away_are_anchored_the_same_way_as_a_few() {
     // along its row rather than the five columns the wide prompt occupies.
     assert_eq!(anchors, marks);
     assert!(
-        anchors.iter().all(|(_, at)| at.col == 3),
+        anchors.iter().all(|(_, at)| at.col == Chars::new(3)),
         "every mark is three characters in: {anchors:?}"
     );
 }

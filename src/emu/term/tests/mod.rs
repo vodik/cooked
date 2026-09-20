@@ -44,10 +44,23 @@ fn replies(events: Vec<Event>) -> Vec<String> {
     events
         .into_iter()
         .filter_map(|e| match e {
-            Event::Reply(bytes, ReplyKind::Answer) => Some(String::from_utf8(bytes).unwrap()),
+            Event::Reply(reply) if reply.kind == ReplyKind::Answer => {
+                Some(String::from_utf8(reply.bytes).unwrap())
+            }
             _ => None,
         })
         .collect()
+}
+
+/// A drained anchor at absolute ROW, COL characters into the row's text.
+///
+/// The unit is the whole point of the type, so the tests spell it once here rather than
+/// wrapping every literal; see [`Anchor`].
+fn anchor(row: usize, col: usize) -> Anchor<Chars> {
+    Anchor {
+        row,
+        col: Chars::new(col),
+    }
 }
 
 /// Every reply the next drain of T carries, as text.

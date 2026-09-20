@@ -87,10 +87,16 @@ impl CursorShape {
     }
 }
 
-/// Where in the output stream a mark landed.
+/// Where in the output stream a mark landed, with its column in unit `U`.
 ///
 /// `row` is *absolute*: screen row 0 is row [`State::evicted_total`], so the coordinate
 /// stays meaningful after the marked row scrolls away, which a screen row does not.
+///
+/// The column is a grid column, [`Anchor<Cols>`], while the emulator holds the mark, and
+/// the characters of the row's text before it, [`Anchor<Chars>`], from the drain onwards,
+/// because a buffer position is what Emacs makes of it: a prompt of `日本 ` ends at column
+/// 5 and 3 characters in. The unit is in the type so that the two cannot be confused; the
+/// one crossing is [`State::anchor_in_characters`], which needs the row's cells to count.
 ///
 /// Recorded when the mark is parsed rather than read off the drain, because the drain
 /// carries the *end-of-drain* cursor, which is somewhere else entirely once a fast script
@@ -99,9 +105,25 @@ impl CursorShape {
 /// Best-effort: a resize between the mark and the drain rewraps the scrollback and can
 /// shift where the anchor resolves, and Lisp then falls back to the end-of-drain cursor.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Anchor {
+pub struct Anchor<U> {
     pub row: usize,
-    pub col: usize,
+    pub col: U,
+}
+
+impl Anchor<Cols> {
+    /// This anchor with its column read as a character offset, for a mark whose row is no
+    /// longer anywhere to measure.
+    ///
+    /// The answer is right on a row with no wide character and no combining mark before
+    /// the mark, which is every row of ASCII, and there is nothing better available: the
+    /// cells that would have been counted are gone. See [`State::anchor_in_characters`]
+    /// for when it is reached.
+    fn unmeasured(self) -> Anchor<Chars> {
+        Anchor {
+            row: self.row,
+            col: Chars::new(self.col.get()),
+        }
+    }
 }
 
 /// An OSC 133 mark: where a shell says its prompt, its input and its command's output
@@ -124,10 +146,46 @@ pub enum Mark {
     CommandEnd(Option<i32>),
 }
 
+/// Bytes the terminal owes the child — device attributes, cursor reports, size reports —
+/// and which kind of reply they are.
+///
+/// A type of its own rather than two fields of [`Event::Reply`], because a reply travels
+/// on its own too: [`Term::take_outbound`] hands the session the ones that need nothing
+/// from Lisp, and [`ReplyRoute`] decides which of the two roads each takes. Saying so in
+/// the type is what lets [`State::push_reply`] put a reply on either without a check that
+/// it is one.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Reply {
+    pub bytes: Vec<u8>,
+    pub kind: ReplyKind,
+}
+
+impl Reply {
+    /// The reply to something the child asked, BYTES.
+    pub fn answer(bytes: Vec<u8>) -> Self {
+        Self {
+            bytes,
+            kind: ReplyKind::Answer,
+        }
+    }
+
+    /// The mode 2048 size report, BYTES.
+    pub fn size_report(bytes: Vec<u8>) -> Self {
+        Self {
+            bytes,
+            kind: ReplyKind::SizeReport,
+        }
+    }
+
+    fn is_size_report(&self) -> bool {
+        self.kind == ReplyKind::SizeReport
+    }
+}
+
 /// What a reply is, which decides whether a later one may replace it.
 ///
-/// It rides on [`Event::Reply`] from where the reply is composed to the session's reply
-/// queue, which is what acts on it.
+/// It rides on [`Reply`] from where the reply is composed to the session's reply queue,
+/// which is what acts on it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ReplyKind {
     /// An answer to something the child asked. Each is kept, in order.
@@ -169,17 +227,18 @@ pub enum Event {
     /// The [`MarkId`] is how Emacs is told later that the mark has moved: Emacs holds a
     /// buffer marker taken from the [`Anchor`], the anchor stops being true the moment a
     /// resize rewraps the grid, and the id pairs the two up again. See [`Delta::marks`].
-    Mark(Mark, Anchor, MarkId),
+    Mark(Mark, Anchor<Chars>, MarkId),
     /// The child changed its mind about mouse reporting. An occurrence rather than a
     /// field because nothing in redisplay depends on it: its one consumer swaps a keymap.
     Mouse(Mouse),
-    /// Bytes the terminal owes the child (device attributes, cursor reports), and which
-    /// kind of reply they are.
+    /// Bytes the terminal owes the child, which Lisp hands to the reply queue because
+    /// something it alone can answer is still ahead of them; see [`ReplyRoute`].
     ///
-    /// The kind is a field rather than a second variant because the two kinds are the same
-    /// thing in every respect but one: a resize supersedes a [`ReplyKind::SizeReport`] that
-    /// has not gone out yet. See [`Term::set_size`], which drops an undrained one by it.
-    Reply(Vec<u8>, ReplyKind),
+    /// The kind is a field of [`Reply`] rather than a second variant because the two kinds
+    /// are the same thing in every respect but one: a resize supersedes a
+    /// [`ReplyKind::SizeReport`] that has not gone out yet. See [`Term::set_size`], which
+    /// drops an undrained one by it.
+    Reply(Reply),
     /// `CSI 3 J` — the child asked to erase saved lines, xterm's `clear -x`.
     ///
     /// Unlike `CSI 2 J`, xterm's `3 J` touches only the scrollback, so the grid does
@@ -217,19 +276,38 @@ pub enum Event {
     ResizeRequest(Option<u16>, Option<u16>),
 }
 
-impl Event {
-    /// The reply to something the child asked, BYTES.
-    pub fn answer(bytes: Vec<u8>) -> Self {
-        Self::Reply(bytes, ReplyKind::Answer)
-    }
+/// An event as the emulator queues it, waiting for a drain to hand it over.
+///
+/// Three variants because a drain does three different things with what it finds in
+/// [`State::events`]. A mark's anchor is a grid column until the drain has the row's cells
+/// to count and [`State::anchor_in_characters`] turns it into the character offset an
+/// [`Event::Mark`] carries — one field with one unit each side of the conversion, rather
+/// than one field rewritten in place. A reply may yet be overtaken by events: it leaves
+/// through [`Term::take_outbound`] instead once Lisp has answered what was ahead of it,
+/// and [`Term::set_size`] drops a superseded size report out of the middle of the queue.
+/// Everything else is already exactly what Emacs is handed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) enum Queued {
+    Mark(Mark, Anchor<Cols>, MarkId),
+    Reply(Reply),
+    Settled(Event),
+}
 
-    /// The mode 2048 size report, BYTES.
-    pub fn size_report(bytes: Vec<u8>) -> Self {
-        Self::Reply(bytes, ReplyKind::SizeReport)
+/// A reply the emulator could not send straight to the child travels with the drain.
+impl From<Reply> for Event {
+    fn from(reply: Reply) -> Self {
+        Self::Reply(reply)
     }
 }
 
-impl Event {
+/// Every event but a mark or a reply is queued by handing over the [`Event`] itself.
+impl From<Event> for Queued {
+    fn from(event: Event) -> Self {
+        Self::Settled(event)
+    }
+}
+
+impl Queued {
     /// Whether Lisp may answer this, which holds back every reply composed after it; see
     /// [`ReplyRoute`].
     ///
@@ -240,7 +318,9 @@ impl Event {
     /// may reach the child first.
     fn awaits_answer(&self) -> bool {
         match self {
-            Self::Osc(_, parts, _) => parts.iter().any(|part| part.starts_with('?')),
+            Self::Settled(Event::Osc(_, parts, _)) => {
+                parts.iter().any(|part| part.starts_with('?'))
+            }
             _ => false,
         }
     }
@@ -248,7 +328,7 @@ impl Event {
     /// Whether this is a sequence whose handling may move one of the ten default
     /// colours, so the core must not answer for them until Lisp has been through.
     ///
-    /// A *set* is the case, and it is not [`Event::awaits_answer`]: `OSC 11 ; #ff0000`
+    /// A *set* is the case, and it is not [`Queued::awaits_answer`]: `OSC 11 ; #ff0000`
     /// asks for nothing and holds no reply back, and yet a query after it is owed the
     /// colour Lisp is about to remap to rather than the one being replaced. The resets,
     /// `OSC 110` to `OSC 112`, move it the other way for the same reason.
@@ -257,7 +337,7 @@ impl Event {
     /// whatever the policy, so nothing a child sends moves an entry. Only a theme does,
     /// and a theme pushes the whole table before anything can ask.
     fn moves_a_default_color(&self) -> bool {
-        matches!(self, Self::Osc(code, ..)
+        matches!(self, Self::Settled(Event::Osc(code, ..))
             if (10..=19).contains(code) || (110..=112).contains(code))
     }
 
@@ -272,7 +352,7 @@ impl Event {
     fn needs_text(&self) -> bool {
         matches!(
             self,
-            Self::Mark(..) | Self::EraseScrollback | Self::DisplayCleared
+            Self::Mark(..) | Self::Settled(Event::EraseScrollback | Event::DisplayCleared)
         )
     }
 }
@@ -466,9 +546,8 @@ pub struct Delta {
     /// Semantic marks whose position changed during this drain, as `(ID, ANCHOR)`.
     ///
     /// The anchor's column here, and in every [`Event::Mark`] a drain carries, counts the
-    /// characters of the row's text before the mark rather than grid columns, because a
-    /// buffer position is what Emacs makes of it: a prompt of `日本 ` ends at column 5 and
-    /// 3 characters in.
+    /// characters of the row's text before the mark rather than grid columns; the
+    /// [`Anchor<Chars>`] in the type is what says so, and [`Anchor`] says why.
     ///
     /// Empty on most drains. A resize fills it, because a rewrap re-lays every logical
     /// line at the new width and the old buffer positions stop holding; so does a redraw,
@@ -477,7 +556,7 @@ pub struct Delta {
     ///
     /// Marks that left the grid during a resize are here too, anchored into this drain's
     /// scrollback batch, which `anchor_to_lisp` already knows how to spell.
-    pub marks: Vec<(MarkId, Anchor)>,
+    pub marks: Vec<(MarkId, Anchor<Chars>)>,
     /// Whether this drain left the screen out, being [`Term::drain_hidden`]'s: `rows`,
     /// `shifts` and the marks still on the grid wait in the core, and the next drain that
     /// is not hidden brings them.
@@ -786,17 +865,16 @@ impl State {
 
     fn reply(&mut self, framing: Framing, body: std::fmt::Arguments<'_>) {
         if let Some(bytes) = reply::frame(framing, body) {
-            self.push_reply(Event::answer(bytes));
+            self.push_reply(Reply::answer(bytes));
         }
     }
 
-    /// Owe the child REPLY, an [`Event::Reply`] of either kind.
+    /// Owe the child REPLY, of either kind.
     ///
     /// Straight to [`Term::take_outbound`] when the session has asked for that and nothing
     /// Lisp has yet to answer came first; otherwise with the drain, as every reply once
     /// went. See [`ReplyRoute`].
-    pub(super) fn push_reply(&mut self, reply: Event) {
-        debug_assert!(matches!(reply, Event::Reply(..)));
+    pub(super) fn push_reply(&mut self, reply: Reply) {
         let route = &mut self.replies;
         if route.direct && !route.undrained && !route.handling {
             route.outbound.push(reply);
@@ -804,20 +882,26 @@ impl State {
             // Behind something Lisp answers, so everything after it must wait too, or a
             // later answer would overtake this one.
             route.undrained = true;
-            self.events.push(reply);
+            self.events.push(Queued::Reply(reply));
         }
     }
 
-    /// Hand Lisp EVENT, noting whether it is a question Lisp may answer.
+    /// Hand Lisp EVENT, noting whether it is a question Lisp may answer and whether
+    /// acting on it may move one of the default colours.
     ///
-    /// Only [`Event::Osc`] comes through here as a question; every other event is pushed
-    /// directly. `19t`/`15t` used to as well, before `CSI 19t`/`15t` moved to answering
-    /// from [`FrameSize`] the way `14t`/`18t` already did.
+    /// Only [`Event::Osc`] comes through here, and only an OSC can be either of those
+    /// things; every other event is pushed directly. `19t`/`15t` used to come through as a
+    /// question as well, before `CSI 19t`/`15t` moved to answering from [`FrameSize`] the
+    /// way `14t`/`18t` already did.
     pub(super) fn push_for_lisp(&mut self, event: Event) {
-        if event.awaits_answer() {
+        let queued = Queued::from(event);
+        if queued.awaits_answer() {
             self.replies.undrained = true;
         }
-        self.events.push(event);
+        // A colour sequence Lisp is about to act on, a set above all: until it has, the
+        // defaults are not the answer to a query.
+        self.palette_pending |= queued.moves_a_default_color();
+        self.events.push(queued);
     }
 }
 
@@ -843,7 +927,7 @@ pub(super) struct ReplyRoute {
     /// the emulator's own tests look for them.
     direct: bool,
     /// Replies bound straight for the child, in the order they were composed.
-    outbound: Vec<Event>,
+    outbound: Vec<Reply>,
     /// The undrained events hold a question for Lisp, or a reply queued behind one.
     undrained: bool,
     /// A drain carried such a question, and Lisp has not yet said it is handled; see
@@ -1000,9 +1084,9 @@ impl Term {
     /// the rows they sit on arrive here and nowhere else.
     ///
     /// A whole drain after all, marked by [`Delta::withheld`] being false, when an event
-    /// needs the screen's text; see [`Event::needs_text`].
+    /// needs the screen's text; see [`Queued::needs_text`].
     pub fn drain_hidden(&mut self) -> Delta {
-        if self.state.events.iter().any(Event::needs_text) {
+        if self.state.events.iter().any(Queued::needs_text) {
             return self.drain();
         }
         let route = &mut self.state.replies;
@@ -1027,9 +1111,9 @@ impl Term {
         self.state.replies.direct = true;
     }
 
-    /// The replies owed to the child that need nothing from Lisp, oldest first, each an
-    /// [`Event::Reply`] of either kind.
-    pub fn take_outbound(&mut self) -> Vec<Event> {
+    /// The replies owed to the child that need nothing from Lisp, oldest first, of either
+    /// kind.
+    pub fn take_outbound(&mut self) -> Vec<Reply> {
         std::mem::take(&mut self.state.replies.outbound)
     }
 
@@ -1042,14 +1126,14 @@ impl Term {
     pub fn events_handled(&mut self) {
         let state = &mut self.state;
         state.replies.handling = false;
-        state.palette_pending = state.events.iter().any(Event::moves_a_default_color);
+        state.palette_pending = state.events.iter().any(Queued::moves_a_default_color);
         if !state.replies.direct || !state.replies.undrained {
             return;
         }
         let ahead = state
             .events
             .iter()
-            .position(Event::awaits_answer)
+            .position(Queued::awaits_answer)
             .unwrap_or(state.events.len());
         if ahead == state.events.len() {
             state.replies.undrained = false;
@@ -1059,11 +1143,13 @@ impl Term {
         state.events.retain(|event| {
             let before = index < ahead;
             index += 1;
-            let reply = matches!(event, Event::Reply(..));
-            if before && reply {
-                outbound.push(event.clone());
+            match event {
+                Queued::Reply(reply) if before => {
+                    outbound.push(reply.clone());
+                    false
+                }
+                _ => true,
             }
-            !(before && reply)
         });
     }
 
@@ -1117,11 +1203,11 @@ impl Term {
         }
         self.state
             .events
-            .retain(|e| !matches!(e, Event::Reply(_, ReplyKind::SizeReport)));
+            .retain(|e| !matches!(e, Queued::Reply(reply) if reply.is_size_report()));
         self.state
             .replies
             .outbound
-            .retain(|e| !matches!(e, Event::Reply(_, ReplyKind::SizeReport)));
+            .retain(|reply| !reply.is_size_report());
         Some(report)
     }
 
@@ -1641,7 +1727,7 @@ struct State {
     /// [`osc::Palette`].
     palette: osc::Palette,
     /// Whether a sequence that may move one of the ten default colours is with Lisp,
-    /// unhandled; see [`Event::moves_a_default_color`].
+    /// unhandled; see [`Queued::moves_a_default_color`].
     ///
     /// Raised where the event is pushed and lowered by [`Term::events_handled`], which
     /// recomputes it from the events queued since the drain rather than simply clearing
@@ -1680,7 +1766,7 @@ struct State {
     /// counting from the beginning of the session, which is what makes an [`Anchor`]
     /// outlive the grid position it was taken from.
     evicted_total: usize,
-    events: Vec<Event>,
+    events: Vec<Queued>,
     /// Whether `events` already holds an [`Event::Bell`] this drain.
     ///
     /// A BEL is an occurrence with no payload, so a second one before Emacs has seen the
@@ -1764,7 +1850,7 @@ struct State {
     /// These cannot be read off the grid at drain time, being no longer on it, and they
     /// cannot go stale either: a row's absolute number is fixed the moment it is
     /// archived.
-    evicted_marks: Vec<(MarkId, Anchor)>,
+    evicted_marks: Vec<(MarkId, Anchor<Chars>)>,
     /// Everything DECSTR and RIS put back; see [`Modes`].
     modes: Modes,
     /// [`Levels::reverse_screen_toggles`]. Beside [`Modes`] rather than in it, so that a

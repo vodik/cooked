@@ -132,7 +132,7 @@ impl Perform for State {
             0x07 => {
                 if !self.bell_queued {
                     self.bell_queued = true;
-                    self.events.push(Event::Bell);
+                    self.events.push(Event::Bell.into());
                 }
             }
             0x08 => self.screen_mut().backspace(),
@@ -230,7 +230,7 @@ impl Perform for State {
                 // Last, so a Lisp handler sees the reset already done; see [`Event::Reset`].
                 // A bell queued before it is answered before the reset, and Lisp clears
                 // its mark there, so a BEL after the reset has to be queued afresh.
-                self.events.push(Event::Reset);
+                self.events.push(Event::Reset.into());
                 self.bell_queued = false;
             }
             // ST. The parser has already dispatched the OSC, DCS or APC it ends, and hands
