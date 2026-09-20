@@ -315,8 +315,9 @@ pub(crate) struct ImageStore {
 /// to make room are the ones a known id never causes, so a known transmission carries no
 /// empty `Vec` pretending it might have some. What the rest of the emulator hangs off an
 /// id -- the client-id map in [`Kitty`](super::kitty::Kitty) -- has to go at the same
-/// moment the count cap retires one, which is why [`Self::intern`] returns `retired`
-/// rather than dropping it: that makes the eviction the caller's visible obligation.
+/// moment the count cap retires one, which is why [`ImageStore::intern`] returns
+/// `retired` rather than dropping it: that makes the eviction the caller's visible
+/// obligation.
 #[derive(Debug)]
 pub(crate) enum Interned {
     /// Lisp has yet to see these bytes, and so they must cross. Ids the count cap dropped
