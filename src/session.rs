@@ -2133,9 +2133,24 @@ impl Shared {
             // `Session::set_hidden` announces when a window shows the buffer again.
             //
             // They also differ in when they are taken. The mode is sampled on every turn
-            // of this loop, including the one about to read, because the read is where a
-            // secret prompt arrives and the `tcsetattr` behind it follows within
-            // microseconds. The foreground is sampled only on a turn that found nothing
+            // that is not about to read -- a tick, the resample a burst arms, an
+            // interrupt, a turn spent throttled -- because on those turns nothing else
+            // will look at the tty. A turn with bytes waiting skips it and takes its
+            // sample after the read instead, microseconds later and with the prompt
+            // already out of the pty. Nothing happens between the two but moving those
+            // bytes, so the earlier one can only ever say less: `read -s -p` writes its
+            // prompt and calls `tcsetattr` about 0.03ms later, in that order, and whether
+            // a sample taken before the read catches that is a coin flip the sample after
+            // it does not have to toss.
+            //
+            // Neither guarantee the tick exists for turns on the skipped sample. A
+            // *silent* mode change -- `read -s` with no prompt -- puts nothing in the pty,
+            // so its turn is a tick and is sampled here, noticed within one tick as ever.
+            // And no keystroke depends on this cache at all: `Session::sample_mode` reads
+            // the tty on the input path, so a character is never inserted on the strength
+            // of it.
+            //
+            // The foreground is sampled only on a turn that found nothing
             // at all -- no data, no interrupt -- which is the tick and the resample it
             // arms. `Pty::foreground_program` costs a `tcgetpgrp` and a small `/proc`
             // read, and taking those before every read puts them between the poll and the
@@ -2147,7 +2162,7 @@ impl Shared {
             // where a silent `exec` was always going to be caught. A test may also force
             // this turn to sample regardless, through `Shared::force_sample`, so it can
             // watch the tick's own logic run without waiting on its backoff.
-            if self.sample_mode() {
+            if !ready && self.sample_mode() {
                 self.announce();
             }
             // A test's escape hatch from the tick's own backoff, compiled out of a
@@ -2165,9 +2180,9 @@ impl Shared {
                 self.note();
             }
             // Retire an armed resample once its moment has come and gone. The sample
-            // itself is the one above, taken unconditionally on every tick -- this only
-            // decides *when* the tick happens, so once the deadline is behind us there is
-            // nothing left for it to bring forward.
+            // itself is the one above, taken on every turn that does not go on to read --
+            // this only decides *when* such a turn happens, so once the deadline is behind
+            // us there is nothing left for it to bring forward.
             if resample_at.is_some_and(|at| at <= self.now()) {
                 resample_at = None;
             }
@@ -2224,7 +2239,8 @@ impl Shared {
                     // [`RESAMPLE_DELAY`].
                     resample_at = Some(self.now() + RESAMPLE_DELAY);
                     // A child that changes mode almost always writes at the same moment, so
-                    // re-sampling here catches the common case at once. A change goes out
+                    // sampling here catches the common case at once, and it is the only
+                    // sample this turn takes: see the note above the poll. A change goes out
                     // without waiting on the frame, because a password prompt is only
                     // useful early.
                     if self.sample_mode() {
