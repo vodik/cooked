@@ -582,7 +582,7 @@ fn decaln_fills_the_screen_with_e() {
                 .unwrap()
                 .cells()
                 .iter()
-                .all(|c| c.style == StyleId::DEFAULT),
+                .all(|c| c.style() == StyleId::DEFAULT),
             "row {row} is in the default rendition"
         );
     }

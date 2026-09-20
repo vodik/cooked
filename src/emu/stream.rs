@@ -330,12 +330,12 @@ impl Stream {
     fn split_wide(&mut self, at: usize) {
         if at < self.line.len() && self.line[at].is_continuation() {
             if let Some(base) = self.line[..at].iter().rposition(|c| !c.is_continuation()) {
-                let style = self.line[base].cell.style;
+                let style = self.line[base].cell.style();
                 self.line[base] = Column::new(Cell::blank(style));
             }
         }
         if at + 1 < self.line.len() && self.line[at + 1].is_continuation() {
-            let style = self.line[at + 1].cell.style;
+            let style = self.line[at + 1].cell.style();
             self.line[at + 1] = Column::new(Cell::blank(style));
         }
     }
@@ -427,7 +427,7 @@ impl Stream {
             self.styles.collect(|mark| {
                 line.iter()
                     .chain(emitted)
-                    .for_each(|column| mark(column.cell.style));
+                    .for_each(|column| mark(column.cell.style()));
                 runs.iter().for_each(|run| mark(run.style));
             });
         }
@@ -530,12 +530,12 @@ impl Stream {
             // not merge into whatever the last feed left open.
             self.out
                 .runs
-                .start(columns[0].cell.style, columns[0].cell.link, None);
+                .start(columns[0].cell.style(), columns[0].cell.link(), None);
             for column in columns {
                 if column.is_continuation() {
                     continue;
                 }
-                self.out.runs.push_char(column.cell.ch);
+                self.out.runs.push_char(column.cell.ch());
                 if let Some(marks) = &column.marks {
                     self.out.runs.push_str(marks);
                 }

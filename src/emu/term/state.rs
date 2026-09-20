@@ -359,9 +359,12 @@ impl State {
         } = self;
         styles.collect(|mark| {
             for screen in screens.each() {
-                screen.all_cells().iter().for_each(|cell| mark(cell.style));
+                screen
+                    .all_cells()
+                    .iter()
+                    .for_each(|cell| mark(cell.style()));
             }
-            front.all_cells().iter().for_each(|cell| mark(cell.style));
+            front.all_cells().iter().for_each(|cell| mark(cell.style()));
             for scrolled in pending_scrollback.iter() {
                 scrolled.runs.iter().for_each(|run| mark(run.style));
             }
@@ -403,13 +406,13 @@ impl State {
                 screen
                     .all_cells()
                     .iter()
-                    .filter_map(|c| c.link)
+                    .filter_map(|c| c.link())
                     .for_each(&mut *mark);
             }
             front
                 .all_cells()
                 .iter()
-                .filter_map(|c| c.link)
+                .filter_map(|c| c.link())
                 .for_each(&mut *mark);
             for scrolled in pending_scrollback.iter() {
                 scrolled

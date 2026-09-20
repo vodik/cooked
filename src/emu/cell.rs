@@ -181,36 +181,69 @@ impl Style {
     }
 }
 
-/// One screen position. `ch == CONTINUATION` marks the second half of a wide character.
+/// One screen position. `ch() == CONTINUATION` marks the second half of a wide character.
 ///
-/// Sixteen bytes of plain data with no padding: the character, the [`StyleId`] of its
-/// rendition, the `OSC 8` link it is part of, and a spare word that is always zero. The
-/// rendition and the link are ids, so a cell costs the same whatever it is drawn in and
-/// whether or not it is linked: a coloured underline or a link is a field written with
-/// the character rather than an entry in a side table found per column.
+/// One eight-byte word, carrying three things a cell has always carried: the character,
+/// the [`StyleId`] of its rendition, and the `OSC 8` link it is part of. The rendition
+/// and the link are ids, so a cell costs the same whatever it is drawn in and whether or
+/// not it is linked: a coloured underline or a link is a field written with the character
+/// rather than an entry in a side table found per column.
 ///
-/// Every byte of a cell is meaningful, so two rows compare equal exactly when their bytes
-/// do -- see [`Cell::bytes`] -- and a comparison against the frame Emacs already holds
-/// covers the character, the rendition and the link in one `memcmp`.
-#[repr(C)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Cell {
-    pub ch: char,
-    pub style: StyleId,
-    pub link: Option<LinkId>,
-    /// Always zero. Private so that nothing can set it, which is what lets
-    /// [`Cell::bytes`] treat a cell as bytes.
-    zero: u32,
+/// Packed rather than three fields because none of the three needs a whole word. A
+/// `char` is a scalar value, so twenty-one bits hold every one of them; both ids are
+/// handed out against what the grids hold and collected when nothing names them any more
+/// -- [`StyleStore::collect`](super::style::StyleStore::collect) and
+/// [`LinkStore::collect`](super::link::LinkStore::collect) -- so neither counts what a
+/// session has seen, only what it is showing at once. The field widths below are two
+/// million and four million against the eighty thousand cells of a 200x400 grid.
+///
+/// The character and the rendition are the low bits and the link the high ones, which is
+/// what lets [`Cell::head`] drop the link with one mask: trailing-blank trimming ignores
+/// links, and that mask is the whole of how.
+///
+/// Every bit of the word is part of the cell's value, so two rows compare equal exactly
+/// when their words do -- see [`Cell::bytes`] -- and a comparison against the frame Emacs
+/// already holds covers the character, the rendition and the link in one `memcmp`.
+#[repr(transparent)]
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub struct Cell(u64);
+
+/// The three fields rather than the word they are packed into: a failing assertion over
+/// a row of cells has to be readable as characters and ids, which is what it was when
+/// they were fields.
+impl std::fmt::Debug for Cell {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Cell")
+            .field("ch", &self.ch())
+            .field("style", &self.style())
+            .field("link", &self.link())
+            .finish()
+    }
 }
 
-const _: () = assert!(std::mem::size_of::<Cell>() == 16);
-const _: () = assert!(std::mem::align_of::<Cell>() == 4);
+const _: () = assert!(std::mem::size_of::<Cell>() == 8);
 
-/// Bytes of a cell that say whether it is a blank: the character and the rendition,
-/// which [`Cell`] declares in that order and `repr(C)` lays out in it. Eight, so that
-/// [`Cell::content_len`] can read them as one word.
-const HEAD: usize = size_of::<char>() + size_of::<StyleId>();
-const _: () = assert!(HEAD == size_of::<u64>());
+/// Bits for the character: every Unicode scalar value, which is what a `char` is.
+const CH_BITS: u32 = 21;
+/// Bits for the rendition id, and where it sits above the character.
+const STYLE_BITS: u32 = 22;
+const STYLE_SHIFT: u32 = CH_BITS;
+/// Bits for the link id, above both, so that [`Cell::head`] is one mask.
+const LINK_BITS: u32 = 21;
+const LINK_SHIFT: u32 = CH_BITS + STYLE_BITS;
+
+const _: () = assert!(CH_BITS + STYLE_BITS + LINK_BITS == u64::BITS);
+const _: () = assert!(char::MAX as u64 >> CH_BITS == 0);
+
+/// The word with the link masked away: the character and the rendition alone.
+///
+/// What [`Cell::head`] compares, and the reason for the field order.
+const HEAD_MASK: u64 = (1 << LINK_SHIFT) - 1;
+
+/// Highest id each field can hold. An id past it degrades rather than aliasing; see
+/// [`Cell::linked`].
+const STYLE_MAX: u64 = (1 << STYLE_BITS) - 1;
+const LINK_MAX: u64 = (1 << LINK_BITS) - 1;
 
 pub(crate) const CONTINUATION: char = '\0';
 pub(crate) const BLANK: char = ' ';
@@ -278,42 +311,73 @@ impl Cell {
     }
 
     /// CH in STYLE, part of LINK.
+    ///
+    /// The one place a cell is packed, and the one place the field widths can be
+    /// exceeded. An id too big for its field is written as the default rendition or as
+    /// no link, never as the low bits of itself: a truncated id would name *another*
+    /// live rendition or another destination, which is the one failure that puts a
+    /// child's own colours or its own URL on the wrong text. Reaching it needs a child
+    /// that keeps four million distinct renditions or two million destinations alive at
+    /// once, which is several hundred megabytes of table before it is a cell's problem.
     pub const fn linked(ch: char, style: StyleId, link: Option<LinkId>) -> Self {
-        Self {
-            ch,
-            style,
-            link,
-            zero: 0,
-        }
+        let style = style.get() as u64;
+        let link = match link {
+            Some(id) => id.get() as u64,
+            None => 0,
+        };
+        let style = if style > STYLE_MAX { 0 } else { style };
+        let link = if link > LINK_MAX { 0 } else { link };
+        Self((ch as u64) | (style << STYLE_SHIFT) | (link << LINK_SHIFT))
     }
 
     pub const fn blank(style: StyleId) -> Self {
         Self::new(BLANK, style)
     }
 
+    /// The character drawn here.
+    pub const fn ch(self) -> char {
+        // SAFETY: the field is `CH_BITS` wide and every value that reaches it came from
+        // a `char`, so what comes out is the scalar value that went in.
+        unsafe { char::from_u32_unchecked((self.0 & ((1 << CH_BITS) - 1)) as u32) }
+    }
+
+    /// The rendition this cell is drawn in.
+    pub const fn style(self) -> StyleId {
+        StyleId::from_raw(((self.0 >> STYLE_SHIFT) & STYLE_MAX) as u32)
+    }
+
+    /// The `OSC 8` link this cell is part of, if any.
+    pub const fn link(self) -> Option<LinkId> {
+        LinkId::from_wire((self.0 >> LINK_SHIFT) as u32)
+    }
+
     /// The same rendition and link with CH in it.
     pub const fn with_char(self, ch: char) -> Self {
-        Self { ch, ..self }
+        Self((self.0 & !((1 << CH_BITS) - 1)) | ch as u64)
     }
 
     /// Whether this cell and OTHER are drawn alike: the same rendition and the same link.
+    ///
+    /// Both fields in one compare, which is what the run builders ask per cell.
     pub fn same_pen(self, other: Self) -> bool {
-        self.style == other.style && self.link == other.link
+        (self.0 ^ other.0) >> STYLE_SHIFT == 0
     }
 
     /// Whether this cell is in the default rendition, the test trailing-blank trimming
     /// asks of every cell it walks. A link does not count: a run of blanks inside a link
     /// is still blanks, and trims like any other.
     pub fn is_default_style(self) -> bool {
-        self.style.is_default()
+        self.style().is_default()
     }
 
     /// Set every cell of CELLS to CELL.
     ///
-    /// By doubling copies rather than `slice::fill`: a store of a sixteen-byte struct is
-    /// four field stores, which LLVM does not turn into `memset`, so a row of blanks was
-    /// written a field at a time. Copying the filled prefix onto the rest is a handful of
-    /// `memcpy`s however wide the row -- nine for a 400-column one.
+    /// By doubling copies rather than `slice::fill`: a cell used to be four field stores
+    /// that LLVM would not turn into `memset`, so a row of blanks was written a field at
+    /// a time. Copying the filled prefix onto the rest is a handful of `memcpy`s however
+    /// wide the row -- nine for a 400-column one -- and stays the cheaper shape now that
+    /// a cell is one word, since `memcpy` of a growing prefix beats a word-at-a-time
+    /// loop for any row worth filling.
     pub fn fill(cells: &mut [Cell], cell: Cell) {
         let Some(first) = cells.first_mut() else {
             return;
@@ -334,11 +398,10 @@ impl Cell {
     /// a `memcmp`: over a 200x400 grid the slice comparison took about 18 instructions a
     /// cell, and comparing the bytes about a tenth of that.
     ///
-    /// Sound because `Cell` is `repr(C)` with four four-byte fields and so no padding (the
-    /// asserts beside the type pin its size and alignment); `Option<LinkId>` is guaranteed
-    /// the layout of a `u32` with `None` as zero; and the spare field is private and
-    /// always zero. So the bytes of a cell are a function of its value, and equal slices of
-    /// bytes are equal cells.
+    /// Sound because `Cell` is a `repr(transparent)` `u64`: every bit of it is part of
+    /// the value, there is no padding and nothing uninitialised, and the assert beside
+    /// the type pins the size. So the bytes of a cell are a function of its value, and
+    /// equal slices of bytes are equal cells.
     pub fn bytes(cells: &[Cell]) -> &[u8] {
         // SAFETY: see above -- `Cell` has no padding and no uninitialised bytes, and the
         // length is the slice's own size in bytes.
@@ -351,34 +414,28 @@ impl Cell {
     /// row that scrolls off runs it over the full width of the screen, so a 400-column
     /// grid carrying a 54-character line walks 346 blanks before it finds anything.
     ///
-    /// Over the bytes rather than the cells, for the reason [`Cell::bytes`] gives. A cell
-    /// is a trailing blank exactly when its character and its rendition are the blank
-    /// ones, and those are the first eight bytes of it, so the test is one eight-byte
-    /// comparison instead of a load and a compare per field. The link, which trimming
-    /// ignores, is in the bytes after them and is not looked at. On the full-screen
-    /// scroll benchmark that is about three instructions a blank rather than six.
+    /// A cell is a trailing blank exactly when its character and its rendition are the
+    /// blank ones, so the test is one masked compare of the whole word rather than a load
+    /// and a compare per field; the mask is what drops the link, which trimming ignores.
+    /// On the full-screen scroll benchmark that is about three instructions a blank
+    /// rather than six.
     pub fn content_len(cells: &[Cell]) -> usize {
-        let blank = Self::blank(StyleId::DEFAULT);
-        let head = Self::head(Self::bytes(std::slice::from_ref(&blank)));
-        // `rchunks_exact` walks the cells from the end, so the position it reports counts
-        // the trailing blanks, and the content ends that far short of the row's width.
-        let blanks = Self::bytes(cells)
-            .rchunks_exact(size_of::<Self>())
-            .position(|cell| Self::head(cell) != head);
+        let head = Self::blank(StyleId::DEFAULT).head();
+        // Walked from the end, so the position reported counts the trailing blanks, and
+        // the content ends that far short of the row's width.
+        let blanks = cells.iter().rev().position(|cell| cell.head() != head);
         blanks.map_or(0, |blanks| cells.len() - blanks)
     }
 
-    /// The character and rendition of the cell CELL's bytes begin with, as one word.
-    ///
-    /// `from_ne_bytes` because the word is only ever compared with another cell's: the
-    /// bytes are reinterpreted, never read as a number, so this says nothing about the
-    /// machine's endianness.
-    fn head(cell: &[u8]) -> u64 {
-        u64::from_ne_bytes(
-            cell[..HEAD]
-                .try_into()
-                .expect("a cell's head is eight bytes"),
-        )
+    /// This cell's character and rendition, with its link masked away.
+    const fn head(self) -> u64 {
+        self.0 & HEAD_MASK
+    }
+
+    /// The whole cell as one integer, for a consumer comparing cells rather than reading
+    /// them: `Front::edit` asks per column whether two cells differ at all.
+    pub(crate) const fn word(self) -> u64 {
+        self.0
     }
 
     /// The simplest correct statement of what [`Cell::content_len`] must produce.
@@ -388,16 +445,16 @@ impl Cell {
     /// blank when it holds a blank in the default rendition, whatever link it is part of.
     #[cfg(test)]
     fn is_trailing_blank(self) -> bool {
-        self.ch == BLANK && self.is_default_style()
+        self.ch() == BLANK && self.is_default_style()
     }
 
     pub fn is_continuation(self) -> bool {
-        self.ch == CONTINUATION
+        self.ch() == CONTINUATION
     }
 
     /// Columns occupied; wide characters claim two.
     pub fn width(self) -> usize {
-        self.ch.width().unwrap_or(1).max(1)
+        self.ch().width().unwrap_or(1).max(1)
     }
 }
 
@@ -462,7 +519,7 @@ fn decoration(cell: &Cell, marks: Option<&str>, placed: Option<Placement>) -> Op
     }
     placed
         .map(DecoCell::Image)
-        .or_else(|| DecoCell::classify(cell.ch))
+        .or_else(|| DecoCell::classify(cell.ch()))
 }
 
 /// The decoration of a whole run, one entry per character of [`Run::text`].
@@ -1030,9 +1087,9 @@ impl Runs {
     /// this is the per-cell path, and it runs over as many cells as the grid is wide.
     /// DECO is this one character's, and its record joins the run here.
     fn push_cell(&mut self, cell: &Cell, marks: Option<&str>, deco: Option<DecoCell>) {
-        let joined = self.joins(cell.style, cell.link, deco);
+        let joined = self.joins(cell.style(), cell.link(), deco);
         if !joined {
-            self.start(cell.style, cell.link, deco);
+            self.start(cell.style(), cell.link(), deco);
         }
         let Self { text, runs } = self;
         let run = runs.last_mut().expect("a run is open either way");
@@ -1043,7 +1100,7 @@ impl Runs {
         {
             records.push(cell);
         }
-        text.push(cell.ch);
+        text.push(cell.ch());
         run.chars += Chars::ONE;
         run.cols += Cols::ONE;
         // A cell carrying marks is undecorated (see `decoration`), so the marks never land
@@ -1416,7 +1473,7 @@ impl<C: Borrow<[Cell]>, M: Borrow<RowMeta>> RowOf<C, M> {
     /// of pure colour into the scrollback.
     pub fn has_text(&self) -> bool {
         self.extras().iter().any(|(_, e)| e.is_content())
-            || self.cells().iter().any(|c| c.ch != BLANK)
+            || self.cells().iter().any(|c| c.ch() != BLANK)
     }
 
     /// Whether the row holds nothing a resize would need to preserve.
@@ -1428,7 +1485,7 @@ impl<C: Borrow<[Cell]>, M: Borrow<RowMeta>> RowOf<C, M> {
             && self
                 .cells()
                 .iter()
-                .all(|c| c.ch == BLANK && c.is_default_style())
+                .all(|c| c.ch() == BLANK && c.is_default_style())
     }
 
     /// Columns up to the last one holding something, trailing default-styled blanks cut.
@@ -1519,11 +1576,11 @@ impl<C: Borrow<[Cell]>, M: Borrow<RowMeta>> RowOf<C, M> {
             let deco = match (marks, placed) {
                 (Some(_), _) => None,
                 (None, Some(placement)) => Some(DecoCell::Image(placement)),
-                (None, None) => DecoCell::classify(cell.ch),
+                (None, None) => DecoCell::classify(cell.ch()),
             };
             let joins = runs.last().is_some_and(|run| {
-                run.style == cell.style
-                    && run.link == cell.link
+                run.style == cell.style()
+                    && run.link == cell.link()
                     && match (&run.deco, deco) {
                         (None, None) => true,
                         (Some(d), Some(c)) => d.accepts(c),
@@ -1532,18 +1589,18 @@ impl<C: Borrow<[Cell]>, M: Borrow<RowMeta>> RowOf<C, M> {
             });
             if joins {
                 let run = runs.last_mut().expect("joins implies a last run");
-                run.text.push(cell.ch);
+                run.text.push(cell.ch());
                 run.cols += Cols::ONE;
                 if let (Some(d), Some(c)) = (&mut run.deco, deco) {
                     d.push(c);
                 }
             } else {
                 runs.push(Run {
-                    text: String::from(cell.ch),
+                    text: String::from(cell.ch()),
                     cols: Cols::ONE,
-                    style: cell.style,
+                    style: cell.style(),
                     deco: deco.map(Deco::start),
-                    link: cell.link,
+                    link: cell.link(),
                 });
             }
             if let (Some(marks), Some(run)) = (marks, runs.last_mut()) {
@@ -1687,7 +1744,7 @@ impl<C: Borrow<[Cell]>, M: Borrow<RowMeta>> RowOf<C, M> {
             }
             let pen = *cell;
             let start = col;
-            let deco = DecoCell::classify(cell.ch);
+            let deco = DecoCell::classify(cell.ch());
             col += 1;
             // A decorated cell is taken one at a time: consecutive box glyphs join only if
             // `Deco::accepts` says so, which is a per-character question the bulk path
@@ -1699,7 +1756,7 @@ impl<C: Borrow<[Cell]>, M: Borrow<RowMeta>> RowOf<C, M> {
             while col < cells.len() {
                 let next = &cells[col];
                 if !next.is_continuation()
-                    && (!next.same_pen(pen) || DecoCell::classify(next.ch).is_some())
+                    && (!next.same_pen(pen) || DecoCell::classify(next.ch()).is_some())
                 {
                     break;
                 }
@@ -1709,12 +1766,12 @@ impl<C: Borrow<[Cell]>, M: Borrow<RowMeta>> RowOf<C, M> {
                 cells[start..col]
                     .iter()
                     .filter(|c| !c.is_continuation())
-                    .map(|c| c.ch),
+                    .map(|c| c.ch()),
                 // Every cell of the span, continuations included: the scan above ran to
                 // `col` over columns, and that span is the run's width.
                 Cols::new(col - start),
-                pen.style,
-                pen.link,
+                pen.style(),
+                pen.link(),
             );
         }
         runs
@@ -1968,7 +2025,7 @@ impl<C: BorrowMut<[Cell]>, M: BorrowMut<RowMeta>> RowOf<C, M> {
             .iter()
             .position(|cell| !cell.is_continuation())
             .map_or(cells.len(), |n| col + n);
-        let blank = Cell::blank(cells[lead].style);
+        let blank = Cell::blank(cells[lead].style());
         Cell::fill(&mut self.cells_mut()[lead..end], blank);
         self.prune(lead..end, Marks::Keep);
     }
@@ -2153,18 +2210,21 @@ impl<C: BorrowMut<[Cell]>, M: BorrowMut<RowMeta>> RowOf<C, M> {
 mod tests {
     use super::*;
 
-    /// Every byte of a cell is part of its value, which is what [`Cell::bytes`] rests on.
+    /// Every bit of a cell is part of its value, which is what [`Cell::bytes`] rests on.
     ///
-    /// A spread of characters, rendition ids and links, including no link, which is the
-    /// niche: the spare word reads back zero, and two cells compare equal exactly when
+    /// A spread of characters, rendition ids and links, including no link and both field
+    /// maxima: what goes in comes back out, and two cells compare equal exactly when
     /// their bytes do.
     #[test]
-    fn a_cell_is_sixteen_bytes_with_nothing_undefined_in_them() {
+    fn a_cell_is_eight_bytes_that_read_back_as_what_was_packed() {
         let pens = [
             (StyleId::DEFAULT, None),
-            (StyleId::from_raw(u32::MAX), None),
+            (StyleId::from_raw(STYLE_MAX as u32), None),
             (StyleId::from_raw(1), Some(LinkId::from_index(0))),
-            (StyleId::DEFAULT, Some(LinkId::from_index(u32::MAX - 1))),
+            (
+                StyleId::DEFAULT,
+                Some(LinkId::from_index(LINK_MAX as u32 - 1)),
+            ),
         ];
         let cells: Vec<Cell> = pens
             .iter()
@@ -2172,12 +2232,16 @@ mod tests {
                 ['a', CONTINUATION, '\u{10ffff}'].map(|ch| Cell::linked(ch, style, link))
             })
             .collect();
-        for cell in &cells {
-            let bytes = Cell::bytes(std::slice::from_ref(cell));
-            assert_eq!(bytes.len(), 16);
-            assert_eq!(&bytes[12..], &[0, 0, 0, 0], "{cell:?}");
-            let link = u32::from_ne_bytes(bytes[8..12].try_into().unwrap());
-            assert_eq!(link, cell.link.map_or(0, LinkId::get), "{cell:?}");
+        for (cell, &(style, link)) in cells.iter().zip(pens.iter().flat_map(|p| [p; 3])) {
+            assert_eq!(Cell::bytes(std::slice::from_ref(cell)).len(), 8);
+            assert_eq!((cell.style(), cell.link()), (style, link), "{cell:?}");
+            // The link is the one part trailing-blank trimming ignores, so masking it
+            // away must leave the character and the rendition untouched.
+            assert_eq!(
+                cell.head(),
+                Cell::new(cell.ch(), cell.style()).head(),
+                "{cell:?}"
+            );
         }
         for a in &cells {
             for b in &cells {
@@ -2186,6 +2250,30 @@ mod tests {
                 assert_eq!(a == b, same_bytes, "{a:?} vs {b:?}");
             }
         }
+    }
+
+    /// An id too wide for its field degrades to the default rather than to another id.
+    ///
+    /// The one failure a packed cell could introduce and the reason [`Cell::linked`]
+    /// checks: truncation would name a *live* rendition or a live destination, putting
+    /// the child's own colours or its own URL on text that never had them. Unreachable
+    /// through the stores, which collect against the grids -- so this builds the ids by
+    /// hand, as only a test can.
+    #[test]
+    fn an_id_too_wide_for_its_field_degrades_rather_than_aliasing() {
+        let over = Cell::linked(
+            'x',
+            StyleId::from_raw(STYLE_MAX as u32 + 1),
+            LinkId::from_wire(LINK_MAX as u32 + 1),
+        );
+        assert_eq!(over.ch(), 'x');
+        assert_eq!(
+            over.style(),
+            StyleId::DEFAULT,
+            "not rendition 0's neighbour"
+        );
+        assert_eq!(over.link(), None, "not destination 0");
+        assert_eq!(over, Cell::new('x', StyleId::DEFAULT));
     }
 
     #[test]
@@ -2810,7 +2898,7 @@ mod tests {
     #[test]
     fn insert_blank_keeps_the_row_exactly_cols_wide() {
         let plain = |ch| Cell::new(ch, StyleId::DEFAULT);
-        let text = |row: &Row| row.cells().iter().map(|c| c.ch).collect::<String>();
+        let text = |row: &Row| row.cells().iter().map(|c| c.ch()).collect::<String>();
 
         let mut row = Row::new(4);
         for (col, ch) in "abcd".chars().enumerate() {

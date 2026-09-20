@@ -69,7 +69,7 @@ fn run_style_at(t: &Term, row: usize, index: usize) -> Style {
 
 /// The rendition of the cell at ROW, COL.
 fn cell_style(t: &Term, row: usize, col: usize) -> Style {
-    t.style(t.screen().row(row).unwrap().cells()[col].style)
+    t.style(t.screen().row(row).unwrap().cells()[col].style())
 }
 
 mod decrqss;

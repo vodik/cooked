@@ -51,9 +51,9 @@ fn a_declared_width_lays_down_continuation_cells_like_any_wide_character() {
     assert_eq!(t.screen().cursor().col, 4);
     let grid_row = t.screen().row(0).unwrap();
     let cells = grid_row.cells();
-    assert_eq!(cells[0].ch, 'x');
+    assert_eq!(cells[0].ch(), 'x');
     assert!(cells[1].is_continuation() && cells[2].is_continuation());
-    assert_eq!(cells[3].ch, 'y');
+    assert_eq!(cells[3].ch(), 'y');
     // One run: the `y` shares the pen, so it joins the block's run and the column count
     // covers both — three declared cells plus the one the `y` stands on.
     assert_eq!(t.screen().row(0).unwrap().runs().run(0).cols, Cols::new(4));
@@ -144,9 +144,9 @@ fn a_zwj_emoji_family_stands_on_two_cells_and_not_on_six() {
     assert_eq!(t.screen().cursor().col, 3);
     let grid_row = t.screen().row(0).unwrap();
     let cells = grid_row.cells();
-    assert_eq!(cells[0].ch, '\u{1F468}');
+    assert_eq!(cells[0].ch(), '\u{1F468}');
     assert!(cells[1].is_continuation());
-    assert_eq!(cells[2].ch, '|');
+    assert_eq!(cells[2].ch(), '|');
     let runs = t.screen().row(0).unwrap().runs();
     assert_eq!(runs.iter().map(|r| r.cols).sum::<Cols>(), Cols::new(3));
     assert_eq!(
@@ -318,7 +318,7 @@ fn a_variation_selector_resizes_the_cell_it_lands_on() {
     let grid_row = wide.screen().row(0).unwrap();
     let cells = grid_row.cells();
     assert!(cells[1].is_continuation());
-    assert_eq!(cells[2].ch, '|');
+    assert_eq!(cells[2].ch(), '|');
 }
 
 #[test]
@@ -364,7 +364,13 @@ fn cell_chars(t: &Term) -> String {
         .unwrap()
         .cells()
         .iter()
-        .map(|cell| if cell.is_continuation() { '+' } else { cell.ch })
+        .map(|cell| {
+            if cell.is_continuation() {
+                '+'
+            } else {
+                cell.ch()
+            }
+        })
         .collect()
 }
 

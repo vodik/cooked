@@ -363,18 +363,12 @@ impl Front {
         // The first and last columns whose cell or attachments differ. Past both rows'
         // content every cell is a default blank in both, whose bytes are the same, so the
         // cells are only compared up to there -- which on a wide screen leaves most of the
-        // row unread -- and each cell is compared as one 128-bit word.
+        // row unread -- and each cell is one machine word, character, rendition and link
+        // together.
         let old_len = content_len(old, old_extras.iter());
         let new_len = content_len(new, new_extras());
         let bound = old_len.max(new_len).min(cols);
-        let word = |c: &Cell| {
-            u128::from_ne_bytes(
-                Cell::bytes(std::slice::from_ref(c))
-                    .try_into()
-                    .expect("a cell is sixteen bytes"),
-            )
-        };
-        let differs = |c: usize| word(&old[c]) != word(&new[c]);
+        let differs = |c: usize| old[c].word() != new[c].word();
         let mut span = (0..bound).find(|&c| differs(c)).map(|first| {
             let last = (first..bound).rev().find(|&c| differs(c)).unwrap_or(first);
             (first, last + 1)
@@ -529,7 +523,7 @@ pub(super) struct Span {
 fn content_len<'a>(cells: &[Cell], extras: impl Iterator<Item = &'a (u16, Extra)>) -> usize {
     let text = cells
         .iter()
-        .rposition(|c| c.ch != BLANK || !c.is_default_style())
+        .rposition(|c| c.ch() != BLANK || !c.is_default_style())
         .map_or(0, |i| i + 1);
     extras
         .filter(|(_, extra)| extra.is_content())
@@ -553,8 +547,8 @@ fn glyph_run_across(old: &[Cell], new: &[Cell], at: usize) -> Option<(usize, usi
     let glyph = |c: usize| is_glyph(old[c]) || is_glyph(new[c]);
     let spacing = |c: usize| {
         glyph(c)
-            || draws_nothing(old[c].ch)
-            || draws_nothing(new[c].ch)
+            || draws_nothing(old[c].ch())
+            || draws_nothing(new[c].ch())
             // A continuation cell belongs to the run of the cell before it.
             || old[c].is_continuation()
             || new[c].is_continuation()
@@ -582,7 +576,7 @@ fn glyph_run_across(old: &[Cell], new: &[Cell], at: usize) -> Option<(usize, usi
 /// counts though the runs draw it as text. That only ever makes a glyph run look longer
 /// than it is, which widens an edit and never cuts a run Lisp draws.
 fn is_glyph(cell: Cell) -> bool {
-    glyph::classify(cell.ch).is_some()
+    glyph::classify(cell.ch()).is_some()
 }
 
 /// The attachments that change what Emacs draws: everything but semantic marks.

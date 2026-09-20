@@ -790,7 +790,7 @@ impl Screen {
         let cell = if after > before {
             lead_cell.with_char(CONTINUATION)
         } else {
-            Cell::blank(lead_cell.style)
+            Cell::blank(lead_cell.style())
         };
         self.edit(row, |r| {
             // A widening writes continuations over the columns after the cell, and the
