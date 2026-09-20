@@ -190,6 +190,18 @@ impl Filter {
         }
     }
 
+    /// A filter whose link table looks for ids to free once LIMIT destinations are
+    /// held, rather than at the four thousand an ordinary one holds.
+    ///
+    /// For a test to reach a collection within a script a few `OSC 8`s long, the way
+    /// `Term::with_id_limits` does for the grid.
+    #[cfg(test)]
+    fn with_link_limit(limit: usize) -> Self {
+        let mut filter = Self::new();
+        filter.stream.links = LinkStore::with_limit(limit);
+        filter
+    }
+
     /// Parse BYTES and return what Emacs should do about them.
     ///
     /// RETRACT is the caller's answer to "are the characters you were last handed for
@@ -434,6 +446,35 @@ impl Stream {
         self.styles.insert(style)
     }
 
+    /// Free the link ids nothing in the open line, the copy of what was last emitted,
+    /// this feed's produced runs, or the pen's own open link still needs.
+    ///
+    /// The same shape as [`Stream::style_id`]'s collection, with the one addition
+    /// `State::collect_links` also makes over `State::collect_styles`: the pen's own
+    /// open link, which [`Stream::hyperlink`] marks below. A rendition is a *value* the
+    /// marked tables hold, so `style_id` need only mark what already carries one; an
+    /// `OSC 8` link is *only* an id, so a link opened with nothing written under it yet
+    /// has no other home until it is marked here.
+    ///
+    /// There is no grid behind this filter, so `line`, `emitted` and `out.runs` are the
+    /// whole of what can still name an id -- once a line retires, [`Stream::forget`]
+    /// empties `line` and `emitted`, and the next collection this triggers finds nothing
+    /// of the old line left to mark, which is what bounds the store by one open line's
+    /// links rather than by everything a long-running filter has ever seen.
+    fn collect_links(&mut self) {
+        let (line, emitted, runs, link) = (&self.line, &self.emitted, &self.out.runs, self.link);
+        self.links.collect(|mark| {
+            if let Some(id) = link {
+                mark(id);
+            }
+            line.iter()
+                .chain(emitted)
+                .filter_map(|column| column.cell.link())
+                .for_each(&mut *mark);
+            runs.iter().filter_map(|run| run.link).for_each(&mut *mark);
+        });
+    }
+
     // -- retirement and emission -------------------------------------------------
 
     /// Hand the open line over as a finished line and start an empty one.
@@ -565,7 +606,14 @@ impl Stream {
         let Some(uri) = hyperlink_uri(payload) else {
             return;
         };
-        self.link = (!uri.is_empty()).then(|| self.links.intern(&uri).0);
+        if uri.is_empty() {
+            self.link = None;
+            return;
+        }
+        if self.links.is_full() {
+            self.collect_links();
+        }
+        self.link = Some(self.links.intern(&uri).0);
     }
 
     /// `OSC 7 ; file://host/path` -- the child's working directory.
@@ -1033,6 +1081,35 @@ mod tests {
         // parser and would otherwise reach whatever displays the destination.
         let runs = runs("\x1b]8;;https://ex\u{85}ample.com\x1b\\x\n");
         assert!(runs.iter().all(|r| r.link.is_none()));
+    }
+
+    /// The hazard a collection with the wrong marks introduces, and the reason
+    /// `Stream::collect_links` marks the open line rather than only the pen: with no
+    /// grid here, `line` is the one place besides the pen an id can still be held once
+    /// the pen itself has moved on to a different destination.
+    ///
+    /// A limit of one puts the second `OSC 8` under collection pressure before it is
+    /// interned, while "here" -- linked to the first destination -- is still sitting in
+    /// the open line, unterminated. If the collection this presses did not mark `line`,
+    /// it would find nothing live, free the first id, and hand it straight to the
+    /// second destination while "here" still names it -- the same aliasing
+    /// `LinkStore::collect`'s own doc warns a missed mark causes.
+    #[test]
+    fn a_link_the_open_line_still_holds_survives_a_collection_pressed_by_a_new_one() {
+        let mut filter = Filter::with_link_limit(1);
+        filter.feed(
+            b"\x1b]8;;https://first.example/\x1b\\here\x1b]8;;https://second.example/\x1b\\there",
+            true,
+        );
+        let runs = filter.emission().runs.clone();
+        let first = runs.iter().find(|r| r.text == "here").expect("its own run");
+        let id = first.link.expect("linked to the first destination");
+        assert_eq!(
+            filter.uri(id),
+            Some("https://first.example/"),
+            "still on the open line when the second link pressed a collection, so it \
+             must not have been freed out from under it"
+        );
     }
 
     #[test]
