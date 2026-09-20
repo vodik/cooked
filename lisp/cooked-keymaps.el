@@ -287,7 +287,10 @@ spell them, and a chord Emacs binds is left to Emacs."
     ;; block below `define-derived-mode'.
     (dolist (event cooked--mouse-events)
       (define-key map (vector event) #'cooked-mouse-event))
-    map))
+    ;; The wheel beside the text too, or a notch on the fringe of a child doing
+    ;; a raw read is `mwheel-scroll' while the same notch a column to the right
+    ;; is the child's; see `cooked--bind-wheel-areas'.
+    (cooked--bind-wheel-areas map)))
 
 (defvar cooked--meta-overlays nil
   "Alist of (MAP . OVERLAY), the cache behind `cooked--forwarding-map'.

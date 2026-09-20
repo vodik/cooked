@@ -1470,6 +1470,55 @@ order.  A terminal frame never showed this because there the wheel arrives as
     (cooked--update-mouse-grab)
     (should-not cooked--mouse-grab)))
 
+(ert-deftest cooked-the-wheel-is-claimed-on-the-fringe-too ()
+  "A notch over a fringe or a margin belongs to the child as much as one over
+its text, and claiming only the text area did not get it: Emacs reads a mouse
+event outside the text area as two events, the part of the window standing in
+for a prefix key, so the notch is looked up as `left-fringe wheel-up' and
+never as `wheel-up'.  There is no fallback to the plain event, and
+`mouse-wheel-mode' binds every one of those prefixed forms globally -- so the
+notch went to `mwheel-scroll' and scrolled the buffer out from under a
+full-screen program, which outranking `pixel-scroll-precision-mode' did
+nothing to stop.  See `cooked--bind-wheel-areas'."
+  (cooked-tests--with-session
+      '("/bin/sh" "-c" "printf '\\033[?1049h\\033[?1000h\\033[?1006h'; stty raw; cat -v")
+    (should (cooked-tests--settle
+             (lambda () (and cooked--alt
+                             (cooked-mouse-state-enabled cooked--mouse-state)))))
+    (should cooked--mouse-grab)
+    ;; Sanity: the global binding this has to outrank is really there, or the
+    ;; test would pass on an Emacs where nothing claimed the prefix at all.
+    (should mouse-wheel-mode)
+    (should (eq (lookup-key (current-global-map) [left-fringe wheel-up])
+                #'mwheel-scroll))
+    (dolist (area '(left-fringe right-fringe left-margin right-margin))
+      (dolist (event '(wheel-up wheel-down mouse-4 mouse-5))
+        (should (eq (key-binding (vector area event)) #'cooked-mouse-event))))
+    ;; The buttons are not claimed beside the text: a press there has no cell to
+    ;; be reported at, so it stays whatever it was -- the fringe marker's own
+    ;; click among other things.  See `cooked--bind-wheel-areas'.
+    (should-not (eq (key-binding [left-fringe down-mouse-1]) #'cooked-mouse-event))
+    ;; And the notch goes out, at the cursor, for the reason the no-cell case in
+    ;; `cooked-wheel-reaches-a-child-that-asked-for-the-mouse' gives: a fringe
+    ;; has no cell of its own either.
+    (cooked-tests--displayed
+      (let ((last-input-event
+             (list 'wheel-up
+                   (list (selected-window) 'left-fringe '(0 . 0) 0 nil nil nil nil nil)
+                   1)))
+        (cooked-mouse-event)))
+    (let ((case-fold-search nil))
+      (should (cooked-tests--settle
+               (lambda () (string-match-p "\\[<64;[0-9]+;[0-9]+M" (cooked-tests--text))))))
+    ;; The same claim on an alternate screen the child never asked for the mouse
+    ;; on, which is `cooked--wheel-map' rather than `cooked--mouse-map'.
+    (cooked-tests--mouse)
+    (cooked--update-mouse-grab)
+    (should-not cooked--mouse-grab)
+    (should cooked--wheel-grab)
+    (should (eq (key-binding [left-fringe wheel-down]) #'cooked-mouse-event))
+    (should (eq (key-binding [right-margin mouse-5]) #'cooked-mouse-event))))
+
 (ert-deftest cooked-wandering-off-the-cursor-shows-a-ghost-and-snaps-back ()
   "Emacs motions in alt mode leave the child's cursor where it was.
 The ghost marks the way back, the redraw stops yanking point around, and the

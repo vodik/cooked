@@ -59,6 +59,49 @@
   '(wheel-up wheel-down wheel-left wheel-right mouse-4 mouse-5 mouse-6 mouse-7)
   "Events carrying a wheel notch rather than a button that can be held.")
 
+(defconst cooked--wheel-areas
+  '(left-fringe right-fringe left-margin right-margin)
+  "Parts of a window beside the text where a notch still names one of our rows.
+
+`cooked--bind-wheel-areas' binds the wheel under each of them.  The fringes and
+the margins only: they sit level with the child's own rows, so a notch there is
+a notch on the row beside it.  The mode line, the header line and the scroll
+bars are not the buffer's text, and the wheel over those stays Emacs'.")
+
+(defun cooked--bind-wheel-areas (map)
+  "Bind the wheel in MAP beside the text area as well as in it, and return MAP.
+
+A mouse event that landed outside the text area is read as a key sequence of
+*two* events, the part of the window it landed in standing in for a prefix
+key: a notch over the left fringe is looked up as `left-fringe wheel-up' and
+never as `wheel-up'.  Emacs does not fall back to the plain event when the
+prefixed form is unbound, and `mouse-wheel-mode' binds every one of those
+prefixed forms in the *global* map -- `mouse-wheel--create-scroll-keys' spells
+out the fringes, the margins, the scroll bars and both lines -- so a map
+binding `wheel-up' alone loses the notch to `mwheel-scroll' however high in
+the lookup order it sits.  Outranking `pixel-scroll-precision-mode' bought
+`cooked--mouse-map' nothing two pixels to the left of column 0: a child that
+had asked for the mouse was scrolled out from under by a notch on the fringe,
+which is the one thing `cooked--wheel-grab' exists to prevent, and under a
+full-screen program `cooked--pin-alt-windows' then put the picture back a
+command later and visibly.
+
+Under a prefix of its own rather than by pointing the prefix back at MAP: MAP
+also carries the buttons, and a press has no cell on a fringe to be reported
+at -- `cooked--mouse-glyph' declines to give one -- so claiming it here would
+only route it to `cooked--mouse-fallback'.  The notch has an answer without a
+cell, which is the cursor's; see the `wheel' arm of `cooked-mouse-event'.
+
+A fresh prefix map per call rather than one shared constant, because
+`cooked--replace-keymap' rebuilds a map's bindings in place and a map shared
+between two of them would carry a rebuild across."
+  (let ((wheel (make-sparse-keymap)))
+    (dolist (event cooked--wheel-events)
+      (define-key wheel (vector event) #'cooked-mouse-event))
+    (dolist (area cooked--wheel-areas)
+      (define-key map (vector area) wheel)))
+  map)
+
 (defconst cooked--button-events
   '(down-mouse-1 mouse-1 drag-mouse-1
     down-mouse-2 mouse-2 drag-mouse-2
@@ -137,7 +180,8 @@ read.")
     (define-key map [S-down-mouse-1] #'mouse-drag-region)
     (define-key map [S-drag-mouse-1] #'mouse-set-region)
     (define-key map [S-mouse-1] #'mouse-set-point)
-    map)
+    ;; And the notch beside the text as well as on it; see the function.
+    (cooked--bind-wheel-areas map))
   "Mouse bindings for when the child has asked to receive them.
 
 Lives in `emulation-mode-map-alists' rather than in `cooked-raw-map' because a
@@ -183,7 +227,7 @@ release to a child that was never told of the press.  See
   (let ((map (make-sparse-keymap)))
     (dolist (event cooked--wheel-events)
       (define-key map (vector event) #'cooked-mouse-event))
-    map)
+    (cooked--bind-wheel-areas map))
   "Wheel bindings for an alt screen the child never asked for the mouse on.
 
 The alternate screen is a rectangle the size of the window, and
