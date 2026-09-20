@@ -23,7 +23,6 @@ use super::super::glyph;
 use super::super::grid::Grid;
 use super::super::screen::{Departed, Direction, Screen, Shift};
 use super::super::units::{Chars, Cols};
-use super::screens::ScreenId;
 use super::{Cursor, DamagedRow, Edit};
 
 /// What the copy knows about one row, besides its cells.
@@ -100,6 +99,55 @@ impl FrontRow {
     }
 }
 
+/// How Emacs lays out the screen being presented, computed once by the caller.
+///
+/// Four facts that all follow from which of the two screens is up, and which [`Front::present`]
+/// used to ask of a screen id four separate times. The primary screen is a transcript,
+/// laid out down to its content and continuing the scrollback above it; the alternate is a
+/// full-screen program's picture, laid out whole and carrying none of the transcript's
+/// marks.
+#[derive(Debug, Clone, Copy)]
+pub(super) struct Layout {
+    /// Where Emacs' screen region ends: `:used' on the primary, whose buffer holds no line
+    /// past the content, and the whole grid on the alternate. See [`Front::held`].
+    ends: usize,
+    /// How far down a row Emacs trimmed can have grown back over: the primary's content
+    /// again, and nowhere on the alternate, whose region is the whole grid already and so
+    /// never grows over a trimmed row.
+    regrown_to: usize,
+    /// Whether row 0 continues the scrollback above it, which only a primary screen with a
+    /// non-empty head does, so that its text in the buffer begins mid-line.
+    seam: bool,
+    /// Whether a changed row is worth sending as an edit even when a neighbour changed
+    /// too. The primary's rows carry the transcript's markers, overlays and semantic
+    /// marks, which the block rewrite that coalescing buys destroys; the alternate's carry
+    /// none. See [`Front::present`], where the trade is measured.
+    edits: bool,
+}
+
+impl Layout {
+    /// The primary screen, holding text down to row USED and continuing the scrollback
+    /// when HEAD is not empty.
+    pub(super) fn primary(used: usize, head: Chars) -> Self {
+        Self {
+            ends: used,
+            regrown_to: used,
+            seam: !head.is_zero(),
+            edits: true,
+        }
+    }
+
+    /// The alternate screen, a picture HEIGHT rows tall.
+    pub(super) fn alternate(height: usize) -> Self {
+        Self {
+            ends: height,
+            regrown_to: 0,
+            seam: false,
+            edits: false,
+        }
+    }
+}
+
 /// Emacs' copy of the live screen; see the module comment.
 ///
 /// The previous frame of the double buffer and nothing else. How many of the rows that
@@ -127,8 +175,8 @@ pub(super) struct Front {
 }
 
 impl Front {
-    /// Show BACK, the grid of screen OF, and hand back the rows Emacs does not already
-    /// have, recording them as sent.
+    /// Show BACK, the grid Emacs lays out as LAYOUT says, and hand back the rows Emacs
+    /// does not already have, recording them as sent.
     ///
     /// The whole delta, in the order its steps depend on each other:
     ///
@@ -149,7 +197,7 @@ impl Front {
     /// on the alternate screen only when it has no changed neighbour; see [`Front::edit`].
     pub(super) fn present(
         &mut self,
-        of: ScreenId,
+        layout: Layout,
         back: &Screen,
         cursor: Cursor,
         promoted: Option<Shift>,
@@ -184,8 +232,7 @@ impl Front {
         // hands to scrollback, and two consumers draining the same terminal at different
         // moments -- a buffer no window shows drains without the screen for minutes --
         // would end up with different transcripts of the same bytes.
-        let used = if of.is_alternate() { 0 } else { back.used() };
-        let regrown = (self.held..used).filter(|&row| {
+        let regrown = (self.held..layout.regrown_to).filter(|&row| {
             back.row(row)
                 .is_some_and(|row| !row.is_blank() || row.wrapped())
         });
@@ -200,9 +247,6 @@ impl Front {
             damaged.sort_unstable();
             damaged.dedup();
         }
-        // Row 0 of the primary screen continues the scrollback above it when the head is
-        // not empty, so its text in the buffer begins mid-line.
-        let seam = !of.is_alternate() && !back.head().is_zero();
         let at = |index: usize| (cursor.row == index).then_some(cursor.col as u16);
         let changed: Vec<usize> = damaged
             .into_iter()
@@ -241,8 +285,8 @@ impl Front {
                 // two on either screen.
                 let isolated = (i == 0 || changed[i - 1] + 1 != index)
                     && changed.get(i + 1).is_none_or(|&next| next != index + 1);
-                let edit = (isolated || !of.is_alternate())
-                    .then(|| self.edit(index, row, at(index), seam && index == 0))
+                let edit = (isolated || layout.edits)
+                    .then(|| self.edit(index, row, at(index), layout.seam && index == 0))
                     .flatten()
                     .map(|span| Edit {
                         char_start: span.char_start,
@@ -261,11 +305,7 @@ impl Front {
             .collect();
         // Emacs shapes its screen region to the rows the emulator says are in use, so
         // whatever it held below them is gone; see [`Front::held`].
-        self.held = if of.is_alternate() {
-            self.grid.height()
-        } else {
-            used
-        };
+        self.held = layout.ends;
         rows
     }
 

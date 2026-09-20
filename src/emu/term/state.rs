@@ -573,6 +573,12 @@ impl State {
         let events = self.settle_events(&marks);
         let levels = Levels::of(self);
         let cursor_chars = cursor_chars(self.screen(), levels.cursor);
+        let used = self.screen().used();
+        let layout = if self.shown.is_alternate() {
+            front::Layout::alternate(self.screen().height())
+        } else {
+            front::Layout::primary(used, self.screen().head())
+        };
         let Self {
             front,
             screens,
@@ -580,7 +586,7 @@ impl State {
             ..
         } = self;
         let rows = front.present(
-            shown.id(),
+            layout,
             &screens[shown.id()],
             levels.cursor,
             promoted,
