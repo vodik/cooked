@@ -1039,6 +1039,24 @@ costs its own contribution and neither the rest of the hook nor the drain.")
 ;; the resize lands -- output drained in the same drain -- while the buffer's
 ;; logical lines are exactly what the rewrap preserves, with nothing new on the
 ;; wire.
+;;
+;; That is not a worry about a race but the ordinary case, and it was measured
+;; rather than argued when the split-brain survey proposed handing the cells
+;; down: `cooked--sync-size' runs from a window hook and calls `cooked--resize'
+;; at once, while the reader thread has been feeding the grid since the last
+;; drain, so a mark the buffer reports on screen row 2 can be off the grid
+;; altogether by the time the resize is issued -- see
+;; `cooked-a-rewrap-carries-the-mark-the-buffer-holds-not-the-grid-s'.  A cell
+;; registered there would name whatever line the grid has since put on row 2.
+;; Naming the row absolutely instead would answer it, but Lisp has no absolute
+;; row: `anchor_to_lisp' in src/wire.rs hands over `(screen ROW . CHARS)' and
+;; `(scrolled . OFFSET)' precisely so that it never has to hold one.
+;;
+;; What holds the two implementations together instead is an oracle rather than
+;; a shared constant: `cooked-a-rewrap-puts-the-mark-where-the-core-puts-its-own'
+;; puts the mark and an OSC 133 mark on the same character and requires every
+;; width to leave them on the same one, so the arithmetic here is checked against
+;; `Logical' re-laying the line rather than against itself.
 
 (cl-defstruct (cooked-relocation (:constructor cooked--relocation-make) (:copier nil))
   "A position `cooked--render-rows' has to carry across a run it rewrites.

@@ -1531,6 +1531,114 @@ the cursor is kept on its character the same way."
       (should (equal (cooked-tests--text)
                      "one\nabcdefghijKLMNOPQRST\nab        cd")))))
 
+(ert-deftest cooked-a-rewrap-puts-the-mark-where-the-core-puts-its-own ()
+  "The mark and a semantic mark on the same character stay on it together.
+
+The oracle for `cooked--logical-place' and `cooked--wrap-blanks'.  Emacs carries
+the mark across a rewrap by counting its own `cooked-wrap' newlines and the
+blanks a `blank' one hides, while the core carries an OSC 133 mark on the same
+cell by re-laying `Logical' and reporting where it landed -- two mechanisms with
+nothing in common but the rule that a wrapped row is the screen's full width.
+Put both on `d' of a line whose first row is `ab' and eight blanks, and every
+width has to leave them on the same character: agreeing with each other is the
+only check either one has that it agrees with the grid.
+
+The widths are chosen to move the blanks about.  Twelve cells of line: at seven
+they straddle the row boundary, at thirty they are all interior to one row, at
+five they fill a whole row of their own, and at four they fill two."
+  (let ((cooked-rejoin-wrapped-lines t))
+    (cooked-tests--with-fed-screen 5 10
+      (cooked-tests--fed "one\r\nab        c\e]133;C\ad")
+      (set-mark cooked--command-start)
+      (should (equal (cooked-tests--at (mark t) 1) "d"))
+      (dolist (cols '(7 30 5 4 10))
+        (cooked-tests--fed-resize 5 cols)
+        (should (equal (cooked-tests--at (mark t) 1) "d"))
+        (should (= (mark t) (marker-position cooked--command-start))))
+      (should (equal (cooked-tests--text) "one\nab\ncd")))))
+
+(ert-deftest cooked-a-rewrap-carries-the-mark-the-buffer-holds-not-the-grid-s ()
+  "A resize while the grid has run ahead of the buffer still finds the mark.
+
+Why the carrying is done in Emacs against Emacs' own lines rather than by
+handing the core a cell to relocate, the way a semantic mark is relocated.
+`cooked--sync-size' runs from a window hook and issues `cooked--resize'
+immediately; the reader thread has been feeding the grid all along and Emacs
+drains on its own schedule, so the rows the buffer is showing when the resize
+goes out are the rows as of the *last* drain.  Here six lines arrive with no
+drain between, which puts the marked row off the grid entirely and into the
+core's pending scrollback, while the buffer still reports the mark on screen
+row 2 -- a row the grid has since given to another line's text.  The place the
+mark is carried as is counted in the buffer, which still holds what the mark
+names, so the resize leaves it on `MARK'."
+  (let ((cooked-rejoin-wrapped-lines t))
+    (cooked-tests--with-fed-screen 5 10
+      (cooked-tests--fed "one\r\ntwo\r\nMARKHERE\r\nfour")
+      (set-mark (save-excursion
+                  (goto-char (cooked--screen-start-position))
+                  (search-forward "MARK")
+                  (- (point) 4)))
+      (should (equal (cooked--screen-cell (mark t)) '(2 . 0)))
+      ;; Fed but not drained: the grid has moved on and the buffer has not.
+      (cooked--feed cooked--session "\r\nA\r\nB\r\nC\r\nD\r\nE\r\nF")
+      (should (equal (cooked--screen-cell (mark t)) '(2 . 0)))
+      (cooked-tests--fed-resize 5 6)
+      (should (equal (cooked-tests--at (mark t) 4) "MARK"))
+      ;; And it is above the live screen now, the row having scrolled away while
+      ;; Emacs was not looking.
+      (should (< (mark t) (cooked--screen-start-position))))))
+
+(ert-deftest cooked-a-rewrap-keeps-a-wandered-point-on-a-wide-character ()
+  "Point parked on a wide character is still on it at every width.
+
+The awkward case for a place counted in characters: `日本語abc' is six characters
+and nine columns, so the column a character is on and how far into the line it is
+part company, and a rewrap that reaches a row boundary mid-character has to keep
+the character whole.  At six columns `本' is column 2 of row 0, at four it is
+column 2 of row 0 with `語' pushed onto row 1, and at nine and twelve the line is
+one row and `本' is column 2 of it -- three characters into the line throughout.
+
+Six columns to begin with, not five, because a wide character that will not fit
+at the end of a row leaves a blank cell there, and `Logical' carries a wrapped
+row's trailing blanks into the line as content; see the hand-back for this task."
+  (let ((cooked-rejoin-wrapped-lines t))
+    (cooked-tests--with-fed-screen 5 6
+      (cooked-tests--fed "one\r\n日本語abc")
+      (goto-char (save-excursion
+                   (goto-char (cooked--screen-start-position))
+                   (search-forward "本")
+                   (1- (point))))
+      (setq cooked--wandered t)
+      (dolist (cols '(4 9 12 6))
+        (cooked-tests--fed-resize 5 cols)
+        (should (equal (cooked-tests--at (point) 1) "本")))
+      (should (equal (cooked-tests--text) "one\n日本語\nabc")))))
+
+(ert-deftest cooked-a-rewrap-keeps-a-wandered-point-at-the-end-of-a-padded-row ()
+  "Point in the blanks a wrapped row hides lands back in them.
+
+The other awkward case.  The buffer writes `ab' for a row the child left as `ab'
+and eight blanks, so point at the end of that buffer line is standing where the
+grid has eight cells of nothing.  There is no character there to be carried to,
+and the place it is carried as has to be the end of `ab' rather than the start
+of `cd' -- which is the same buffer position once the blanks are gone, and a
+different one at every width where they are not."
+  (let ((cooked-rejoin-wrapped-lines t))
+    (cooked-tests--with-fed-screen 5 10
+      (cooked-tests--fed "one\r\nab        cd")
+      (goto-char (save-excursion
+                   (goto-char (cooked--screen-start-position))
+                   (search-forward "ab")
+                   (point)))
+      (setq cooked--wandered t)
+      (should (eolp))
+      (dolist (cols '(7 30 10))
+        (cooked-tests--fed-resize 5 cols)
+        (should (equal (cooked-tests--at (- (point) 2) 2) "ab"))
+        (should (equal (cooked-tests--at (point) 1)
+                       (if (= cols 30) " " "\n"))))
+      (should (equal (cooked-tests--text) "one\nab\ncd")))))
+
 (ert-deftest cooked-a-row-scrolled-above-a-status-line-keeps-what-was-on-it ()
   "A region from the top row scrolls into history as the whole screen does.
 
