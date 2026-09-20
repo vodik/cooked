@@ -223,7 +223,7 @@ the entry saves.
 
 The rows already on screen were measured, scaled and trimmed under the stamp
 that has just gone, so a move also has the core send every row again with
-`cooked--forget-sent-rows'.  Otherwise the copy of the screen the core keeps
+`cooked--redraw-live-rows'.  Otherwise the copy of the screen the core keeps
 would leave them out: a zoom that keeps the grid size, followed by a program
 repainting the same cells, would keep every CJK character on screen scaled for
 the old font.  The rows are damaged rather than only forgotten, for a screen
@@ -234,7 +234,7 @@ no earlier layout to disagree with."
     (if (equal (car cooked--wrap-memo) stamp)
         (cdr cooked--wrap-memo)
       (when cooked--wrap-memo
-        (cooked--forget-sent-rows 'redraw))
+        (cooked--redraw-live-rows))
       (cdr (setq cooked--wrap-memo
                  (cons stamp
                        (list (cooked--ascii-fixed-pitch-p window)

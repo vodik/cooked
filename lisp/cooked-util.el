@@ -381,7 +381,27 @@ What stays recorded is what the user typed at the prompt, the one piece of the
 buffer that is theirs.  Run `cooked--check-undo-anchor' *after* the macro and
 never inside it, wherever BODY moves the input line: inside, the discard would
 land on the binding above and be thrown away with it while the anchor it records
-stayed."
+stayed.
+
+*A third obligation, which this macro cannot discharge for BODY.*  The core
+keeps a copy of what Emacs is showing and leaves a damaged row out of a drain
+when its cells match that copy, so BODY editing a live row -- anything below
+`cooked--screen-start' -- must leave that copy true or say that it has not.
+The three that edit one today, and which of them owes anything:
+
+  - `cooked--guard-row-width' deletes characters off a row Emacs laid out wider
+    than the grid budgeted, and the buffer's row then differs from what the core
+    sent for as long as it stands.  It owes `cooked--row-unsent' for that row,
+    and calls it.
+  - `cooked--pad-to-cursor' appends the trailing blanks the render trimmed.  The
+    grid has those blanks, so the row matches the copy again and nothing is
+    owed; the drain's LENGTH already counts them.
+  - `cooked-ime--compose' puts a preedit at the cursor and takes it back in the
+    same command.  A drain in between would see a row that is not the grid's, so
+    the answer is not to say anything but to have no drain: the composition is
+    on `cooked-inhibit-redraw-functions' for its whole life.
+
+A fourth would owe the first of those answers."
   (declare (indent 0) (debug body))
   `(let ((inhibit-read-only t)
          (buffer-undo-list t))
@@ -531,44 +551,35 @@ will not recognise an ST-terminated answer."
 (defvar cooked--redraw-hook nil
   "Run in a cooked buffer whose every row is about to be rendered again.
 
-That is, from `cooked--forget-sent-rows' with REDRAW, whose callers all mean
-that the same cells are about to be drawn differently.  A cache holding
-something measured under the old drawing adds itself here to be emptied first,
-since this file sits below the files that own those caches: the box-drawing
-spec cache in cooked-deco.el holds an `:ascent' measured from a font the
-layout stamp has just said is gone.")
+That is, from `cooked--redraw-live-rows', whose callers all mean that the same
+cells are about to be drawn differently.  A cache holding something measured
+under the old drawing adds itself here to be emptied first, since this file
+sits below the files that own those caches: the box-drawing spec cache in
+cooked-deco.el holds an `:ascent' measured from a font the layout stamp has
+just said is gone.")
 
-(defun cooked--forget-sent-rows (&optional redraw)
-  "Make the core send every live row again the next time it is damaged.
+(defun cooked--redraw-live-rows ()
+  "Damage every live row, so the next drain sends the whole screen again.
 
-The core leaves a damaged row out of a drain when its cells match what it last
-sent, which is right while the text Emacs holds for the row is still what that
-drain rendered.  Anything that changes how the same cells are drawn breaks
-that without touching a character.  An OSC 11 background set is one: the faces
-on the rows were resolved against the old colours, and a full-screen program
-that repaints its frame in reply expects to see it in the new ones.
+For a change a row has to be rendered again to show at all, rather than one a
+repaint merely picks up: a zoom leaves the glyph scaling on a row measured
+against the old font, and a shell sitting at its prompt never repaints to
+replace it.
 
-With REDRAW the rows are damaged as well, so the next drain sends every one of
-them whether the child repaints or not.  That is for a change a row has to be
-rendered again to show at all, rather than one a repaint merely picks up: a
-zoom leaves the glyph scaling on a row measured against the old font, and a
-shell sitting at its prompt never repaints to replace it.  A theme change is
-not one of those any more: a cell's colours are faces the theme moves under
-it -- see `cooked--theme-changed' -- so the copy is cleared here without
-REDRAW, and the rows come out in the new colours as they are.
+Damaging is the strong form, and the only one anything asks for now.  The weak
+one -- telling the core its copy of the screen is stale without damaging
+anything, so that a repaint of the same cells is not matched against it -- has
+two callers left and neither goes through here: `cooked--ready' says it for a
+drain Emacs failed to apply, and `cooked--guard-row-width' for the one row it
+trimmed.  A theme change needs neither; see the comment at the foot of
+cooked-screen.el.
 
-The one way the copy is cleared, so that the theme, the layout stamp moving and
-the options that change rendering all mean the same thing by it.  On
-`cooked-theme-change-hook', which runs with each buffer current; from
-`cooked--wrap-cache' when `cooked--layout-stamp' moves; and from
-`cooked--set-rendering-option'."
+From `cooked--wrap-cache' when `cooked--layout-stamp' moves, and from
+`cooked--set-rendering-option' by way of `cooked--redraw-every-screen'."
   (when (user-ptrp cooked--session)
-    (if redraw
-        (progn
-          (run-hooks 'cooked--redraw-hook)
-          ;; Damaging every row forgets the copy too; see `Term::touch_all'.
-          (cooked--redraw cooked--session))
-      (cooked--row-unsent cooked--session nil))))
+    (run-hooks 'cooked--redraw-hook)
+    ;; Damaging every row forgets the copy too; see `Term::touch_all'.
+    (cooked--redraw cooked--session)))
 
 (declare-function cooked--drain-and-apply "cooked-render")
 
@@ -598,7 +609,7 @@ buffer's rows are damaged and drained, rather than left for the child to
 repaint, which it may never do."
   (cooked--dolist-buffers
     (when (user-ptrp cooked--session)
-      (cooked--forget-sent-rows 'redraw)
+      (cooked--redraw-live-rows)
       (cooked--drain-and-apply))))
 
 (defconst cooked--source-directory

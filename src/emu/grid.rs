@@ -2,7 +2,7 @@
 //!
 //! Both halves of the double buffer are one of these: the emulator's grid in
 //! [`Screen`](super::screen::Screen), and the copy of what Emacs shows in
-//! [`Front`](super::term::front::Front). They differ in what they hang off a row -- a
+//! `Front`. They differ in what they hang off a row -- a
 //! `RowMeta` of attachments and a wrap flag against a record of how Emacs last drew it --
 //! and in nothing else, so the type is generic over that and the rest is written once.
 //!
