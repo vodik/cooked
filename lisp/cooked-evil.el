@@ -260,6 +260,69 @@ took a command that would have done it anyway."
   (unless (advice-member-p #'cooked-evil--no-unbidden-edit editor)
     (advice-add editor :around #'cooked-evil--no-unbidden-edit)))
 
+;; A different kind of unbidden edit: not evil doing something to the buffer,
+;; but evil mistaking the buffer doing something to itself for the user typing.
+
+(defvar evil-current-insertion)
+
+(defun cooked-evil--apply-is-not-typing (fn &rest args)
+  "Call FN, `cooked--apply', with ARGS, without evil mistaking it for typing.
+
+`cooked--apply' rewrites the live screen with `after-change-functions' running
+-- deliberately, see `cooked--render-block' -- and while evil is in insert
+state that hook holds `evil-track-last-insertion' alongside whatever else is
+there.  That function does not ask who made a change: any edit whose region
+touches or extends `evil-current-insertion' is folded into it, on the
+assumption that everything arriving through the hook while insert state is
+active is a keystroke.  Confirmed with a real session: type two characters at
+a prompt, let an unrelated line of a background job's output land while still
+in insert state, leave insert state, and without this advice,
+`evil-last-insertion' -- and so the \\=`\".  register -- comes back holding
+the output rather than the two characters typed.
+
+What answers depends on who is editing the line, which `cooked--input-state-p'
+already knows.  Where Emacs is -- an ordinary prompt, `self-insert-command'
+building the pending input the way it would in any buffer -- a keystroke never
+reaches this function at all, so nothing here needs to tell one apart from the
+child's own output: the hook keeps running, and every edit that does arrive is
+the child's.  Where the child is instead -- a full-screen program, or a shell
+whose own line editor is doing the work, `cooked-send-key' forwarding every
+key and the far end's echo the only place any of it ever appears -- a
+keystroke's echo and unrelated output are indistinguishable byte for byte,
+so the hook is taken off `after-change-functions' for the call outright.
+
+Either way, a rewrite can still move the pending input out from under a range
+evil is already tracking, which is a second, narrower way to end up holding
+the wrong text even without adding anything new: `cooked--input-start-position'
+is compared before and after, mirroring `cooked--check-undo-anchor', which
+finds the same movement invalidates undo for the same reason.  A range that has
+gone stale that way is discarded rather than left to be read back as whatever
+now sits at its old positions -- the buffer having moved on undetected is
+worse than evil simply not knowing what was typed.
+
+Guarded on `evil-local-mode' throughout, so an evil-less Emacs -- or a cooked
+buffer evil was never turned on in -- pays for none of this: `bound-and-true-p'
+answers nil and FN runs exactly as called.  Every other
+`after-change-functions' entry, `jit-lock-after-change' foremost, keeps running
+throughout either branch: this narrows what the hook is exempt from rather
+than suspending it, which is what `cooked--apply' already declines to do --
+see the commentary in `cooked-render.el' pinned by
+`cooked-a-repaint-announces-its-rewrite-and-not-its-properties'."
+  (if (not (bound-and-true-p evil-local-mode))
+      (apply fn args)
+    (let* ((editing (cooked--input-state-p))
+           (anchor (and editing (cooked--input-start-position)))
+           (after-change-functions
+            (if editing
+                after-change-functions
+              (remq 'evil-track-last-insertion after-change-functions))))
+      (prog1 (apply fn args)
+        (when (and editing evil-current-insertion
+                   (not (eql anchor (cooked--input-start-position))))
+          (setq evil-current-insertion nil))))))
+
+(advice-add 'cooked--apply :around #'cooked-evil--apply-is-not-typing)
+
 (defun cooked-evil-sync ()
   "Match evil's state to who owns the keyboard.
 A TUI needs every keystroke, so evil must not be interpreting them; at a prompt

@@ -5818,6 +5818,47 @@ every layer invited onto that hook inherits it."
       (should (cooked-tests--settle (lambda () (not (eq seen 'never)))))
       (should (equal seen '(t t))))))
 
+(ert-deftest cooked-evil-last-insertion-does-not-pick-up-the-childs-output ()
+  "A background job's output, arriving mid-insert, must not become `.=insertion'.
+
+`evil-track-last-insertion' hangs on `after-change-functions', which
+`cooked--apply' runs live by design -- see
+`cooked-state-change-hook-runs-inside-the-childs-edit'.  It does not ask who
+made a change, so a line the child printed while the user was still in insert
+state at the prompt used to be folded into `evil-current-insertion' along
+with what was actually typed: leaving insert state left `evil-last-insertion',
+and so the \\=`\". register, holding the output rather than the two
+characters typed.
+
+`.' is not on this path at all -- evil-repeat replays the keys pressed, via
+`evil-repeat-info', regardless of what the buffer did meanwhile -- so it
+already survived the interleaved output before any fix here; asserted
+alongside `evil-last-insertion' so a change to one is not mistaken for
+covering both."
+  :tags '(evil)
+  (skip-unless (require 'evil nil t))
+  (require 'cooked-evil)
+  (evil-mode 1)
+  (cooked-tests--with-session '("/bin/sh" "-c" "printf '$ '; cat")
+    (should (cooked-tests--settle
+             (lambda () (and (cooked--input-state-p) (cooked--input-start-position)))))
+    (cooked--refresh-keymap)
+    (cooked-tests--display-buffer)
+    (evil-normal-state)
+    (cooked-tests--type "i")
+    (cooked-tests--type "a b")
+    (should (cooked-tests--settle (lambda () (string-match-p "ab\\'" (cooked-tests--text)))))
+    ;; A background job's output, landing while insert state is still active.
+    (cooked-tests--negotiate (string-to-multibyte "\r\nBACKGROUND-OUTPUT\r\n"))
+    (should (cooked-tests--settle
+             (lambda () (string-match-p "BACKGROUND-OUTPUT" (cooked-tests--text)))))
+    (cooked-tests--type "<escape>")
+    (should-not (and evil-last-insertion
+                     (string-match-p "BACKGROUND-OUTPUT" evil-last-insertion)))
+    ;; `.' still replays the two characters actually typed.
+    (cooked-tests--type ".")
+    (should (cooked-tests--settle (lambda () (string-match-p "aabb" (cooked-tests--text)))))))
+
 (ert-deftest cooked-evil-insert-state-forwards-what-a-program-needs ()
   "Insert state over a child that owns the keyboard forwards like emacs state.
 
