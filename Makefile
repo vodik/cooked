@@ -184,7 +184,12 @@ lisp-test: module
 # `lisp-test-parallel' are unchanged and still run everything the suite has, so
 # nothing loses coverage by default; this selector only carves out a fast subset
 # for the inner loop.  `lisp-test-stress' below runs the third kind alone.
-QUICK_SELECTOR := (not (or (tag pty) (tag stress) (tag tmux)))
+#
+# `script' is the fourth: the tests that drive a real fish, zsh or bash under
+# script(1) and read back what it printed.  They spawn no session, so they are
+# not `pty', but they wait on a real shell all the same -- the four fish ones
+# take ten seconds apiece, which was two thirds of this target's whole run.
+QUICK_SELECTOR := (not (or (tag pty) (tag stress) (tag tmux) (tag script)))
 
 # The stress-tagged tests alone: loops built to hunt a race by running many
 # times rather than by asserting a single outcome, `cooked-spawn-initial-state-
