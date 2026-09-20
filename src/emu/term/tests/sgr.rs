@@ -447,3 +447,22 @@ fn an_underline_colour_and_a_link_reach_the_scrollback_with_their_characters() {
     assert_eq!(t.style(run.style).underline, Color::Indexed(196));
     assert!(t.style(run.style).attrs.contains(Attrs::UNDERLINE));
 }
+
+/// The font table is read by the row layout hash and by nothing else, so a drain that
+/// built no row carries none of it -- a live truecolor gradient holds thousands of
+/// renditions, and a child that only scrolled or only rang the bell would be copying one
+/// byte of each for a reader that does not exist.
+#[test]
+fn only_a_drain_with_rows_carries_the_font_table() {
+    let mut t = term(3, 10, b"\x1b[1mbold\x1b[0m");
+    assert!(
+        !t.drain().fonts.is_empty(),
+        "the damaged row's layout hash needs it"
+    );
+    t.feed(b"\x07");
+    let delta = t.drain();
+    assert!(delta.rows.is_empty());
+    assert!(delta.fonts.is_empty());
+    assert!(t.drain_hidden().fonts.is_empty());
+    assert!(t.drain_scrolled().fonts.is_empty());
+}

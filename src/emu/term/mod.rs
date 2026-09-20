@@ -540,6 +540,10 @@ pub struct Delta {
     pub styles: Vec<(StyleId, Style)>,
     /// Which renditions change the font, indexed by [`StyleId`], for the layout hash the
     /// row table carries; see `StyleStore::font_bits`.
+    ///
+    /// Empty on a drain with no `rows`, which is every drain that left the screen out and
+    /// every whole drain of a child that only scrolled: the hash is the one reader, and a
+    /// block with no row to hash reads nothing.
     pub fonts: Vec<u8>,
     /// Scrolled-off lines, already reduced to styled runs.
     pub scrolled: Vec<Scrolled>,

@@ -550,7 +550,16 @@ impl State {
         // Last, after everything that could have named a new id: the rows, edits and
         // scrollback above were all built from cells written before this drain began.
         let styles = self.styles.take_unsent();
-        let fonts = self.styles.font_bits().to_vec();
+        // One byte per live rendition, and `Block::push_run` reads it for the rows and the
+        // edits alone. A drain with neither -- a child that only scrolled, or only rang the
+        // bell -- would be copying a table nothing looks at, and a truecolor gradient holds
+        // thousands of renditions live. An empty table is what the block already takes to
+        // mean "no run changes the font", which is the truth when there is no run to hash.
+        let fonts = if rows.is_empty() {
+            Vec::new()
+        } else {
+            self.styles.font_bits().to_vec()
+        };
         let screen = self.screen();
         Delta {
             images,
@@ -610,7 +619,6 @@ impl State {
         let images = std::mem::take(&mut self.pending_images);
         let links = std::mem::take(&mut self.pending_links);
         let styles = self.styles.take_unsent();
-        let fonts = self.styles.font_bits().to_vec();
         let levels = Levels::of(self);
         let screen = self.screen();
         let cursor_chars = cursor_chars(screen, levels.cursor);
@@ -618,7 +626,8 @@ impl State {
             images,
             links,
             styles,
-            fonts,
+            // No `fonts`: the table is read for the rows and the edits, and this drain
+            // builds neither. `..Delta::default()` below leaves it empty.
             height: screen.height(),
             width: screen.width(),
             used: screen.used(),
