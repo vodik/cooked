@@ -1,6 +1,8 @@
 //! The addressable grid: cursor motion, scrolling regions, erasure, and damage tracking.
 
-use super::cell::{CONTINUATION, Cell, Extra, MarkId, Pen, Row, RowMeta, RowMut, RowRef, Runs};
+use super::cell::{
+    CONTINUATION, Cell, Extra, MarkId, Pen, Row, RowMeta, RowMut, RowRef, Runs, Wrap,
+};
 use super::image::{CellSize, ImageId, Placement};
 use super::style::StyleId;
 use super::units::{Chars, Cols};
@@ -330,6 +332,11 @@ impl Departed {
         self.runs.chars()
     }
 
+    /// Columns of its logical line this row covers; see [`Screen::carried`].
+    fn cols(&self) -> Cols {
+        self.runs.cols()
+    }
+
     /// `line_runs` rather than `runs`: these rows are becoming buffer text as part of a
     /// logical line, and a continuation row has to keep the blanks that are interior to
     /// it. See [`Row::line_runs`].
@@ -435,18 +442,17 @@ pub struct Screen {
     /// would chunk the leading fragment as though it began a line, and the buffer would show
     /// a row wider than the window.
     ///
-    /// Counted in rows because a row that leaves mid-line is exactly `cols` wide
-    /// ([`Row::line_runs`] keeps its trailing blanks), so `carried * cols` is the head's
-    /// width. The seam fragment [`Logical::take_front`] cuts is narrower, but it exists to
-    /// top the head up to whole rows at the new width, so [`Screen::reflow`] restores the
-    /// property.
-    carried: usize,
+    /// Counted in columns rather than in rows: a row that leaves mid-line is usually
+    /// exactly `cols` wide, since [`Row::line_runs`] keeps its trailing blanks, but a row
+    /// a wide character wrapped early is short of that by the padding it left, and so is
+    /// the seam fragment [`Logical::take_front`] cuts.
+    carried: Cols,
     /// The same head in characters of the text Emacs holds, which is what
     /// [`Screen::head`] reports.
     ///
-    /// Not `carried * cols`: a wide character is one character on two columns and a
-    /// combining mark a character on none, so `日本` handed over as a row of four columns
-    /// is two characters in the buffer, and `e\u{301}` on one column is two.
+    /// Not the same number as `carried`: a wide character is one character on two columns
+    /// and a combining mark a character on none, so `日本` handed over as a row of four
+    /// columns is two characters in the buffer, and `e\u{301}` on one column is two.
     carried_chars: Chars,
     /// How many more rows leaving the top keep a copy of themselves in [`Departed::row`].
     ///
@@ -496,7 +502,7 @@ impl Screen {
             shifts: Shifts::default(),
             touches: 0,
             tabs: default_tabs(cols),
-            carried: 0,
+            carried: Cols::ZERO,
             carried_chars: Chars::ZERO,
             witness: 0,
             autowrap: true,
@@ -524,7 +530,7 @@ impl Screen {
 
     /// Drop the carry: nothing of the top row's line is in Emacs any more.
     pub fn forget_carry(&mut self) {
-        self.carried = 0;
+        self.carried = Cols::ZERO;
         self.carried_chars = Chars::ZERO;
     }
 
@@ -559,15 +565,14 @@ impl Screen {
             return;
         }
         let run = evicted.iter().rev().take_while(|row| row.wrapped).count();
-        let chars: Chars = evicted[evicted.len() - run..]
-            .iter()
-            .map(Departed::chars)
-            .sum();
+        let mid_line = &evicted[evicted.len() - run..];
+        let chars: Chars = mid_line.iter().map(Departed::chars).sum();
+        let cols: Cols = mid_line.iter().map(Departed::cols).sum();
         if run == evicted.len() {
-            self.carried += run;
+            self.carried += cols;
             self.carried_chars += chars;
         } else {
-            self.carried = run;
+            self.carried = cols;
             self.carried_chars = chars;
         }
     }
@@ -903,11 +908,19 @@ impl Screen {
         // already taken only at the edge of a row, so the common path is untouched.
         if self.cursor.wrap_pending || self.cursor.col + width > cols {
             if self.autowrap {
-                // Only damage if the flag was not already up. Where the line ends is
+                // A deferred wrap is the row having filled up; anything else here is a
+                // character too wide for the columns left, moving down whole and leaving
+                // them as padding. See [`Wrap`].
+                let wrap = if self.cursor.wrap_pending {
+                    Wrap::Full
+                } else {
+                    Wrap::Early(Cols::new(cols - self.cursor.col))
+                };
+                // Only damage if the flag was not already this. Where the line ends is
                 // something Emacs renders from, so setting it is a change -- setting it
                 // twice is not, and a program parked at the last column reaches here
                 // again on every character it prints there.
-                self.edit(self.cursor.row, |r| !r.set_wrapped(true));
+                self.edit(self.cursor.row, |r| r.set_wrap(wrap) != wrap);
                 self.cursor.col = 0;
                 evicted = self.linefeed(pen);
             } else {
@@ -1175,7 +1188,7 @@ impl Screen {
                     Box::new(Row::from_parts(
                         row.cells().to_vec(),
                         row.extras().to_vec(),
-                        row.wrapped(),
+                        row.wrap(),
                     ))
                 });
             }
@@ -1213,13 +1226,13 @@ impl Screen {
     /// Row 0 has no row above it, and what continues into it is the carry's business.
     fn unwrap_above(&mut self, top: usize) {
         if let Some(above) = top.checked_sub(1) {
-            self.edit(above, |r| r.set_wrapped(false));
+            self.edit(above, |r| r.set_wrap(Wrap::No).wraps());
         }
     }
 
     /// End the line of row INDEX, whose continuation below it an `IL` or `DL` has taken.
     fn unwrap(&mut self, index: usize) {
-        self.edit(index, |r| r.set_wrapped(false));
+        self.edit(index, |r| r.set_wrap(Wrap::No).wraps());
     }
 
     /// Remove `count` rows starting at `first`, closing the gap from below.
@@ -1653,7 +1666,7 @@ impl Screen {
     fn reflow(&mut self, rows: usize, cols: usize) -> Evicted {
         // Cells of the first line that are already in Emacs, measured at the width they
         // were chunked at — which is the one still in force as the grid is read.
-        let mut head = self.carried * self.cols;
+        let mut head = self.carried.get();
 
         // The same bound the shrink path uses, so the blank rows below the content are
         // still absorbed first rather than being rewrapped into a screenful of nothing.
@@ -1687,7 +1700,8 @@ impl Screen {
         if head % cols != 0 && !lines.is_empty() {
             let split = (cols - head % cols).min(lines[0].cells.len());
             let ends_here = split == lines[0].cells.len();
-            let fragment = Departed::from_row(lines[0].take_front(split, !ends_here).as_ref());
+            let wrap = if ends_here { Wrap::No } else { Wrap::Full };
+            let fragment = Departed::from_row(lines[0].take_front(split, wrap).as_ref());
             self.carried_chars += fragment.chars();
             history.push(fragment);
             head += split;
@@ -1730,7 +1744,7 @@ impl Screen {
 
         // Set from the re-aligned head first, so the eviction extends it rather than
         // measuring against the width the head was chunked at.
-        self.carried = head / cols;
+        self.carried = Cols::new(head);
         let evicted = Evicted::from_rows(evicted.iter().map(Row::as_ref));
         self.carry(&evicted);
         history.extend(evicted);
@@ -1821,17 +1835,15 @@ struct Logical {
 impl Logical {
     /// Append ROW's content, returning the offset its first cell landed at.
     ///
-    /// A wrapped row contributes every column it has. Its trailing blanks are interior to
-    /// the line — the text continues on the next row — so trimming them the way a line's
-    /// final row is trimmed would pull the continuation forward by however many columns
-    /// the child happened to leave blank.
+    /// A wrapped row contributes every column of its line. Its trailing blanks are
+    /// interior to the line — the text continues on the next row — so trimming them the
+    /// way a line's final row is trimmed would pull the continuation forward by however
+    /// many columns the child happened to leave blank. [`Row::line_len`] is the one
+    /// statement of where a row's line ends, and the rows Emacs already holds were
+    /// measured by it too.
     fn push_row(&mut self, row: RowRef<'_>) -> usize {
         let base = self.cells.len();
-        let len = if row.wrapped() {
-            row.len()
-        } else {
-            row.content_len()
-        };
+        let len = row.line_len();
         self.cells.extend_from_slice(&row.cells()[..len]);
         self.extras.extend(
             row.extras()
@@ -1866,13 +1878,18 @@ impl Logical {
                 // A character wider than the entire screen fits nowhere; place what there
                 // is room for and carry on, rather than looping without progress.
                 let (end, resume) = if at == start { (next, next) } else { (at, at) };
-                rows.push(self.row(start, end, cols, true));
+                // The columns this chunk leaves empty are the room the character that
+                // moved down would have needed, which is padding and not text; see
+                // [`Wrap`]. None of them when the chunk filled the row exactly, or when
+                // the character was too wide for any row and took it whole.
+                let pad = cols - (end.min(start + cols) - start);
+                rows.push(self.row(start, end, cols, Wrap::wrapping(Cols::new(pad))));
                 start = resume;
             }
             at = next;
         }
         if start < self.cells.len() || rows.is_empty() {
-            rows.push(self.row(start, self.cells.len(), cols, false));
+            rows.push(self.row(start, self.cells.len(), cols, Wrap::No));
         }
         // The marks no chunk claimed, onto the end of the last one. `start` is the last
         // chunk's own first offset, so this is exactly the column range that row covers
@@ -1893,9 +1910,10 @@ impl Logical {
     /// visual row whose leading columns are already in Emacs — it completes one, it is not
     /// one. Padding it out to `cols` would hand over blanks belonging to no column and
     /// push the seam a whole row along, since `Row::line_runs` keeps a continuation row's
-    /// trailing blanks on purpose.
-    fn take_front(&mut self, n: usize, wrapped: bool) -> Row {
-        let row = self.row(0, n, n, wrapped);
+    /// trailing blanks on purpose. Every column of it is text of the line for the same
+    /// reason, so it is [`Wrap::Full`] rather than early whatever it ends with.
+    fn take_front(&mut self, n: usize, wrap: Wrap) -> Row {
+        let row = self.row(0, n, n, wrap);
         self.cells.drain(..n);
         self.extras.retain_mut(|(at, _)| {
             let keep = *at >= n;
@@ -1918,7 +1936,7 @@ impl Logical {
     }
 
     /// One row from `cells[start..end]`, blank-padded out to `cols`.
-    fn row(&self, start: usize, end: usize, cols: usize, wrapped: bool) -> Row {
+    fn row(&self, start: usize, end: usize, cols: usize, wrap: Wrap) -> Row {
         let taken = end.min(start + cols);
         let mut cells = self.cells[start..taken].to_vec();
         cells.resize(cols, Cell::default());
@@ -1941,7 +1959,7 @@ impl Logical {
                 .map(|(at, id)| ((at - start) as u16, Extra::Mark(*id))),
         );
         extras.sort_by_key(|(at, _)| *at);
-        Row::from_parts(cells, extras, wrapped)
+        Row::from_parts(cells, extras, wrap)
     }
 }
 
@@ -2356,6 +2374,60 @@ mod tests {
         );
     }
 
+    /// The blank a wide character leaves behind when it will not fit is padding, not a
+    /// space the child wrote, so a rewrap must not turn it into one.
+    #[test]
+    fn a_wide_character_that_wrapped_whole_leaves_no_blank_behind_it() {
+        let mut screen = Screen::new(4, 5);
+        write(&mut screen, "日本語abc");
+        assert_eq!(screen.row(0).unwrap().to_text(), "日本");
+        assert_eq!(screen.row(1).unwrap().to_text(), "語abc");
+
+        screen.resize(4, 9, Resize::Rewrap).discard();
+
+        assert_eq!(
+            screen.row(0).unwrap().to_text(),
+            "日本語abc",
+            "column 4 held nothing the child wrote"
+        );
+    }
+
+    /// The same line narrowed, widened and narrowed again. Each pass must hand the next
+    /// one the characters the child printed and nothing else, which is what makes a
+    /// rewrap reversible.
+    #[test]
+    fn a_wide_character_at_the_margin_survives_a_width_round_trip() {
+        let mut screen = Screen::new(4, 5);
+        write(&mut screen, "日本語abc");
+
+        screen.resize(4, 9, Resize::Rewrap).discard();
+        screen.resize(4, 5, Resize::Rewrap).discard();
+
+        assert_eq!(screen.row(0).unwrap().to_text(), "日本");
+        assert_eq!(screen.row(1).unwrap().to_text(), "語abc");
+    }
+
+    /// The other consumer of "this row wrapped early": the rows Emacs rejoins into one
+    /// logical line. A blank handed over here is a space in the buffer, which a copy out
+    /// of the transcript and every scan of it as language would carry.
+    #[test]
+    fn a_row_a_wide_character_wrapped_early_goes_to_history_without_the_pad() {
+        let mut screen = Screen::new(1, 5);
+        let mut history: Vec<Departed> = Vec::new();
+        for ch in "日本語abc".chars() {
+            history.extend(screen.write(ch, Pen::default()));
+        }
+
+        assert_eq!(history.len(), 1);
+        assert!(history[0].wrapped, "the line goes on below it");
+        assert_eq!(history[0].to_text(), "日本");
+        assert_eq!(
+            screen.head(),
+            Chars::new(2),
+            "two characters of the line are in the buffer"
+        );
+    }
+
     #[test]
     fn combining_marks_ride_along_with_their_cell() {
         let mut screen = Screen::new(4, 10);
@@ -2410,13 +2482,17 @@ mod tests {
     }
 
     #[test]
-    fn the_carry_counts_the_rows_of_the_top_line_already_in_emacs() {
+    fn the_carry_counts_the_columns_of_the_top_line_already_in_emacs() {
         let mut screen = Screen::new(2, 5);
         write(&mut screen, "aaaaabbbbbccccc");
-        assert_eq!(screen.carried, 1, "one wrapped row has left for Emacs");
+        assert_eq!(
+            screen.carried,
+            Cols::new(5),
+            "one wrapped row of five columns has left for Emacs"
+        );
 
         write(&mut screen, "ddddd");
-        assert_eq!(screen.carried, 2);
+        assert_eq!(screen.carried, Cols::new(10));
     }
 
     #[test]
@@ -2425,14 +2501,15 @@ mod tests {
         write(&mut screen, "aaaaabbbbbccccc");
         screen.carriage_return();
         screen.linefeed(Pen::default()).discard();
-        assert_eq!(screen.carried, 2);
+        assert_eq!(screen.carried, Cols::new(10));
 
         write(&mut screen, "new");
         screen.carriage_return();
         screen.linefeed(Pen::default()).discard();
 
         assert_eq!(
-            screen.carried, 0,
+            screen.carried,
+            Cols::new(0),
             "the row that left ended its line, so the top row begins one"
         );
     }
@@ -2441,14 +2518,15 @@ mod tests {
     fn deleting_lines_at_the_top_leaves_the_carry_alone() {
         let mut screen = Screen::new(2, 5);
         write(&mut screen, "aaaaabbbbbccccc");
-        assert_eq!(screen.carried, 1);
+        assert_eq!(screen.carried, Cols::new(5));
 
         screen.goto(0, 0);
         screen.delete_lines(1, Pen::default());
 
         assert_eq!(
-            screen.carried, 1,
-            "deleted rows are discarded, so Emacs still holds just the one"
+            screen.carried,
+            Cols::new(5),
+            "deleted rows are discarded, so Emacs still holds just the one row"
         );
     }
 
@@ -2459,7 +2537,7 @@ mod tests {
         let mut screen = Screen::new(2, 6);
         write(&mut screen, "e\u{301}e\u{301}日abx");
         screen.linefeed(Pen::default()).discard();
-        assert_eq!(screen.carried, 1);
+        assert_eq!(screen.carried, Cols::new(6));
         assert_eq!(screen.head(), Chars::new(7));
     }
 
@@ -2480,7 +2558,7 @@ mod tests {
             !history[0].wrapped,
             "a wrapped row archived last would join the next row 0 onto its line"
         );
-        assert_eq!(screen.carried, 0);
+        assert_eq!(screen.carried, Cols::new(0));
     }
 
     #[test]
@@ -2489,24 +2567,24 @@ mod tests {
         // archiving anything, so the head it left is still above the screen.
         let mut screen = Screen::new(2, 5);
         write(&mut screen, "aaaaabbbbbccccc");
-        assert_eq!(screen.carried, 1);
+        assert_eq!(screen.carried, Cols::new(5));
         screen.resize(3, 5, Resize::Rewrap).discard();
         screen.set_region(0, 1);
 
         screen.erase_display(Erase::All, Pen::default()).discard();
 
-        assert_eq!(screen.carried, 1);
+        assert_eq!(screen.carried, Cols::new(5));
     }
 
     #[test]
     fn clearing_the_display_drops_the_carry() {
         let mut screen = Screen::new(2, 5);
         write(&mut screen, "aaaaabbbbbccccc");
-        assert_eq!(screen.carried, 1);
+        assert_eq!(screen.carried, Cols::new(5));
 
         screen.erase_display(Erase::All, Pen::default()).discard();
 
-        assert_eq!(screen.carried, 0);
+        assert_eq!(screen.carried, Cols::new(0));
     }
 
     /// The head occupies whole visual rows at the old width and seldom at the new one.
@@ -2523,7 +2601,7 @@ mod tests {
         write(&mut screen, &"3".repeat(10));
         write(&mut screen, &"4".repeat(10));
         write(&mut screen, &"5".repeat(9));
-        assert_eq!(screen.carried, 2);
+        assert_eq!(screen.carried, Cols::new(20));
 
         let history = screen.resize(4, 30, Resize::Rewrap);
 
@@ -2531,7 +2609,8 @@ mod tests {
         assert_eq!(history[0].to_text(), "2".repeat(10));
         assert!(history[0].wrapped, "the line goes on below it");
         assert_eq!(
-            screen.carried, 1,
+            screen.carried,
+            Cols::new(30),
             "the head is now exactly one visual row at the new width"
         );
         assert_eq!(
@@ -2550,7 +2629,7 @@ mod tests {
         write(&mut screen, &"3".repeat(10));
         write(&mut screen, &"4".repeat(10));
         write(&mut screen, &"5".repeat(9));
-        assert_eq!(screen.carried, 2);
+        assert_eq!(screen.carried, Cols::new(20));
 
         // Tall enough that the rewrap does not also have to evict for want of room, so
         // an empty history means no re-alignment rather than nothing having happened.
@@ -2560,7 +2639,7 @@ mod tests {
             history.is_empty(),
             "20 cells of head divide evenly into 5-column rows"
         );
-        assert_eq!(screen.carried, 4);
+        assert_eq!(screen.carried, Cols::new(20));
         assert_eq!(screen.row(0).unwrap().to_text(), "22222");
     }
 

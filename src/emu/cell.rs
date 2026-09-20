@@ -878,6 +878,12 @@ impl Runs {
         self.runs.iter().map(|run| run.chars).sum()
     }
 
+    /// Columns over every run: how much of the grid this covers, which is not its
+    /// character count -- `日本` is four columns of two characters.
+    pub fn cols(&self) -> Cols {
+        self.runs.iter().map(|run| run.cols).sum()
+    }
+
     /// Run INDEX, or `None` past the end.
     pub fn get(&self, index: usize) -> Option<RunRef<'_>> {
         let run = self.runs.get(index)?;
@@ -1311,6 +1317,52 @@ impl Marks {
     }
 }
 
+/// Whether a row's logical line goes on below it, and if so how much of the row is text.
+///
+/// The row below continues the line in both wrapped cases; they differ in what the last
+/// columns of *this* row hold. A row fills up and the next character starts the row below
+/// ([`Wrap::Full`]), or a wide character will not fit in the columns left and moves down
+/// whole, leaving them blank ([`Wrap::Early`]): `日本語` on a five-column screen puts
+/// `語` on the row below and leaves column 4 untouched. That blank is padding and not a
+/// space the child wrote, so [`Row::line_len`] leaves it out of the line, and a rewrap
+/// nine columns wide reads `日本語` rather than `日本 語`.
+///
+/// A row that wrapped early cannot be told from one that did not by looking at its cells:
+/// `abcd 語` at five columns is [`Wrap::Full`] and *its* trailing blank is the child's
+/// own space, which must survive the same rewrap.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Wrap {
+    /// The line ends here: the row below begins a new one.
+    #[default]
+    No,
+    /// The line goes on below, and every column of this row belongs to it.
+    Full,
+    /// The line goes on below, and the last COLS columns are the room a wide character
+    /// could not fit into. Always at least one column and always fewer than the width of
+    /// the character that moved down.
+    Early(Cols),
+}
+
+impl Wrap {
+    /// A row whose line goes on below with PAD columns of padding at its end.
+    ///
+    /// Named rather than written out at each call site because no padding and a full row
+    /// are the same row: a chunk that happens to end exactly at the last column is
+    /// [`Wrap::Full`], and only a shorter one is [`Wrap::Early`].
+    pub fn wrapping(pad: Cols) -> Self {
+        if pad.is_zero() {
+            Self::Full
+        } else {
+            Self::Early(pad)
+        }
+    }
+
+    /// Whether the line continues on the row below, which is what most readers ask.
+    pub const fn wraps(self) -> bool {
+        !matches!(self, Self::No)
+    }
+}
+
 /// What a row carries besides its cells: the rarities attached to single columns, and
 /// whether its line goes on below.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -1328,8 +1380,9 @@ pub struct RowMeta {
     /// `None` whenever there is nothing attached, which is almost always, so
     /// [`Row::runs`] can specialise on a null check instead of asking per cell.
     extras: Option<Box<Extras>>,
-    /// The row's logical line continues on the row below.
-    wrapped: bool,
+    /// Whether the row's logical line continues on the row below, and how much of the row
+    /// that line covers.
+    wrap: Wrap,
 }
 
 /// A single line of the terminal: cells, and the [`RowMeta`] that goes with them.
@@ -1392,12 +1445,12 @@ impl Row {
     /// EXTRAS are keyed by column within CELLS, which is what a rewrap produces once a
     /// logical line has been re-chunked: the offsets are recomputed per chunk rather than
     /// carried from the row the cells came off. They must arrive in column order.
-    pub fn from_parts(cells: Vec<Cell>, extras: Vec<(u16, Extra)>, wrapped: bool) -> Self {
+    pub fn from_parts(cells: Vec<Cell>, extras: Vec<(u16, Extra)>, wrap: Wrap) -> Self {
         Self {
             cells,
             meta: RowMeta {
                 extras: (!extras.is_empty()).then(|| Box::new(Extras { entries: extras })),
-                wrapped,
+                wrap,
             },
         }
     }
@@ -1437,7 +1490,12 @@ impl<C: Borrow<[Cell]>, M: Borrow<RowMeta>> RowOf<C, M> {
 
     /// Whether this row's logical line continues on the row below.
     pub fn wrapped(&self) -> bool {
-        self.meta().wrapped
+        self.wrap().wraps()
+    }
+
+    /// How this row's line ends, padding included; see [`Wrap`].
+    pub fn wrap(&self) -> Wrap {
+        self.meta().wrap
     }
 
     pub fn extras(&self) -> &[(u16, Extra)] {
@@ -1529,19 +1587,31 @@ impl<C: Borrow<[Cell]>, M: Borrow<RowMeta>> RowOf<C, M> {
         self.runs_to(self.content_len())
     }
 
+    /// Columns this row contributes to its logical line; see [`Row::line_runs`].
+    ///
+    /// The line ending here, it is the row's content, trailing blanks cut. A row that
+    /// wrapped full contributes every column, including the blanks the child left before
+    /// the line went on below. A row a wide character wrapped early stops short of the
+    /// padding that character left — unless something was written there after the wrap, in
+    /// which case those columns are content like any other and are kept: never fewer
+    /// columns than [`Row::content_len`] holds.
+    pub fn line_len(&self) -> usize {
+        match self.wrap() {
+            Wrap::No => self.content_len(),
+            Wrap::Full => self.len(),
+            Wrap::Early(pad) => self.content_len().max(self.len().saturating_sub(pad.get())),
+        }
+    }
+
     /// Runs for a row on its way into the buffer as part of a logical line.
     ///
-    /// A continuation row contributes every column: its trailing blanks are interior to a
-    /// line that goes on below, and trimming them would pull the continuation forward.
-    /// [`Logical::push_row`](super::screen) measures rows the same way during a rewrap, and
-    /// the two must agree for a resize to round-trip. It also keeps every departed row
-    /// exactly `cols` wide, which [`Screen::carried`](super::screen::Screen) relies on.
+    /// A continuation row contributes every column it holds: its trailing blanks are
+    /// interior to a line that goes on below, and trimming them would pull the
+    /// continuation forward. [`Logical::push_row`](super::screen) measures rows the same
+    /// way during a rewrap, through [`Row::line_len`], and the two must agree for a resize
+    /// to round-trip.
     pub fn line_runs(&self) -> Runs {
-        if self.meta().wrapped {
-            self.runs_to(self.len())
-        } else {
-            self.runs()
-        }
+        self.runs_to(self.line_len())
     }
 
     /// The simplest correct statement of what [`Row::runs_to`] must produce.
@@ -1830,9 +1900,9 @@ impl<C: BorrowMut<[Cell]>, M: BorrowMut<RowMeta>> RowOf<C, M> {
         self.meta.borrow_mut()
     }
 
-    /// Set whether this row's line continues below, returning what it was.
-    pub fn set_wrapped(&mut self, wrapped: bool) -> bool {
-        std::mem::replace(&mut self.meta_mut().wrapped, wrapped)
+    /// Set how this row's line ends, returning what it was; see [`Wrap`].
+    pub fn set_wrap(&mut self, wrap: Wrap) -> Wrap {
+        std::mem::replace(&mut self.meta_mut().wrap, wrap)
     }
 
     /// Attach EXTRA to COL, in addition to whatever is already there.
@@ -2147,7 +2217,7 @@ impl<C: BorrowMut<[Cell]>, M: BorrowMut<RowMeta>> RowOf<C, M> {
     pub fn clear(&mut self, style: StyleId) {
         Cell::fill(self.cells_mut(), Cell::blank(style));
         self.meta_mut().extras = None;
-        self.meta_mut().wrapped = false;
+        self.meta_mut().wrap = Wrap::No;
     }
 
     /// `CSI 2K`: blank every column, keeping semantic marks.
@@ -2162,11 +2232,11 @@ impl<C: BorrowMut<[Cell]>, M: BorrowMut<RowMeta>> RowOf<C, M> {
     pub fn erase_all(&mut self, style: StyleId) -> bool {
         let blank = Cell::blank(style);
         let changed = self.meta().extras.is_some()
-            || self.meta().wrapped
+            || self.meta().wrap.wraps()
             || self.cells().iter().any(|c| *c != blank);
         Cell::fill(self.cells_mut(), blank);
         self.prune(0..self.cells().len(), Marks::Keep);
-        self.meta_mut().wrapped = false;
+        self.meta_mut().wrap = Wrap::No;
         changed
     }
 
@@ -2555,7 +2625,7 @@ mod tests {
         for (col, ch) in "  \u{2500}\u{2500}  ".chars().enumerate() {
             row.set(col, Cell::new(ch, style));
         }
-        row.set_wrapped(true);
+        row.set_wrap(Wrap::Full);
 
         let runs = row.line_runs();
         assert_eq!(
