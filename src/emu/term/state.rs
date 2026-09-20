@@ -109,19 +109,19 @@ impl State {
 
     /// The kitty flag stack of the screen being shown; see [`Modes::kitty_keys`].
     pub(super) fn kitty_stack(&self) -> &KittyStack {
-        &self.modes.kitty_keys[self.shown]
+        &self.modes.kitty_keys[self.shown.id()]
     }
 
     pub(super) fn kitty_stack_mut(&mut self) -> &mut KittyStack {
-        &mut self.modes.kitty_keys[self.shown]
+        &mut self.modes.kitty_keys[self.shown.id()]
     }
 
     pub(super) fn screen(&self) -> &Screen {
-        &self.screens[self.shown]
+        &self.screens[self.shown.id()]
     }
 
     pub(super) fn screen_mut(&mut self) -> &mut Screen {
-        &mut self.screens[self.shown]
+        &mut self.screens[self.shown.id()]
     }
 
     /// Rows leaving the *current* screen: buffer text on the primary, discarded on the alt.
@@ -192,11 +192,12 @@ impl State {
         // moves that took it off the grid are still in the log to be read. Once one row
         // could not be kept, no later row can, and the rest of a flood costs a test.
         let Self {
-            promotion,
+            shown,
             front,
             screens,
             ..
         } = self;
+        let promotion = shown.promotion();
         if promotion.is_open() {
             let limit = screens.primary.scrolled_off();
             for row in rows.iter() {
@@ -262,7 +263,7 @@ impl State {
         // The rows below the cut moved on the grid and not in the buffer, and they are all
         // damaged; forgetting them sends them, as it did before there was a copy to consult.
         self.front.forget_from(first);
-        self.promotion.close_from(first);
+        self.shown.promotion().close_from(first);
     }
 
     /// Where the cursor is now, in the coordinates an [`Anchor`] keeps: absolute row and
@@ -515,7 +516,7 @@ impl State {
     fn drain_whole(&mut self, shape: Drain) -> Delta {
         let promote = shape.promotes();
         let damaged = self.screen_mut().drain_damage();
-        let promoted = self.promotion.take();
+        let promoted = self.shown.promotion().take();
         // The scroll the promoted rows left by, read before the log is taken, which drops a
         // scroll that turned its region over. `None` where the log cannot name it -- an
         // empty log, or one moves have been dropped from -- and the rows go as text instead.
@@ -574,8 +575,8 @@ impl State {
             ..
         } = self;
         let rows = front.present(
-            *shown,
-            &screens[*shown],
+            shown.id(),
+            &screens[shown.id()],
             levels.cursor,
             promoted,
             &shifts,
@@ -642,7 +643,7 @@ impl State {
         // it. So none of these rows is promoted, and no row after them can be: Emacs' top
         // rows are the ones just sent again, until that drain has moved them.
         if !scrolled.is_empty() {
-            self.promotion.close_from(0);
+            self.shown.promotion().close_from(0);
             self.screens.primary.witness(0);
         }
         // Only the marks that left the grid, whose rows are in `scrolled`. `marks_dirty`
@@ -745,19 +746,21 @@ impl State {
         }
         // A row the front stops knowing may have left the grid already, so the prefix of
         // departing rows Emacs was going to keep ends at the first one forgotten.
-        self.promotion.close_from(index.unwrap_or(0));
+        self.shown.promotion().close_from(index.unwrap_or(0));
     }
 
     pub(super) fn set_alt(&mut self, on: bool) {
-        let shown = if on {
+        let screen = if on {
             ScreenId::Alternate
         } else {
             ScreenId::Primary
         };
-        if self.shown == shown {
+        // The one door: `Shown::show` ends the promotion, so a switch cannot be spelled
+        // without ending it. See `Shown` for why it must end here rather than at the next
+        // drain.
+        if !self.shown.show(screen) {
             return;
         }
-        self.shown = shown;
         if on {
             // Dropped rather than archived: this is the previous full-screen program's
             // leftover frame, which was never history to begin with.
@@ -779,11 +782,6 @@ impl State {
         // The seam needs nothing here either. The primary keeps its head, and the drain
         // reports it again once the primary is shown; see `cooked--place-seam`.
         self.screen_mut().touch_all();
-        // Dropped rather than cut short, and here rather than at the next drain: the rows
-        // that left the primary before the switch are not at the top of what the next drain
-        // draws, and a row that leaves after it would be matched against rows the other
-        // grid may have drawn.
-        self.promotion = Promotion::default();
         // The primary's marks are reported on the way back, against its rows. Not on the
         // way in: an anchor names a row of the primary grid, and resolved against the
         // alternate screen's text it would move a marker that a row both screens hold had

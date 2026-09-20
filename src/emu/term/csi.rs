@@ -514,7 +514,7 @@ impl State {
 
     /// DECSC: the cursor and the character sets, for the screen being shown.
     pub(super) fn save_cursor(&mut self) {
-        self.saved_charsets[self.shown] = Some(self.modes.charsets);
+        self.saved_charsets[self.shown.id()] = Some(self.modes.charsets);
         self.screen_mut().save_cursor();
     }
 
@@ -524,7 +524,7 @@ impl State {
     /// cursor home, as in xterm and ghostty. The save is not used up; see
     /// [`Screen::restore_cursor`].
     pub(super) fn restore_cursor(&mut self) {
-        self.modes.charsets = self.saved_charsets[self.shown].unwrap_or_default();
+        self.modes.charsets = self.saved_charsets[self.shown.id()].unwrap_or_default();
         self.screen_mut().restore_cursor();
     }
 
