@@ -64,6 +64,54 @@ const DIAG_BACKWARD: u16 = 1 << 10;
 const DASH_SHIFT: u16 = 11;
 const DASH_MASK: u16 = 0b11 << DASH_SHIFT;
 
+/// This module's half of `cooked--wire-layout': the bit layout above, mirrored by
+/// `cooked--box-*' in lisp/cooked-glyph.el, and the weight and direction codes
+/// [`weight_bits`] and [`direction_bits`] assign, mirrored by the same file's
+/// `cooked--box-weight-*' and `cooked--box-direction-*'. See
+/// [`crate::emu::cell::wire_layout`] and [`crate::wire::wire_layout`] for the rest.
+///
+/// `cooked--box-weight-light' has no entry: light is the bit pattern every other
+/// weight is stated relative to (`cooked--box-weight-none' 0, `-heavy' 2, `-double' 3),
+/// and nothing on either side spells 1 by name.
+pub(crate) fn wire_layout() -> Vec<(&'static str, u32)> {
+    vec![
+        ("box-kind-block", u32::from(KIND_BLOCK)),
+        ("box-arc", u32::from(ARC)),
+        ("box-diag-forward", u32::from(DIAG_FORWARD)),
+        ("box-diag-backward", u32::from(DIAG_BACKWARD)),
+        ("box-dash-shift", u32::from(DASH_SHIFT)),
+        ("box-dash-mask", u32::from(DASH_MASK)),
+        ("box-weight-none", u32::from(weight_bits(Weight::None))),
+        ("box-weight-heavy", u32::from(weight_bits(Weight::Heavy))),
+        ("box-weight-double", u32::from(weight_bits(Weight::Double))),
+        ("box-direction-up", u32::from(direction_bits(Direction::Up))),
+        (
+            "box-direction-down",
+            u32::from(direction_bits(Direction::Down)),
+        ),
+        (
+            "box-direction-left",
+            u32::from(direction_bits(Direction::Left)),
+        ),
+        (
+            "box-direction-right",
+            u32::from(direction_bits(Direction::Right)),
+        ),
+        (
+            "box-direction-full",
+            u32::from(direction_bits(Direction::Full)),
+        ),
+        (
+            "box-direction-shade",
+            u32::from(direction_bits(Direction::Shade)),
+        ),
+        (
+            "box-direction-quadrant",
+            u32::from(direction_bits(Direction::Quadrant)),
+        ),
+    ]
+}
+
 /// Compact classification of a box-drawing or block-element glyph, packed into 16
 /// bits so a `Run` can carry one per character without a large side allocation.
 /// Hand-rolled like `Attrs` (cell.rs) rather than pulled in from a crate — this

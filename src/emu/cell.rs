@@ -104,6 +104,39 @@ impl Not for Attrs {
     }
 }
 
+/// This module's half of `cooked--wire-layout': the [`Attrs`] bit values, mirrored by
+/// `cooked--attr-*' in lisp/cooked-face.el, and the glyph and image record layouts
+/// [`Deco::packed`] writes, mirrored in lisp/cooked-deco.el. `wire::wire_layout` in
+/// wire.rs carries the style-record half, and `glyph::wire_layout` in glyph.rs the
+/// box-glyph bit layout; `cooked--wire-layout' in lib.rs concatenates all three.
+///
+/// NAME matches the corresponding Lisp constant with its `cooked--' prefix removed,
+/// so `("attr-bold", _)' here is `cooked--attr-bold' there.
+pub(crate) fn wire_layout() -> Vec<(&'static str, u32)> {
+    vec![
+        ("attr-bold", u32::from(Attrs::BOLD.bits())),
+        ("attr-faint", u32::from(Attrs::FAINT.bits())),
+        ("attr-italic", u32::from(Attrs::ITALIC.bits())),
+        ("attr-underline", u32::from(Attrs::UNDERLINE.bits())),
+        ("attr-blink", u32::from(Attrs::BLINK.bits())),
+        ("attr-reverse", u32::from(Attrs::REVERSE.bits())),
+        ("attr-conceal", u32::from(Attrs::CONCEAL.bits())),
+        ("attr-strike", u32::from(Attrs::STRIKE.bits())),
+        ("attr-underline-shift", u32::from(Attrs::UL_SHIFT)),
+        ("attr-underline-style", u32::from(Attrs::UL_MASK)),
+        ("attr-overline", u32::from(Attrs::OVERLINE.bits())),
+        ("glyph-record", Deco::GLYPH_RECORD as u32),
+        ("glyph-bits", Deco::GLYPH_BITS as u32),
+        ("glyph-count", Deco::GLYPH_COUNT as u32),
+        ("image-record", Deco::IMAGE_RECORD as u32),
+        ("image-id", Deco::IMAGE_ID as u32),
+        ("image-row", Deco::IMAGE_ROW as u32),
+        ("image-col", Deco::IMAGE_COL as u32),
+        ("image-cols", Deco::IMAGE_COLS as u32),
+        ("image-rows", Deco::IMAGE_ROWS as u32),
+    ]
+}
+
 /// A rendition: everything SGR sets that decides how a character is drawn.
 ///
 /// What the pen holds and what a [`StyleId`] names. The underline's own colour
@@ -460,6 +493,27 @@ impl DecoCell {
 }
 
 impl Deco {
+    /// Bytes in one packed glyph-run record. See [`Deco::packed`] for the layout and
+    /// `cooked--glyph-record' in lisp/cooked-deco.el for the mirror.
+    const GLYPH_RECORD: usize = 4;
+    /// Byte offset of the bit pattern within a glyph record; `cooked--glyph-bits'.
+    const GLYPH_BITS: usize = 0;
+    /// Byte offset of the run length within a glyph record; `cooked--glyph-count'.
+    const GLYPH_COUNT: usize = 2;
+
+    /// Bytes in one packed image-placement record; `cooked--image-record'.
+    const IMAGE_RECORD: usize = 12;
+    /// Byte offset of the image id within an image record; `cooked--image-id'.
+    const IMAGE_ID: usize = 0;
+    /// Byte offset of the cell row within an image record; `cooked--image-row'.
+    const IMAGE_ROW: usize = 4;
+    /// Byte offset of the cell column within an image record; `cooked--image-col'.
+    const IMAGE_COL: usize = 6;
+    /// Byte offset of the column span within an image record; `cooked--image-cols'.
+    const IMAGE_COLS: usize = 8;
+    /// Byte offset of the row span within an image record; `cooked--image-rows'.
+    const IMAGE_ROWS: usize = 10;
+
     fn start(cell: DecoCell) -> Self {
         match cell {
             DecoCell::Glyph(g) => Self::Glyphs(vec![g]),
@@ -529,11 +583,20 @@ impl Deco {
     pub fn packed(&self) -> Vec<u8> {
         match self {
             Self::Glyphs(glyphs) => {
-                let mut packed = Vec::with_capacity(glyphs.len().min(8) * 4);
+                let mut packed = Vec::with_capacity(glyphs.len().min(8) * Self::GLYPH_RECORD);
                 let mut run: Option<(u16, u16)> = None;
+                // Fields go in at [`Self::GLYPH_BITS`] then [`Self::GLYPH_COUNT`], which is
+                // simply push order here; the offsets exist to be read back by
+                // `cooked--wire-layout', not to steer this write.
                 let flush = |packed: &mut Vec<u8>, bits: u16, count: u16| {
                     packed.extend_from_slice(&bits.to_le_bytes());
                     packed.extend_from_slice(&count.to_le_bytes());
+                    debug_assert_eq!(
+                        packed.len() % Self::GLYPH_RECORD,
+                        0,
+                        "a glyph record must be exactly {} bytes",
+                        Self::GLYPH_RECORD
+                    );
                 };
                 for glyph in glyphs {
                     let bits = glyph.bits();
@@ -552,13 +615,22 @@ impl Deco {
                 packed
             }
             Self::Images(places) => {
-                let mut packed = Vec::with_capacity(places.len() * 12);
+                let mut packed = Vec::with_capacity(places.len() * Self::IMAGE_RECORD);
+                // Fields go in at [`Self::IMAGE_ID`], [`Self::IMAGE_ROW`],
+                // [`Self::IMAGE_COL`], [`Self::IMAGE_COLS`] then [`Self::IMAGE_ROWS`], again
+                // push order; see the glyph arm above.
                 for place in places {
                     packed.extend_from_slice(&place.id.get().to_le_bytes());
                     packed.extend_from_slice(&place.cell_row.to_le_bytes());
                     packed.extend_from_slice(&place.cell_col.to_le_bytes());
                     packed.extend_from_slice(&place.cols.to_le_bytes());
                     packed.extend_from_slice(&place.rows.to_le_bytes());
+                    debug_assert_eq!(
+                        packed.len() % Self::IMAGE_RECORD,
+                        0,
+                        "an image record must be exactly {} bytes",
+                        Self::IMAGE_RECORD
+                    );
                 }
                 packed
             }

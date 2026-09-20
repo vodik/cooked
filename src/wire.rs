@@ -479,8 +479,30 @@ impl<'e> env::IntoLisp<'e> for Uniformity {
     }
 }
 
-/// Bytes in one packed style span. See [`Block::push_style`] for the field layout.
+/// Bytes in one packed style span. See [`Block::push_style`] for the field layout, and
+/// `cooked--style-record' in lisp/cooked-face.el for the mirror.
 const STYLE_RECORD: usize = 16;
+/// Byte offset of START within a style record; `cooked--style-start'.
+const STYLE_START: usize = 0;
+/// Byte offset of END within a style record; `cooked--style-end'.
+const STYLE_END: usize = 4;
+/// Byte offset of STYLE within a style record; `cooked--style-id'.
+const STYLE_ID: usize = 8;
+/// Byte offset of LINK within a style record; `cooked--style-link'.
+const STYLE_LINK: usize = 12;
+
+/// This module's half of `cooked--wire-layout': the style-record layout above. See
+/// [`crate::emu::cell::wire_layout`], [`crate::emu::glyph::wire_layout`] and
+/// [`crate::session::wire_layout`] for the rest.
+pub(crate) fn wire_layout() -> Vec<(&'static str, u32)> {
+    vec![
+        ("style-record", STYLE_RECORD as u32),
+        ("style-start", STYLE_START as u32),
+        ("style-end", STYLE_END as u32),
+        ("style-id", STYLE_ID as u32),
+        ("style-link", STYLE_LINK as u32),
+    ]
+}
 
 impl<'a, 'e> Block<'a, 'e> {
     /// A block whose layout hashes read font bits from FONT_BITS.
@@ -494,10 +516,14 @@ impl<'a, 'e> Block<'a, 'e> {
     /// Pack one style span onto `styles`: the run's extent, the id of its rendition and
     /// the id of its link, as little-endian `u32`s.
     ///
-    ///   0..4    START    character offset into [`Block::text`]
-    ///   4..8    END      exclusive
-    ///   8..12   STYLE    a [`StyleId`], resolved through the drain's `:styles`
-    ///   12..16  LINK     a [`LinkId`], resolved through `:links`, or 0 for none
+    ///   STYLE_START..STYLE_END    START  character offset into [`Block::text`]
+    ///   STYLE_END..STYLE_ID       END    exclusive
+    ///   STYLE_ID..STYLE_LINK      STYLE  a [`StyleId`], resolved through the drain's `:styles`
+    ///   STYLE_LINK..STYLE_RECORD  LINK   a [`LinkId`], resolved through `:links`, or 0 for none
+    ///
+    /// The four pushes below are in that order, which is what makes it true; the
+    /// constants exist so `cooked--wire-layout' can hand the same numbers to Lisp rather
+    /// than have `cooked--style-start' &c. retype them.
     ///
     /// A packed string rather than a list of lists, for the reason [`Deco::packed`] gives:
     /// the Emacs apply path is the bottleneck, and a list costs conses a span on every

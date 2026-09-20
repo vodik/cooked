@@ -1030,10 +1030,33 @@ impl Options {
     }
 }
 
+/// [`Options::default`]'s interval, in milliseconds; `cooked-min-redisplay-interval'
+/// in lisp/cooked-session.el defaults to the same number, in seconds. Named so
+/// `cooked--wire-layout' reports the number this type actually uses rather than a
+/// second copy retyped in lib.rs.
+pub(crate) const DEFAULT_MIN_REDISPLAY_INTERVAL_MS: u64 = 8;
+
 impl Default for Options {
     fn default() -> Self {
-        Self::with_min_redisplay_interval(std::time::Duration::from_millis(8))
+        Self::with_min_redisplay_interval(std::time::Duration::from_millis(
+            DEFAULT_MIN_REDISPLAY_INTERVAL_MS,
+        ))
     }
+}
+
+/// This module's half of `cooked--wire-layout': the tuning defaults above and
+/// [`crate::emu::BACKLOG_HIGH_WATER`], mirrored by `cooked-min-redisplay-interval' and
+/// `cooked-backlog-limit' in lisp/cooked-session.el. See
+/// [`crate::emu::cell::wire_layout`], [`crate::emu::glyph::wire_layout`] and
+/// [`crate::wire::wire_layout`] for the rest.
+pub(crate) fn wire_layout() -> Vec<(&'static str, u32)> {
+    vec![
+        (
+            "min-redisplay-interval-ms",
+            DEFAULT_MIN_REDISPLAY_INTERVAL_MS as u32,
+        ),
+        ("backlog-limit", crate::emu::BACKLOG_HIGH_WATER as u32),
+    ]
 }
 
 /// A live child, its emulator, and the reader thread coupling them to Emacs.

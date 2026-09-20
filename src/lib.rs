@@ -608,6 +608,22 @@ pub unsafe extern "C" fn emacs_module_init(runtime: *mut Runtime) -> std::ffi::c
         /// what the shell put in the foreground.  nil when the tty has no answer, which is
         /// ordinary between jobs and once the session is over.
         "cooked--foreground-pid" 1..=1 => foreground_pid;
+
+        /// The wire's fixed-width layouts and shared tuning defaults, as (NAME . VALUE).
+        ///
+        /// NAME is a symbol matching the corresponding `cooked--*' constant in Lisp with
+        /// its `cooked--' prefix removed -- `attr-bold' here is `cooked--attr-bold' there,
+        /// `style-record' is `cooked--style-record' -- so the two can be walked side by
+        /// side. Everything named here is written a second time by hand somewhere in
+        /// lisp/: the `Attrs' bit values (`cooked-face.el'), the style record
+        /// `Block::push_style' packs and its four field offsets, the glyph-run and
+        /// image-placement records `Deco::packed' writes, the box-glyph bit layout
+        /// (`cooked-glyph.el'), and the two tuning defaults `Options::default' falls back
+        /// to when `cooked--spawn' gets no interval or limit. `cooked--key-table' is the
+        /// precedent for holding a second copy against the core by way of a test rather
+        /// than reading it from here: `cooked-wire-layout-matches-the-core' does that for
+        /// every entry this returns.
+        "cooked--wire-layout" 0..=0 => wire_layout;
     });
 
     let accessors = accessors!(env, {
@@ -1062,6 +1078,23 @@ fn key_table<'e>(env: Env<'e>, _args: &[Value<'e>]) -> Result<Value<'e>> {
         .map(|key| env.cons(env.intern(key.name())?, env.into_lisp(key.kitty_only())?))
         .collect::<Result<Vec<_>>>()?;
     env.into_lisp(rows)
+}
+
+/// See `cooked--wire-layout'.
+///
+/// Four modules each name their own half of the layout as constants and hand back
+/// (LABEL, VALUE) pairs; this just chains and converts them, so adding a fifth mirrored
+/// number is a one-line change to whichever module owns it plus one line here, not a
+/// rewrite of this function.
+fn wire_layout<'e>(env: Env<'e>, _args: &[Value<'e>]) -> Result<Value<'e>> {
+    emu::cell::wire_layout()
+        .into_iter()
+        .chain(emu::glyph::wire_layout())
+        .chain(wire::wire_layout())
+        .chain(session::wire_layout())
+        .map(|(name, value)| env.cons(env.intern(name)?, env.into_lisp(value)?))
+        .collect::<Result<Vec<_>>>()
+        .and_then(|rows| env.into_lisp(rows))
 }
 
 /// Compose a paste against the mode the child holds now; see `cooked--send-paste-text'.

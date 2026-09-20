@@ -391,6 +391,17 @@ The tier `cooked--box-glyph-bits' tiles rather than redraws: see
   (cooked--cached cooked--box-glyph-cell-cache (list bits (car size) (cdr size))
     (cooked--render-box-glyph-cell bits (car size) (cdr size))))
 
+(defconst cooked--glyph-record 4
+  "Bytes in one packed glyph-run record.  See `Deco::packed' in src/emu/cell.rs.
+
+The stride a reader steps by to find the next record; the fields are `u16's at
+the offsets the constants below name.  The Rust side asserts the same number,
+so a field added to the record on one side without widening it on both
+desynchronises the two at the second record of the first affected run.")
+
+(defconst cooked--glyph-bits 0 "Offset of the bit pattern in a glyph record.")
+(defconst cooked--glyph-count 2 "Offset of the run length in a glyph record.")
+
 (defun cooked--glyph-pattern (bits count)
   "A one-record run pattern: COUNT adjacent cells drawing shape BITS.
 
@@ -413,18 +424,20 @@ run rather than one record, which is the unit an image is baked at -- see
         (i 0)
         (limit (length pattern)))
     (while (< i limit)
-      (push (cons (cooked--u16 pattern i) (cooked--u16 pattern (+ i 2))) out)
-      (setq i (+ i 4)))
+      (push (cons (cooked--u16 pattern (+ i cooked--glyph-bits))
+                  (cooked--u16 pattern (+ i cooked--glyph-count)))
+            out)
+      (setq i (+ i cooked--glyph-record)))
     (nreverse out)))
 
 (defun cooked--glyph-pattern-cells (pattern)
   "How many cells PATTERN covers: the sum of its records' counts."
   (let ((cells 0)
-        (i 2)
+        (i cooked--glyph-count)
         (limit (length pattern)))
     (while (< i limit)
       (setq cells (+ cells (cooked--u16 pattern i))
-            i (+ i 4)))
+            i (+ i cooked--glyph-record)))
     cells))
 
 (defun cooked--glyph-pattern-blank-p (pattern)
@@ -439,8 +452,8 @@ gets none, and `░ ░ ░ ░' costs the shades' intervals and no more."
         (limit (length pattern))
         (blank t))
     (while (and blank (< i limit))
-      (setq blank (= 0 (cooked--u16 pattern i))
-            i (+ i 4)))
+      (setq blank (= 0 (cooked--u16 pattern (+ i cooked--glyph-bits)))
+            i (+ i cooked--glyph-record)))
     blank))
 
 (defun cooked--glyph-pattern-head (pattern)
@@ -449,7 +462,7 @@ gets none, and `░ ░ ░ ░' costs the shades' intervals and no more."
 A shade is always a pattern of one record -- see
 `cooked--glyph-run-segments' -- so this is also how a shade segment names
 its density."
-  (cooked--u16 pattern 0))
+  (cooked--u16 pattern cooked--glyph-bits))
 
 (defun cooked--glyph-pattern-take (pattern count)
   "PATTERN cut down to its first COUNT cells, or PATTERN itself if it is shorter.
@@ -465,11 +478,11 @@ two agree, which is every call on the render path."
           (left count)
           (i 0))
       (while (> left 0)
-        (let* ((bits (cooked--u16 pattern i))
-               (take (min left (cooked--u16 pattern (+ i 2)))))
+        (let* ((bits (cooked--u16 pattern (+ i cooked--glyph-bits)))
+               (take (min left (cooked--u16 pattern (+ i cooked--glyph-count)))))
           (push (cooked--glyph-pattern bits take) out)
           (setq left (- left take)
-                i (+ i 4))))
+                i (+ i cooked--glyph-record))))
       (apply #'concat (nreverse out)))))
 
 (defun cooked--box-glyph-bits (pattern size)
@@ -1334,6 +1347,21 @@ reaches all three callers, which is the property that mattered."
       (when-let* ((image (cooked--deco-image deco size window count)))
         (cooked--deco-display deco image size count)))))
 
+(defconst cooked--image-record 12
+  "Bytes in one packed image-placement record.  See `Deco::packed' in
+src/emu/cell.rs.
+
+One record per character, unlike a glyph run's one record per shape, because a
+placement is not one decision repeated: every cell carries its own place in
+the picture.  The fields are a `u32' then four `u16's at the offsets the
+constants below name.")
+
+(defconst cooked--image-id 0 "Offset of the image id in an image record.")
+(defconst cooked--image-row 4 "Offset of the cell row in an image record.")
+(defconst cooked--image-col 6 "Offset of the cell column in an image record.")
+(defconst cooked--image-cols 8 "Offset of the column span in an image record.")
+(defconst cooked--image-rows 10 "Offset of the row span in an image record.")
+
 (defun cooked--apply-image-deco (start packed size)
   "Apply image decoration PACKED from START: twelve bytes per character.
 
@@ -1414,17 +1442,17 @@ itself -- names the id it named before.  Held against the image there was one
 field for two answers, and whichever transmission wrote it last decided how the
 other one's slices were cut."
   (let ((pos start)
-        (records (/ (length packed) 12))
+        (records (/ (length packed) cooked--image-record))
         (key nil)
         (image nil)
         (i 0))
     (while (< i records)
-      (let* ((base (* 12 i))
-             (id (cooked--u32 packed base))
-             (crow (cooked--u16 packed (+ base 4)))
-             (ccol (cooked--u16 packed (+ base 6)))
-             (cols (cooked--u16 packed (+ base 8)))
-             (rows (cooked--u16 packed (+ base 10)))
+      (let* ((base (* cooked--image-record i))
+             (id (cooked--u32 packed (+ base cooked--image-id)))
+             (crow (cooked--u16 packed (+ base cooked--image-row)))
+             (ccol (cooked--u16 packed (+ base cooked--image-col)))
+             (cols (cooked--u16 packed (+ base cooked--image-cols)))
+             (rows (cooked--u16 packed (+ base cooked--image-rows)))
              (deco (list 'image id crow ccol cols rows))
              ;; How many cells this run has grown to, the first one included.
              ;; Looked ahead for rather than accumulated behind, so the run's
@@ -1432,20 +1460,20 @@ other one's slices were cut."
              ;; in one call -- which is the saving, `put-text-property' being
              ;; what this function actually spends its time in.
              (run 1)
-             (next (+ base 12)))
+             (next (+ base cooked--image-record)))
         (while (and (< (+ i run) records)
                     ;; The four things a cell must agree with its neighbour
                     ;; about to be drawn with it.  Compared in the order they
                     ;; are cheapest to disagree on: a run ends at a different
                     ;; column of the same picture far more often than it ends
                     ;; at a different picture.
-                    (eq (+ ccol run) (cooked--u16 packed (+ next 6)))
-                    (eq crow (cooked--u16 packed (+ next 4)))
-                    (eq id (cooked--u32 packed next))
-                    (eq cols (cooked--u16 packed (+ next 8)))
-                    (eq rows (cooked--u16 packed (+ next 10))))
+                    (eq (+ ccol run) (cooked--u16 packed (+ next cooked--image-col)))
+                    (eq crow (cooked--u16 packed (+ next cooked--image-row)))
+                    (eq id (cooked--u32 packed (+ next cooked--image-id)))
+                    (eq cols (cooked--u16 packed (+ next cooked--image-cols)))
+                    (eq rows (cooked--u16 packed (+ next cooked--image-rows))))
           (setq run (1+ run)
-                next (+ next 12)))
+                next (+ next cooked--image-record)))
         (let ((end (+ pos run)))
           (put-text-property pos end 'cooked-deco deco)
           (when size
@@ -1524,9 +1552,9 @@ drain already handed over, rather than rebuilding it."
                             out)
                       (setq pending nil))))
           (while (< i limit)
-            (let* ((bits (cooked--u16 packed i))
+            (let* ((bits (cooked--u16 packed (+ i cooked--glyph-bits)))
                    (kind (if (cooked--box-shade-p bits) 'shade 'glyph))
-                   (left (cooked--u16 packed (+ i 2))))
+                   (left (cooked--u16 packed (+ i cooked--glyph-count))))
               ;; A shade record always starts afresh, and so does anything after
               ;; one: the two kinds never share a segment.
               (when (or (eq kind 'shade) (not (eq kind pending-kind)))
@@ -1545,7 +1573,7 @@ drain already handed over, rather than rebuilding it."
                   (push (cooked--glyph-pattern bits take) pending)
                   (setq col (+ col take)
                         left (- left take)))))
-            (setq i (+ i 4)))
+            (setq i (+ i cooked--glyph-record)))
           (flush))
         (nreverse out)))))
 
@@ -1560,8 +1588,8 @@ is made of."
         (limit (length packed))
         (found nil))
     (while (and (not found) (< i limit))
-      (setq found (cooked--box-shade-p (cooked--u16 packed i))
-            i (+ i 4)))
+      (setq found (cooked--box-shade-p (cooked--u16 packed (+ i cooked--glyph-bits)))
+            i (+ i cooked--glyph-record)))
     found))
 
 (defun cooked--apply-glyph-deco (start packed window size origin row)

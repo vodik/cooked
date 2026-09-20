@@ -4698,6 +4698,73 @@ row, and get measured again rather than answered from the first one's entry."
             (should-not (cooked--row-wraps-p (point) (line-end-position) nil memo))
             (should (= (hash-table-count memo) 2))))))))
 
+(ert-deftest cooked-wire-layout-matches-the-core ()
+  "Every number written by hand on the Lisp side of the wire matches the core.
+
+`cooked--wire-layout' hands back the `Attrs' bit values, the style record and
+its four field offsets, the glyph-run and image-placement record layouts, the
+box-glyph bit layout, and the two tuning defaults -- everything written a
+second time in lisp/cooked-face.el, cooked-deco.el, cooked-glyph.el and
+cooked-session.el rather than read from the core.  A NAME here is the matching
+`cooked--*' Lisp constant with its `cooked--' prefix removed, the same
+convention `cooked--key-table' uses against `cooked--key-names' in
+cooked-tests-input.el; unlike that table, which Lisp needs before the module
+loads and so keeps a second copy of on purpose, everything named here could be
+read off this alist directly and is only duplicated by omission."
+  (cooked-tests--with-session '("/bin/sh" "-c" "sleep 5")
+    (let ((layout (cooked--wire-layout)))
+      (cl-flet ((matches (name value)
+                  (should (equal (cdr (assq name layout)) value))))
+        (matches 'attr-bold cooked--attr-bold)
+        (matches 'attr-faint cooked--attr-faint)
+        (matches 'attr-italic cooked--attr-italic)
+        (matches 'attr-underline cooked--attr-underline)
+        (matches 'attr-blink cooked--attr-blink)
+        (matches 'attr-reverse cooked--attr-reverse)
+        (matches 'attr-conceal cooked--attr-conceal)
+        (matches 'attr-strike cooked--attr-strike)
+        (matches 'attr-underline-shift cooked--attr-underline-shift)
+        (matches 'attr-underline-style cooked--attr-underline-style)
+        (matches 'attr-overline cooked--attr-overline)
+
+        (matches 'style-record cooked--style-record)
+        (matches 'style-start cooked--style-start)
+        (matches 'style-end cooked--style-end)
+        (matches 'style-id cooked--style-id)
+        (matches 'style-link cooked--style-link)
+
+        (matches 'glyph-record cooked--glyph-record)
+        (matches 'glyph-bits cooked--glyph-bits)
+        (matches 'glyph-count cooked--glyph-count)
+
+        (matches 'image-record cooked--image-record)
+        (matches 'image-id cooked--image-id)
+        (matches 'image-row cooked--image-row)
+        (matches 'image-col cooked--image-col)
+        (matches 'image-cols cooked--image-cols)
+        (matches 'image-rows cooked--image-rows)
+
+        (matches 'box-kind-block cooked--box-kind-block)
+        (matches 'box-arc cooked--box-arc)
+        (matches 'box-diag-forward cooked--box-diag-forward)
+        (matches 'box-diag-backward cooked--box-diag-backward)
+        (matches 'box-dash-shift cooked--box-dash-shift)
+        (matches 'box-dash-mask cooked--box-dash-mask)
+        (matches 'box-weight-none cooked--box-weight-none)
+        (matches 'box-weight-heavy cooked--box-weight-heavy)
+        (matches 'box-weight-double cooked--box-weight-double)
+        (matches 'box-direction-up cooked--box-direction-up)
+        (matches 'box-direction-down cooked--box-direction-down)
+        (matches 'box-direction-left cooked--box-direction-left)
+        (matches 'box-direction-right cooked--box-direction-right)
+        (matches 'box-direction-full cooked--box-direction-full)
+        (matches 'box-direction-shade cooked--box-direction-shade)
+        (matches 'box-direction-quadrant cooked--box-direction-quadrant)
+
+        (matches 'min-redisplay-interval-ms
+                 (round (* 1000 cooked-min-redisplay-interval)))
+        (matches 'backlog-limit cooked-backlog-limit)))))
+
 (ert-deftest cooked-the-fixed-pitch-probe-measures-the-face-blink-inherits ()
   "`cooked-blink' is probed, being the one named face a rendition can pull in.
 

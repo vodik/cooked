@@ -42,7 +42,7 @@
       cooked--set-color-scheme cooked--set-graphics-shown cooked--set-hidden
       cooked--set-palette
       cooked--set-tuning cooked--signal cooked--spawn
-      cooked--strip-paste-controls)
+      cooked--strip-paste-controls cooked--wire-layout)
     "Every function the native core defines, by name.
 
 The core registers these when `cooked--load-module' loads it, so the
