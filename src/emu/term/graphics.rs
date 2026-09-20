@@ -72,7 +72,12 @@ impl State {
         } else {
             px
         };
-        let Interned { id, fresh, retired } = self.images.intern(&bytes, px);
+        let interned = self.images.intern(&bytes, px);
+        let id = interned.id();
+        let (fresh, retired) = match interned {
+            Interned::Fresh { retired, .. } => (true, retired),
+            Interned::Known(_) => (false, Vec::new()),
+        };
         // The count cap can retire an id to make room for this one, and the client's own
         // name for that picture has to go at the same moment: an `a=p` naming it would
         // otherwise place a rectangle the store can no longer describe.

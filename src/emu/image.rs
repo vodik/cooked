@@ -311,17 +311,28 @@ pub(crate) struct ImageStore {
 
 /// What [`ImageStore::intern`] decided about one transmission.
 ///
-/// A struct because of `retired`: the count cap can drop an id while naming a new one, and
-/// what the rest of the emulator hangs off an id -- the client-id map in
-/// [`Kitty`](super::kitty::Kitty) -- has to go at the same moment. Returning it makes that
-/// the caller's visible obligation.
+/// An enum because `retired` only ever comes with a fresh id: the ids the count cap drops
+/// to make room are the ones a known id never causes, so a known transmission carries no
+/// empty `Vec` pretending it might have some. What the rest of the emulator hangs off an
+/// id -- the client-id map in [`Kitty`](super::kitty::Kitty) -- has to go at the same
+/// moment the count cap retires one, which is why [`Self::intern`] returns `retired`
+/// rather than dropping it: that makes the eviction the caller's visible obligation.
 #[derive(Debug)]
-pub(crate) struct Interned {
-    pub id: ImageId,
-    /// Whether Lisp has yet to see these bytes, and so whether they must cross.
-    pub fresh: bool,
-    /// Ids the count cap dropped to make room for this one, usually none.
-    pub retired: Vec<ImageId>,
+pub(crate) enum Interned {
+    /// Lisp has yet to see these bytes, and so they must cross. Ids the count cap dropped
+    /// to make room for this one, usually none.
+    Fresh { id: ImageId, retired: Vec<ImageId> },
+    /// The same bytes came back; Lisp already has them under this id.
+    Known(ImageId),
+}
+
+impl Interned {
+    /// The id this transmission is known by, fresh or not.
+    pub(crate) fn id(&self) -> ImageId {
+        match *self {
+            Interned::Fresh { id, .. } | Interned::Known(id) => id,
+        }
+    }
 }
 
 impl ImageStore {
@@ -343,19 +354,14 @@ impl ImageStore {
             .ledger
             .find(bucket, |id| self.hashes.get(&id) == Some(&hash))
         {
-            return Interned {
-                id,
-                fresh: false,
-                retired: Vec::new(),
-            };
+            return Interned::Known(id);
         }
 
         let id = self.ledger.insert(bucket);
         self.images.insert(id, Image { px, asked: None });
         self.hashes.insert(id, hash);
-        Interned {
+        Interned::Fresh {
             id,
-            fresh: true,
             retired: self.evict(),
         }
     }
@@ -396,7 +402,7 @@ impl ImageStore {
     /// fresh id and crosses the boundary, instead of being answered with the name of a
     /// picture nothing can draw any more.
     ///
-    /// The caller retires the id's client name too; see [`Interned::retired`] for why
+    /// The caller retires the id's client name too; see [`Interned::Fresh`] for why
     /// that cannot be left to a comment.
     pub(crate) fn forget(&mut self, id: ImageId) {
         self.ledger.remove(id);
@@ -439,9 +445,12 @@ mod tests {
         let mut store = ImageStore::default();
         let a = store.intern(b"pixels", PixelSize::new(10, 20));
         let b = store.intern(b"pixels", PixelSize::new(10, 20));
-        assert_eq!(a.id, b.id);
-        assert!(a.fresh, "the first transmission has to reach Lisp");
-        assert!(!b.fresh, "the second must not");
+        assert_eq!(a.id(), b.id());
+        assert!(
+            matches!(a, Interned::Fresh { .. }),
+            "the first transmission has to reach Lisp"
+        );
+        assert!(matches!(b, Interned::Known(_)), "the second must not");
     }
 
     #[test]
@@ -449,7 +458,7 @@ mod tests {
         let mut store = ImageStore::default();
         let a = store.intern(b"one", PixelSize::new(10, 20));
         let b = store.intern(b"two", PixelSize::new(10, 20));
-        assert_ne!(a.id, b.id);
+        assert_ne!(a.id(), b.id());
     }
 
     #[test]
@@ -478,7 +487,7 @@ mod tests {
     #[test]
     fn geometry_is_remembered_after_the_bytes_are_handed_over() {
         let mut store = ImageStore::default();
-        let id = store.intern(b"pixels", PixelSize::new(25, 40)).id;
+        let id = store.intern(b"pixels", PixelSize::new(25, 40)).id();
         assert_eq!(store.cells(id, METRICS), Some(CellSize::new(3, 2)));
     }
 
@@ -506,10 +515,10 @@ mod tests {
 
         let real = store.intern(b"real pixels", PixelSize::new(10, 20));
         assert!(
-            real.fresh,
+            matches!(real, Interned::Fresh { .. }),
             "a same-bucket decoy with a different digest is not a match"
         );
-        assert_ne!(real.id, decoy);
+        assert_ne!(real.id(), decoy);
         assert_eq!(store.hashes[&decoy], content_hash(b"decoy"), "untouched");
     }
 
@@ -525,8 +534,11 @@ mod tests {
             store.intern(&frame(n), PixelSize::new(10, 20));
         }
         let again = store.intern(&frame(0), PixelSize::new(10, 20));
-        assert_eq!(again.id, first.id);
-        assert!(!again.fresh, "nothing shed it, so Lisp still has it");
+        assert_eq!(again.id(), first.id());
+        assert!(
+            matches!(again, Interned::Known(_)),
+            "nothing shed it, so Lisp still has it"
+        );
     }
 
     /// The other half of the same invariant, and the one that makes the animation draw:
@@ -536,16 +548,19 @@ mod tests {
     fn a_forgotten_frame_crosses_again() {
         let mut store = ImageStore::default();
         let first = store.intern(&frame(0), PixelSize::new(10, 20));
-        store.forget(first.id);
+        store.forget(first.id());
         assert_eq!(
-            store.cells(first.id, METRICS),
+            store.cells(first.id(), METRICS),
             None,
             "and its geometry goes with it"
         );
 
         let again = store.intern(&frame(0), PixelSize::new(10, 20));
-        assert!(again.fresh, "the bytes have to cross again");
-        assert_ne!(again.id, first.id, "a forgotten id is not reissued");
+        assert!(
+            matches!(again, Interned::Fresh { .. }),
+            "the bytes have to cross again"
+        );
+        assert_ne!(again.id(), first.id(), "a forgotten id is not reissued");
     }
 
     /// Geometry and digest are one entry, so nothing survives the id that named it -- in
@@ -553,7 +568,7 @@ mod tests {
     #[test]
     fn nothing_outlives_the_entry_it_belongs_to() {
         let mut store = ImageStore::default();
-        let id = store.intern(b"pixels", PixelSize::new(10, 20)).id;
+        let id = store.intern(b"pixels", PixelSize::new(10, 20)).id();
         store.set_asked(id, Some(CellSize::new(4, 3)));
         assert_eq!(store.cells(id, METRICS), Some(CellSize::new(4, 3)));
 
@@ -572,15 +587,21 @@ mod tests {
             ids.push(store.intern(&n.to_le_bytes(), PixelSize::new(10, 20)));
         }
         assert!(
-            ids.iter().all(|interned| interned.retired.is_empty()),
+            ids.iter().all(|interned| match interned {
+                Interned::Fresh { retired, .. } => retired.is_empty(),
+                Interned::Known(_) => false,
+            }),
             "nothing is retired below the cap"
         );
 
         let over = store.intern(b"one too many", PixelSize::new(10, 20));
         // Named rather than merely dropped: the caller has to retire the client's own
-        // name for the picture at the same moment. See `Interned::retired`.
-        assert_eq!(over.retired, vec![ids[0].id]);
-        assert_eq!(store.cells(ids[0].id, METRICS), None);
+        // name for the picture at the same moment. See `Interned::Fresh`.
+        let Interned::Fresh { retired, .. } = &over else {
+            panic!("a new id past the cap is fresh")
+        };
+        assert_eq!(*retired, vec![ids[0].id()]);
+        assert_eq!(store.cells(ids[0].id(), METRICS), None);
         assert_eq!(store.ledger.len(), MAX_TRACKED_IMAGES);
     }
 }
