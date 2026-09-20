@@ -18,6 +18,7 @@
 
 (require 'ert)
 (require 'cooked-tests-helpers)
+(require 'cooked-tests-render)
 
 (defconst cooked-tests--red-flood
   "i=0; while [ $i -lt 90 ]; do printf '\\033[31mred\\033[0m line %s\\n' $i; i=$((i+1)); done; sleep 5"
@@ -69,6 +70,30 @@ equal whatever else is in the buffer."
         nil)
       (setq pos (next-single-property-change pos 'cooked-pending-style)))
     (nreverse found)))
+
+(defun cooked-tests--red-lines (from to)
+  "Bytes for red lines numbered FROM to TO, ready for `cooked--feed'.
+
+`cooked--feed' hands the emulator bytes directly rather than through a pty, so
+unlike `cooked-tests--red-flood' -- a shell script whose newlines the kernel's
+`ONLCR' turns into \\r\\n on their way out -- the carriage return has to be
+spelled here."
+  (mapconcat (lambda (n) (format "\033[31mred\033[0m line %d\r\n" n))
+             (number-sequence from to) ""))
+
+(defun cooked-tests--first-pending (pos limit)
+  "The first position from POS, below LIMIT, still owing a styling debt.
+
+Not simply POS itself: a screen too small to hold everything fed since the
+last drain promotes its own oldest rows to scrollback before appending the
+rest as a new batch, and a promoted row was on its way to being displayed
+already, so it was never deferred.  A batch fed onto such a screen can
+therefore open with a stretch of already-coloured text before its own debt
+begins."
+  (let ((pos pos))
+    (while (and pos (< pos limit) (not (get-text-property pos 'cooked-pending-style)))
+      (setq pos (next-single-property-change pos 'cooked-pending-style nil limit)))
+    (and pos (< pos limit) pos)))
 
 (ert-deftest cooked-scrollback-is-not-coloured-until-it-is-displayed ()
   "The deferral itself: faces absent after a flood, present once looked at."
@@ -142,32 +167,103 @@ other test here names, the reset at the end of a line and the blanks between."
 (ert-deftest cooked-discarding-the-middle-of-a-batch-pays-for-both-sides ()
   "One command's output cut out of the middle leaves the rest of its batch red.
 
+Driven through `cooked--feed' and an explicit drain rather than a real child
+and `cooked-tests--settle': a real child's flood arrives as one drain when the
+machine is idle, and this test used to assume exactly that, but under load it
+can arrive as several, each its own batch -- see the next test for what that
+does to the assertion.  This one instead forces the shape the doomed path has
+to get right regardless of load: `cooked--style-piece-spans' bound down turns
+one flood, fed and drained once, into several pieces, and the cut both starts
+inside a piece that is not the batch's first -- so its offset is not zero --
+and ends exactly on another piece's boundary, dropping the pieces between
+outright.
+
 Asserted before anything is displayed, which is the point: the colours on
-either side of the cut are put on by the cut itself, since the offsets they are
-counted from do not survive it."
-  (cooked-tests--with-session (list "/bin/sh" "-c" cooked-tests--red-flood)
-    (cooked-tests--settled-flood)
-    (let* ((pos (cooked-tests--scrollback-red))
-           (bounds (cooked--pending-style-bounds pos))
-           (from (car bounds))
-           (to (cdr bounds))
-           ;; A cut strictly inside the batch, on line boundaries, so that both
-           ;; edges are the same batch's.
-           (beg (save-excursion (goto-char (+ from (/ (- to from) 3)))
-                                (line-beginning-position)))
-           (end (save-excursion (goto-char (+ from (/ (* 2 (- to from)) 3)))
-                                (line-beginning-position))))
-      (should (< from beg))
-      (should (< beg end))
-      (should (< end to))
-      (cooked--discard-scrollback-region beg end)
-      (should-not (cooked-tests--pending-style-positions))
-      (should (= 0 cooked--pending-styles))
-      (goto-char (point-min))
-      (while (search-forward "red" nil t)
-        (should (equal (cooked--face-color (get-text-property (match-beginning 0) 'face)
-                                  :foreground)
-                       (cooked-tests--red)))))))
+either side of the cut are put on by the cut itself, since the offsets they
+are counted from do not survive it."
+  (let ((cooked--style-piece-spans 6))
+    (cooked-tests--with-fed-screen 5 20
+      (cooked-tests--fed (cooked-tests--red-lines 0 39))
+      (let* ((screen (cooked--screen-start-position))
+             (first-owed (cooked-tests--first-pending (point-min) screen))
+             (first-piece (cooked--pending-style-bounds first-owed))
+             ;; The cut starts inside the SECOND piece, not the first, so the
+             ;; survivor it paints is based at a nonzero offset into the batch.
+             (left (cooked--pending-style-bounds (cdr first-piece)))
+             (left-from (car left))
+             (beg (+ left-from 3))
+             ;; And ends exactly where a later piece begins: nothing of that
+             ;; piece is in the cut, and nothing of it should be painted.
+             (past (cdr (cooked--pending-style-bounds (cdr left))))
+             (end (car (cooked--pending-style-bounds past))))
+        (should (< beg end))
+        (let ((owed-before cooked--pending-styles))
+          (cooked--discard-scrollback-region beg end)
+          ;; At least the pieces strictly between LEFT and END are gone.
+          (should (< cooked--pending-styles owed-before))
+          ;; The survivor before BEG is already coloured.
+          (goto-char left-from)
+          (let ((seen 0))
+            (while (search-forward "red" beg t)
+              (setq seen (1+ seen))
+              (should (equal (cooked--face-color (get-text-property (match-beginning 0) 'face)
+                                        :foreground)
+                             (cooked-tests--red))))
+            (should (> seen 0)))
+          ;; The piece just past END was never touched, and is still owed,
+          ;; sitting at BEG now that the cut has closed the gap in front of it.
+          (should (get-text-property beg 'cooked-pending-style)))))))
+
+(ert-deftest cooked-discarding-across-a-batch-boundary-pays-only-what-it-touches ()
+  "A batch the discard never reaches stays owed; that is not a leftover bug.
+
+The failure this guards: under load a flood can arrive as several drains, each
+its own batch, and a discard landing in one of them leaves the others exactly
+as owing as it found them.  `(should-not (cooked-tests--pending-style-positions))'
+over the whole buffer read that as a bug once, on a run at loadavg 8.2, because
+the test that asserted it had only ever been fed as one batch.  Reproduced here
+without load: three feeds, each drained before the next, make three batches,
+and the cut spans the boundary between the first two, entirely clear of the
+third."
+  (let ((cooked--style-piece-spans 6))
+    (cooked-tests--with-fed-screen 5 20
+      (cooked-tests--fed (cooked-tests--red-lines 0 19))
+      (let ((batch1-end (cooked--screen-start-position)))
+        (cooked-tests--fed (cooked-tests--red-lines 20 39))
+        (let ((batch2-end (cooked--screen-start-position)))
+          (cooked-tests--fed (cooked-tests--red-lines 40 59))
+          (let* ((batch3-end (cooked--screen-start-position))
+                 (batch2-owed (cooked-tests--first-pending batch1-end batch2-end))
+                 ;; A few characters into batch2's second piece, again for a
+                 ;; nonzero offset, so the cut both crosses the batch boundary
+                 ;; above it and starts mid-piece below it.
+                 (left (cooked--pending-style-bounds
+                        (cdr (cooked--pending-style-bounds batch2-owed))))
+                 (left-from (car left))
+                 (beg (+ left-from 3))
+                 (end (- batch2-end 5))
+                 (owed-before cooked--pending-styles))
+            (should (< batch1-end left-from))
+            (should (< beg end))
+            (should (< end batch2-end))
+            (cooked--discard-scrollback-region beg end)
+            (should (< cooked--pending-styles owed-before))
+            ;; batch1, entirely above BEG, is untouched and still fully owed.
+            (should (get-text-property (point-min) 'cooked-pending-style))
+            ;; batch3, entirely below the cut, is untouched too, now sitting
+            ;; earlier in the buffer by however much the cut removed.
+            (should (get-text-property (- batch3-end (- end beg) 1) 'cooked-pending-style))
+            ;; The survivor above the cut, inside batch2, is already coloured.
+            (goto-char left-from)
+            (let ((seen 0))
+              (while (search-forward "red" beg t)
+                (setq seen (1+ seen))
+                (should (equal (cooked--face-color (get-text-property (match-beginning 0) 'face)
+                                          :foreground)
+                               (cooked-tests--red))))
+              (should (> seen 0)))
+            ;; And nothing is left owing right where the cut closed.
+            (should-not (get-text-property beg 'cooked-pending-style))))))))
 
 (ert-deftest cooked-reusing-a-rendition-id-pays-the-debt-that-named-it ()
   "An id about to mean something else colours the batches that still mean it.
