@@ -558,8 +558,8 @@ impl Screen {
     /// Which row carries the mark named ID, or nothing if no row does any longer.
     ///
     /// The row is the answer rather than the column because the callers ask about lines:
-    /// [`State::clear_to_prompt`](crate::emu::term::State::clear_to_prompt) wants the row
-    /// the prompt begins on. Nothing means the marked row has left the grid -- scrolled
+    /// `State::clear_to_prompt` wants the row the prompt begins on, and nothing finer.
+    /// Nothing means the marked row has left the grid -- scrolled
     /// into scrollback, removed by `cooked-delete-output`, or blanked by an erase that
     /// ended the row rather than its drawing -- and the caller falls back.
     ///
