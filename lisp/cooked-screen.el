@@ -254,6 +254,12 @@ Colour rides on `face' alone.  `cooked-mode' clears `font-lock-defaults',
 which comint leaves at (nil t) -- under that setting any fontification of the
 buffer unfontifies it first and strips a bare `face'.
 
+The insertion runs with `before-' and `after-change-functions' live and the
+property writes after it do not, deliberately: a change hook the user added is
+entitled to see the row rewrite, and nothing cooked has is on either hook.  The
+comment beside the binding below carries the measurements that decision rests
+on and what it would save to inhibit them for the whole apply.
+
 ROW is the screen row BLOCK's *first* row is, where the caller knows it: the
 live screen does, scrollback does not.  With the origin it says which cell of a
 glyph run the child's cursor is on, which is where the run is split.
@@ -300,6 +306,16 @@ Returns the position the text was inserted at."
       ;; added.  Nothing cooked has is on either hook -- `before-change-functions'
       ;; is empty in a cooked buffer and `after-change-functions' holds
       ;; `jit-lock-after-change' alone, or `evil-track-last-insertion' beside it.
+      ;; Re-measured 2026-09-20 against this tree: still nil and
+      ;; (jit-lock-after-change t), and a repaint of 24 rows of eight spans each
+      ;; makes two calls.
+      ;;
+      ;; Nor is a hook that signals lost in the process filter, which is the
+      ;; other reason offered for inhibiting them: the error comes out of the
+      ;; `insert' into `cooked--drain-and-repair', which names it and resyncs the
+      ;; screen -- "cooked: redisplay failed: ...; resyncing" -- and re-signals
+      ;; under `cooked-debug'.  Probed on this tree with an `after-change-functions'
+      ;; entry that errors on every change.
       (let ((inhibit-modification-hooks t)
             (links nil))
         ;; Links are collected on the same walk and applied after the decorations,
