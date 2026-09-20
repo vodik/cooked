@@ -1940,6 +1940,27 @@ cost one byte each."
     ;; Refusing twice, because the second call has nothing left to hand over.
     (should-error (cooked-delegate-key "\C-r") :type 'user-error)))
 
+(ert-deftest cooked-delegation-spells-the-cursor-back-against-decckm ()
+  "The left-arrows that put ZLE's cursor back follow the mode the child holds.
+
+Regression: they used to be `cooked--csi' calls, spelled `ESC [ D' no matter
+what.  Under DECCKM the child reads cursor keys as `ESC O D', so a delegated
+line whose suffix is more than empty left the child's cursor short of where
+the rest of the line expects it."
+  :tags '(zsh)
+  (skip-unless (executable-find "zsh"))
+  (cooked-tests--with-zsh
+    (goto-char cooked--input-end)
+    (insert "echo hello")
+    ;; Point between `hell' and `o', so there is a suffix to preserve.
+    (backward-char 1)
+    (cooked-tests--negotiate "\e[?1h")
+    (let (sent)
+      (cl-letf (((symbol-function 'cooked--send-to-child)
+                 (lambda (bytes) (setq sent bytes))))
+        (cooked-delegate-key "\C-r"))
+      (should (equal sent "echo hello\eOD\C-r")))))
+
 (ert-deftest cooked-delegation-strips-control-bytes-from-the-line ()
   "The line handed to the shell is typing, so an ESC yanked into it is a space.
 
