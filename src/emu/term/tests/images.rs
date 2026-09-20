@@ -227,11 +227,11 @@ fn a_build_without_png_refuses_what_would_reach_emacs_as_one() {
     // is told OK. `f=100` and `f=32` would reach Emacs as a PNG, and so would a sixel, so
     // those probes are refused and DA1 loses its `4`.
     let mut t = with_metrics(24, 80);
-    t.set_graphics_shown(ShownFormats::of([
-        ImageFormat::Jpeg,
-        ImageFormat::Gif,
-        ImageFormat::Ppm,
-    ]));
+    t.set_graphics_shown(
+        [ImageFormat::Jpeg, ImageFormat::Gif, ImageFormat::Ppm]
+            .into_iter()
+            .collect(),
+    );
     t.feed(b"\x1b[c\x1b[?1;1S");
     t.feed(b"\x1b_Gi=1,s=1,v=1,a=q,t=d,f=24;AAAA\x1b\\");
     t.feed(b"\x1b_Gi=2,s=1,v=1,a=q,t=d,f=32;AAAAAA==\x1b\\");

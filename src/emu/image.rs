@@ -86,11 +86,6 @@ impl ShownFormats {
         1 << format as u8
     }
 
-    /// The set holding exactly FORMATS.
-    pub fn of(formats: impl IntoIterator<Item = ImageFormat>) -> Self {
-        Self(formats.into_iter().fold(0, |bits, f| bits | Self::bit(f)))
-    }
-
     /// Whether a picture in FORMAT would be shown.
     pub fn shows(self, format: ImageFormat) -> bool {
         self.0 & Self::bit(format) != 0
@@ -105,6 +100,13 @@ impl ShownFormats {
 impl Default for ShownFormats {
     fn default() -> Self {
         Self::ALL
+    }
+}
+
+impl FromIterator<ImageFormat> for ShownFormats {
+    /// The set holding exactly the formats iterated.
+    fn from_iter<I: IntoIterator<Item = ImageFormat>>(formats: I) -> Self {
+        Self(formats.into_iter().fold(0, |bits, f| bits | Self::bit(f)))
     }
 }
 

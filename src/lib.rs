@@ -1259,7 +1259,7 @@ fn shown_formats(env: Env, list: Value) -> Result<ShownFormats> {
         .into_iter()
         .find_map(|(name, format)| env.eq(item, name).then_some(format)))
     })?;
-    Ok(ShownFormats::of(formats.into_iter().flatten()))
+    Ok(formats.into_iter().flatten().collect())
 }
 
 fn signal<'e>(env: Env<'e>, args: &[Value<'e>]) -> Result<Value<'e>> {
