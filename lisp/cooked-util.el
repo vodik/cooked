@@ -453,13 +453,23 @@ SESSION is a form, and it is evaluated in the cleanup rather than at entry
 because BODY may be the very thing that ends the session: a child's exit is
 reported in the drain BODY is consuming, and the consumer that acts on it
 reaps the session and, for `cooked-process--pump', the buffer holding it.  Nil
-there means there is no longer anyone to tell, and nothing is told."
+there means there is no longer anyone to tell, and nothing is told.
+
+Whether BODY returned is the APPLIED the core is told, which is how a consumer
+that signalled part-way gets the core's copy of what Emacs shows cleared: it
+told the core Emacs holds rows it never inserted, and until the copy is dropped
+a child repainting the same frame mends nothing.  Saying so here rather than in
+each consumer is the point of the bracket -- this is the one place every
+unfinished consuming passes."
   (declare (indent 1) (debug (form body)))
-  (let ((owed (make-symbol "owed")))
-    `(unwind-protect
-         (progn ,@body)
-       (when-let* ((,owed ,session))
-         (cooked--ready ,owed)))))
+  (let ((owed (make-symbol "owed"))
+        (applied (make-symbol "applied")))
+    `(let ((,applied nil))
+       (unwind-protect
+           (prog1 (progn ,@body)
+             (setq ,applied t))
+         (when-let* ((,owed ,session))
+           (cooked--ready ,owed ,applied))))))
 
 ;;;; Replies
 

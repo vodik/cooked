@@ -682,6 +682,34 @@ pub unsafe extern "C" fn emacs_module_init(runtime: *mut Runtime) -> std::ffi::c
         /// than reading it from here: `cooked-wire-layout-matches-the-core' does that for
         /// every entry this returns.
         "cooked--wire-layout" 0..=0 => wire_layout;
+
+        /// Tell SESSION that Emacs has dealt with the last drain, APPLIED saying whether it
+        /// got the whole frame into the buffer.
+        ///
+        /// Re-arms the wakeup: the core sends one wake byte and then stays quiet until this
+        /// says the drain is applied, so the child's output accumulates in the emulator
+        /// instead of buying a buffer update per write.  That is the whole of cooked's
+        /// backpressure, and it is deliberately released here rather than at
+        /// `cooked--drain' -- taking a delta is cheap, applying it is not, and re-arming
+        /// before the apply would make `cooked-min-redisplay-interval' a floor that had
+        /// always elapsed by the time it was consulted.  It does not wait for redisplay,
+        /// which Emacs runs after the process filter that calls this has returned.
+        ///
+        /// With APPLIED nil the core forgets its copy of what Emacs shows, as
+        /// `cooked--redraw' does without damaging anything, so every live row is sent again
+        /// the next time it is damaged.  A drain that signalled part-way has left the core
+        /// believing Emacs holds rows it never inserted, and the core leaves a damaged row
+        /// out of a drain when its cells match that belief -- so without this a child
+        /// repainting the very same frame would never mend the screen.  Omitted means nil,
+        /// which is the honest answer for a caller that renders nothing: the benchmark and
+        /// the tests that drain by hand.
+        ///
+        /// Call it once per drain, from the cleanup of an `unwind-protect' rather than the
+        /// body: a render that signals must still re-arm, and is exactly the caller that
+        /// passes APPLIED nil.  `cooked--owing-readiness' is that bracket.  Failing to call
+        /// it at all is slow rather than fatal -- the reader thread's own tick wakes Emacs
+        /// instead, at roughly 100ms.
+        "cooked--ready" 1..=2 => ready;
     });
 
     let accessors = accessors!(env, {
@@ -710,23 +738,6 @@ pub unsafe extern "C" fn emacs_module_init(runtime: *mut Runtime) -> std::ffi::c
         /// running program, not to a transcript.
         "cooked--clear-to-prompt" => |s| s.term().clear_to_prompt();
 
-        /// Tell SESSION that Emacs has applied the last drain to the buffer.
-        ///
-        /// Re-arms the wakeup: the core sends one wake byte and then stays quiet until this
-        /// says the drain is applied, so the child's output accumulates in the emulator
-        /// instead of buying a buffer update per write.  That is the whole of cooked's
-        /// backpressure, and it is deliberately released here rather than at
-        /// `cooked--drain' -- taking a delta is cheap, applying it is not, and re-arming
-        /// before the apply would make `cooked-min-redisplay-interval' a floor that had
-        /// always elapsed by the time it was consulted.  It does not wait for redisplay,
-        /// which Emacs runs after the process filter that calls this has returned.
-        ///
-        /// Call it once per drain, from the cleanup of an `unwind-protect' rather than the
-        /// body: a render that signals must still re-arm.  Failing to call it is slow
-        /// rather than fatal -- the reader thread's own tick wakes Emacs instead, at
-        /// roughly 100ms -- which is what makes the callers that never do (the benchmark,
-        /// the tests that drain by hand) merely leisurely.
-        "cooked--ready" => Session::ready;
 
         /// Text of the last non-blank line written by SESSION's child.
         /// Used as the minibuffer prompt when SESSION enters `secret' mode.
@@ -1333,6 +1344,18 @@ fn remove_rows<'e>(env: Env<'e>, args: &[Value<'e>]) -> Result<Value<'e>> {
     env.from_lisp::<&Session>(args[0])?
         .term()
         .remove_rows(first, count);
+    Ok(env.nil())
+}
+
+fn ready<'e>(env: Env<'e>, args: &[Value<'e>]) -> Result<Value<'e>> {
+    let session = env.from_lisp::<&Session>(args[0])?;
+    // The forgetting comes first, while the wakeup is still held: re-arming is what lets
+    // the reader hand Lisp another drain, and one taken against a copy this call is about
+    // to throw away would leave out rows Emacs never got.
+    if args.get(1).is_none_or(|applied| env.is_nil(*applied)) {
+        session.term().forget_sent(None);
+    }
+    session.ready();
     Ok(env.nil())
 }
 

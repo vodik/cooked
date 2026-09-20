@@ -144,14 +144,15 @@ again is safe."
     ;; can mend, since `cooked-refresh' drains too.  Callees are meant not to
     ;; wander (see `cooked--handle-osc'), but this is the drain's own guarantee
     ;; and does not depend on their good behaviour.
-    (let ((buffer (current-buffer))
-          (applied nil))
+    (let ((buffer (current-buffer)))
       ;; The readiness is owed once, at the very end: the loop below may have
       ;; drained several times, and it is the last apply that
       ;; `cooked-min-redisplay-interval' is measured from.  Read out of BUFFER
       ;; rather than from whatever buffer a callee has left current, for the same
       ;; reason as the flags below, and nil once something the apply ran has killed
-      ;; the session.  See `cooked--owing-readiness'.
+      ;; the session.  The bracket also carries whether the applying finished, which
+      ;; is what clears the core's copy of the screen after a failure; see
+      ;; `cooked--owing-readiness'.
       (cooked--owing-readiness (and (buffer-live-p buffer)
                                     (buffer-local-value 'cooked--session buffer))
         (unwind-protect
@@ -166,21 +167,11 @@ again is safe."
               ;; and a freeze that has lifted does not lift again.
               (while (and cooked--drain-pending cooked--session)
                 (setq cooked--drain-pending nil)
-                (cooked--apply (cooked--drain cooked--session cooked-rejoin-wrapped-lines nil t)))
-              (setq applied t))
+                (cooked--apply (cooked--drain cooked--session cooked-rejoin-wrapped-lines nil t))))
           (when (buffer-live-p buffer)
             (with-current-buffer buffer
               (setq cooked--draining nil
                     cooked--drain-pending nil)
-              ;; A drain that did not finish applying has told the core Emacs holds
-              ;; rows it never inserted, and the core leaves a row out of later
-              ;; drains when its cells match that copy.  So a child repainting the
-              ;; same frame would never mend the screen.  `cooked--on-wake' follows
-              ;; a failure with `cooked-refresh', which clears the copy itself, but
-              ;; not under `cooked-debug', and not for any other caller; this is the
-              ;; one place every unfinished apply passes.
-              (unless applied
-                (cooked--forget-sent-rows))
               ;; Also in a cleanup, though `cooked--apply' ends with it: the drain
               ;; has assertions in it (`cooked--check-seam', `cooked--guard-row-width')
               ;; and a signal out of one leaves the screen half-rewritten with the

@@ -2774,6 +2774,31 @@ resync went and got it."
     (should (cooked-tests--settle
              (lambda () (string-match-p "afterwards" (cooked-tests--text)))))))
 
+(ert-deftest cooked-a-consumer-that-signals-leaves-the-core-no-copy-of-the-screen ()
+  "Whoever fails to consume a drain says so, and the next drain is whole again.
+
+The core leaves a damaged row out of a drain when its cells match the copy of
+what Emacs shows, so a child that erases a line and writes the same text back
+costs nothing.  A consumer that signalled part-way has made that copy a lie --
+Emacs never inserted the rows the drain carried -- and the repaint that would
+otherwise mend the screen is exactly the repaint the copy swallows.
+
+`cooked--owing-readiness' is where it is said, for every consumer of a drain
+rather than for `cooked--drain-and-apply' alone, which is why the body here is
+a bare `error' and not a render."
+  :tags '(pty)
+  (cooked-tests--with-session '("/bin/cat")
+    (should (cooked-tests--settle (lambda () cooked--session)))
+    (let ((drain (lambda () (cooked--drain cooked--session nil nil t))))
+      (cooked--feed cooked--session "hello")
+      (should (plist-get (funcall drain) :rows))
+      ;; The same cells written over themselves: damaged, and matching the copy.
+      (cooked--feed cooked--session "\rhello")
+      (should-not (plist-get (funcall drain) :rows))
+      (should-error (cooked--owing-readiness cooked--session (error "boom")))
+      (cooked--feed cooked--session "\rhello")
+      (should (plist-get (funcall drain) :rows)))))
+
 (ert-deftest cooked-a-still-render-at-a-prompt-holds-the-view-but-not-the-line ()
   "The three axes come apart at a prompt.
 
