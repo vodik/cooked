@@ -56,7 +56,7 @@ const MAX_COLS: usize = 12;
 /// holds, where an ordinary one holds four thousand.
 ///
 /// Small so that collections happen every few pens rather than never. Whether an id is
-/// held is decided by a hand-kept list of roots, `State::collect_styles`, and a holder
+/// held is decided by a hand-kept list of roots, `State::style_id`, and a holder
 /// left off the list has its id reused under it; at this size, removing any of the grids,
 /// the copy of what Emacs shows, or the scrollback waiting to be drained from that list
 /// fails a property within the default case count.

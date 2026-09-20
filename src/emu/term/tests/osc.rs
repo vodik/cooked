@@ -98,7 +98,7 @@ fn a_uri_crosses_the_boundary_once() {
 /// The child here names one destination after another and keeps none of them: each
 /// link is written over the one before it, so by the time the store fills, nothing on
 /// either grid, in the front buffer or in the undrained scrollback names any of the
-/// earlier ids. `State::collect_links` frees them and `LinkStore` hands them back out,
+/// earlier ids. `State::link_id` frees them and `LinkStore` hands them back out,
 /// which is what keeps the id small enough to live in a packed cell.
 #[test]
 fn a_destination_nothing_names_any_more_gives_its_id_back() {

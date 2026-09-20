@@ -309,52 +309,44 @@ impl State {
     }
 
     /// The id STYLE has, giving it one if it has none.
-    fn style_id(&mut self, style: Style) -> StyleId {
-        if let Some(id) = self.styles.lookup(style) {
-            return id;
-        }
-        if self.styles.is_full() {
-            self.collect_styles();
-        }
-        self.styles.insert(style)
-    }
-
-    /// Free the rendition ids nothing holds any more.
     ///
-    /// Everything that can hold an id until the next drain is marked: every cell of both
-    /// grids, the copy of what Emacs shows, and the rows waiting to reach it as
-    /// scrollback. Emacs' own text holds faces rather than ids, so nothing already drawn
-    /// can be recoloured by an id's reuse.
-    fn collect_styles(&mut self) {
-        // The pen's own ids may be among those freed, if nothing has been written with it.
-        self.pen.forget_ids();
+    /// Should the table be full, the collection [`StyleStore::id_for`] then runs marks
+    /// everything that can hold an id until the next drain: every cell of both grids, the
+    /// copy of what Emacs shows, and the rows waiting to reach it as scrollback. Emacs'
+    /// own text holds faces rather than ids, so nothing already drawn can be recoloured
+    /// by an id's reuse.
+    fn style_id(&mut self, style: Style) -> StyleId {
         let Self {
             screens,
             front,
             pending_scrollback,
             styles,
+            pen,
             ..
         } = self;
-        styles.collect(|mark| {
-            for screen in screens.each() {
-                screen
-                    .all_cells()
+        styles.id_for(style, || {
+            // The pen's own ids may be among those freed, if nothing has been written
+            // with it.
+            pen.forget_ids();
+            (
+                screens
+                    .each()
+                    .into_iter()
+                    .flat_map(Screen::all_cells)
+                    .chain(front.all_cells()),
+                pending_scrollback
                     .iter()
-                    .for_each(|cell| mark(cell.style()));
-            }
-            front.all_cells().iter().for_each(|cell| mark(cell.style()));
-            for scrolled in pending_scrollback.iter() {
-                scrolled.runs.iter().for_each(|run| mark(run.style));
-            }
-        });
+                    .flat_map(|scrolled| scrolled.runs.iter()),
+            )
+        })
     }
 
-    /// Free the link ids nothing holds any more, so they can name other destinations.
+    /// The id URI has as an `OSC 8` destination, and whether Lisp has yet to see it.
     ///
-    /// The mark list is [`Self::collect_styles`]' with one addition and one difference.
-    /// The addition is the pen's open link: a rendition the pen holds is re-resolved
-    /// from the `Style` it keeps, while an `OSC 8` link is *only* an id, so an open link
-    /// with nothing yet written under it has no other home. The difference is
+    /// The mark list is [`Self::style_id`]'s with one addition and one difference. The
+    /// addition is the pen's open link: a rendition the pen holds is re-resolved from the
+    /// `Style` it keeps, while an `OSC 8` link is *only* an id, so an open link with
+    /// nothing yet written under it has no other home. The difference is
     /// `pending_links`, the ids announced but not yet handed over: freeing one would put
     /// two definitions of the same id in a single drain, and while the second would win
     /// harmlessly -- nothing names the first, or it would have been marked -- keeping
@@ -375,7 +367,7 @@ impl State {
     /// `a_link_only_ever_seen_in_scrollback_survives_a_collection_pressed_by_a_new_one`
     /// in `term::tests::collect` for exactly that sequence, constructed by hand: with
     /// this mark removed it reuses the id for a different destination.
-    pub(super) fn collect_links(&mut self) {
+    pub(super) fn link_id(&mut self, uri: &str) -> (LinkId, bool) {
         let Self {
             screens,
             front,
@@ -385,33 +377,21 @@ impl State {
             pen,
             ..
         } = self;
-        links.collect(|mark| {
-            if let Some(id) = pen.link() {
-                mark(id);
-            }
-            for (id, _) in pending_links.iter() {
-                mark(*id);
-            }
-            for screen in screens.each() {
-                screen
-                    .all_cells()
+        links.id_for(uri, || {
+            (
+                pen.link()
+                    .into_iter()
+                    .chain(pending_links.iter().map(|(id, _)| *id)),
+                screens
+                    .each()
+                    .into_iter()
+                    .flat_map(Screen::all_cells)
+                    .chain(front.all_cells()),
+                pending_scrollback
                     .iter()
-                    .filter_map(|c| c.link())
-                    .for_each(&mut *mark);
-            }
-            front
-                .all_cells()
-                .iter()
-                .filter_map(|c| c.link())
-                .for_each(&mut *mark);
-            for scrolled in pending_scrollback.iter() {
-                scrolled
-                    .runs
-                    .iter()
-                    .filter_map(|run| run.link)
-                    .for_each(&mut *mark);
-            }
-        });
+                    .flat_map(|scrolled| scrolled.runs.iter()),
+            )
+        })
     }
 
     pub(super) fn resize(&mut self, rows: usize, cols: usize) {

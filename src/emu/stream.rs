@@ -425,54 +425,55 @@ impl Stream {
         Cell::blank(self.style_id(style))
     }
 
-    /// The id STYLE has, giving it one if it has none; see `State::style_id`.
+    /// The id STYLE has, giving it one if it has none; the filter's half of
+    /// [`StyleStore::id_for`], which `State::style_id` is the terminal's.
     ///
-    /// A collection marks the open line, the copy of what was last emitted, and the runs
-    /// this feed has already produced, which are every place an id lives until the feed
-    /// hands its table over.
+    /// The roots are the open line, the copy of what was last emitted, and the runs this
+    /// feed has already produced, which are every place an id lives until the feed hands
+    /// its table over. There is no grid behind this filter, so those are the whole of it:
+    /// once a line retires, [`Stream::forget`] empties `line` and `emitted`, and the next
+    /// collection finds nothing of the old line left to mark, which is what bounds the
+    /// stores by one open line rather than by everything a long-running filter has ever
+    /// seen.
     fn style_id(&mut self, style: Style) -> StyleId {
-        if let Some(id) = self.styles.lookup(style) {
-            return id;
-        }
-        if self.styles.is_full() {
-            let (line, emitted, runs) = (&self.line, &self.emitted, &self.out.runs);
-            self.styles.collect(|mark| {
-                line.iter()
-                    .chain(emitted)
-                    .for_each(|column| mark(column.cell.style()));
-                runs.iter().for_each(|run| mark(run.style));
-            });
-        }
-        self.styles.insert(style)
+        let Self {
+            line,
+            emitted,
+            out,
+            styles,
+            ..
+        } = self;
+        styles.id_for(style, || {
+            (
+                line.iter().chain(emitted.iter()).map(|column| &column.cell),
+                out.runs.iter(),
+            )
+        })
     }
 
-    /// Free the link ids nothing in the open line, the copy of what was last emitted,
-    /// this feed's produced runs, or the pen's own open link still needs.
+    /// The id URI has as a destination; the filter's half of [`LinkStore::id_for`].
     ///
-    /// The same shape as [`Stream::style_id`]'s collection, with the one addition
-    /// `State::collect_links` also makes over `State::collect_styles`: the pen's own
-    /// open link, which [`Stream::hyperlink`] marks below. A rendition is a *value* the
-    /// marked tables hold, so `style_id` need only mark what already carries one; an
-    /// `OSC 8` link is *only* an id, so a link opened with nothing written under it yet
-    /// has no other home until it is marked here.
-    ///
-    /// There is no grid behind this filter, so `line`, `emitted` and `out.runs` are the
-    /// whole of what can still name an id -- once a line retires, [`Stream::forget`]
-    /// empties `line` and `emitted`, and the next collection this triggers finds nothing
-    /// of the old line left to mark, which is what bounds the store by one open line's
-    /// links rather than by everything a long-running filter has ever seen.
-    fn collect_links(&mut self) {
-        let (line, emitted, runs, link) = (&self.line, &self.emitted, &self.out.runs, self.link);
-        self.links.collect(|mark| {
-            if let Some(id) = link {
-                mark(id);
-            }
-            line.iter()
-                .chain(emitted)
-                .filter_map(|column| column.cell.link())
-                .for_each(&mut *mark);
-            runs.iter().filter_map(|run| run.link).for_each(&mut *mark);
-        });
+    /// [`Stream::style_id`]'s roots, and the one addition `State::link_id` also makes
+    /// over `State::style_id`: the pen's own open link, which is only an id and so has no
+    /// other home until a cell carries it.
+    fn link_id(&mut self, uri: &str) -> LinkId {
+        let Self {
+            line,
+            emitted,
+            out,
+            links,
+            link,
+            ..
+        } = self;
+        links
+            .id_for(uri, || {
+                (
+                    (*link).into_iter(),
+                    line.iter().chain(emitted.iter()).map(|column| &column.cell),
+                    out.runs.iter(),
+                )
+            })
+            .0
     }
 
     // -- retirement and emission -------------------------------------------------
@@ -610,10 +611,7 @@ impl Stream {
             self.link = None;
             return;
         }
-        if self.links.is_full() {
-            self.collect_links();
-        }
-        self.link = Some(self.links.intern(&uri).0);
+        self.link = Some(self.link_id(&uri));
     }
 
     /// `OSC 7 ; file://host/path` -- the child's working directory.
@@ -1082,7 +1080,7 @@ mod tests {
     }
 
     /// The hazard a collection with the wrong marks introduces, and the reason
-    /// `Stream::collect_links` marks the open line rather than only the pen: with no
+    /// `Stream::link_id` marks the open line rather than only the pen: with no
     /// grid here, `line` is the one place besides the pen an id can still be held once
     /// the pen itself has moved on to a different destination.
     ///

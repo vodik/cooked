@@ -48,7 +48,7 @@ fn a_truecolour_flood_keeps_the_table_within_its_bound() {
     t.feed(grid.as_bytes());
     // Settle the front buffer: it now names the same ids the grid does, so this does not
     // by itself grow the live set, but it is what makes the front buffer's own mark in
-    // `State::collect_styles` exercised rather than vacuous.
+    // `State::style_id` exercised rather than vacuous.
     t.drain();
 
     // SCROLLED_ROWS more distinctly-coloured rows, scrolled off the top and left
@@ -121,7 +121,7 @@ fn a_hyperlink_flood_keeps_the_table_within_its_bound() {
     );
 }
 
-/// The sequence `State::collect_links`' `pending_scrollback` mark exists for.
+/// The sequence `State::link_id`' `pending_scrollback` mark exists for.
 ///
 /// `pending_links` only covers a link between the drain that opens it and the drain
 /// that announces it, and `front` only covers a row from the drain that first shows it
@@ -188,10 +188,10 @@ fn a_link_only_ever_seen_in_scrollback_survives_a_collection_pressed_by_a_new_on
 }
 
 /// The rendition twin of the link test above: the sequence that makes
-/// `State::collect_styles`' `pending_scrollback` mark load-bearing.
+/// `State::style_id`' `pending_scrollback` mark load-bearing.
 ///
 /// A rendition needs no separate "opened but not yet printed" step the way a link does --
-/// `State::pen` calls `StyleStore::style_id` right before the character is placed, so an
+/// `State::pen` calls `State::style_id` right before the character is placed, so an
 /// id is only ever minted alongside a cell that names it -- which makes the reachable
 /// shape simpler than the link one: print a distinctly-coloured character, scroll its row
 /// off *before draining even once*, so neither `screens` nor `front` (Emacs' last-drained

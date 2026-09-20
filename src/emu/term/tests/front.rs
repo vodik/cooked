@@ -61,7 +61,7 @@ fn a_linked_line_written_back_as_it_was_is_not_sent() {
 
 /// A row whose destination changed is sent, even when a reused id makes its cells match.
 ///
-/// The hazard recycling introduces, and the reason `State::collect_links` marks the front
+/// The hazard recycling introduces, and the reason `State::link_id` marks the front
 /// buffer. The front holds *copies of cells*, and a cell names its link by id: if an id
 /// were freed while only the front still named it and handed to the next destination,
 /// this row's cells would compare equal to the copy Emacs was sent and the row would be

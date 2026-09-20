@@ -22,14 +22,14 @@
 //! live. A reused id is announced again before any row naming it, so Emacs' table is
 //! bounded by what the grids can hold rather than by what the session has ever seen.
 //!
-//! A store nobody collects -- the grid-less [`Filter`](super::stream::Filter) -- falls
-//! back on the caps below, which drop whole entries least-recently-used first without
-//! ever reusing the id. An id whose URI has been dropped renders as ordinary text with
-//! no destination, the same degradation an evicted image gets.
+//! The grid-less [`Filter`](super::stream::Filter) collects too, against the one line it
+//! holds open. Whatever a collection does not free the caps below still take, oldest
+//! entry first, and an id whose URI has been dropped renders as ordinary text with no
+//! destination -- the same degradation an evicted image gets.
 
 use std::collections::HashMap;
 
-use super::cell::LINK_MAX;
+use super::cell::{Cell, LINK_MAX, RunRef};
 use super::fast_hash;
 use super::intern::{Ledger, dense_id};
 
@@ -108,10 +108,7 @@ impl LinkStore {
     }
 
     /// Whether giving another destination an id should wait for a collection first.
-    ///
-    /// Asked by the caller, because collecting needs the grids and this does not have
-    /// them; `State::hyperlink` is where the two meet.
-    pub(crate) fn is_full(&self) -> bool {
+    fn is_full(&self) -> bool {
         self.ledger.len() >= self.limit
     }
 
@@ -123,7 +120,7 @@ impl LinkStore {
     /// Free every id MARK does not report, so it can be handed to another destination.
     ///
     /// MARK is handed a function to call with each id still referenced and must report
-    /// every place one can be held until the next collection. `State::collect_links`
+    /// every place one can be held until the next collection. `State::link_id`
     /// is that list; an id it missed would be handed out again while a cell still named
     /// it, and that cell would render with the new destination.
     ///
@@ -163,7 +160,7 @@ impl LinkStore {
     /// The hash only narrows the search to a bucket; every candidate is compared against
     /// the actual URI. The fast hash makes no promise against a deliberately searched
     /// collision, so this comparison is what keeps two URIs from sharing an id.
-    pub(crate) fn intern(&mut self, uri: &str) -> (LinkId, bool) {
+    fn intern(&mut self, uri: &str) -> (LinkId, bool) {
         let hash = fast_hash(uri.as_bytes());
         if let Some(id) = self
             .ledger
@@ -177,6 +174,41 @@ impl LinkStore {
         self.uris.insert(id, uri.to_owned());
         self.evict();
         (id, true)
+    }
+
+    /// The id URI has as a destination, and whether Lisp has yet to see it, collecting
+    /// first if the table is full.
+    ///
+    /// [`StyleStore::id_for`](super::style::StyleStore::id_for)'s counterpart, shared by
+    /// the same two owners for the same reason, and LIVE answers with one root more: the
+    /// ids held with nothing written under them yet. A rendition is a *value* the marked
+    /// cells carry, so marking them finds it; an `OSC 8` link is only an id, so an open
+    /// link -- and, for the terminal, a link announced but not yet handed over -- has no
+    /// other home. The cells and the runs are as `id_for` describes them.
+    ///
+    /// See [`LinkStore::collect`] for what a missed root costs.
+    pub(crate) fn id_for<'a, I, C, R>(
+        &mut self,
+        uri: &str,
+        live: impl FnOnce() -> (I, C, R),
+    ) -> (LinkId, bool)
+    where
+        I: IntoIterator<Item = LinkId>,
+        C: IntoIterator<Item = &'a Cell>,
+        R: IntoIterator<Item = RunRef<'a>>,
+    {
+        if self.is_full() {
+            self.collect(|mark| {
+                let (open, cells, runs) = live();
+                open.into_iter().for_each(&mut *mark);
+                cells
+                    .into_iter()
+                    .filter_map(|cell| cell.link())
+                    .for_each(&mut *mark);
+                runs.into_iter().filter_map(|run| run.link).for_each(mark);
+            });
+        }
+        self.intern(uri)
     }
 
     /// The URI behind an id.

@@ -497,10 +497,7 @@ impl State {
             self.pen.set_link(None);
             return;
         }
-        if self.links.is_full() {
-            self.collect_links();
-        }
-        let (id, fresh) = self.links.intern(&uri);
+        let (id, fresh) = self.link_id(&uri);
         if fresh {
             self.pending_links.push((id, uri));
         }

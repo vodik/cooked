@@ -21,7 +21,7 @@
 use std::collections::HashMap;
 use std::hash::{BuildHasherDefault, Hasher};
 
-use super::cell::{Attrs, Color, STYLE_MAX, Style};
+use super::cell::{Attrs, Cell, Color, RunRef, STYLE_MAX, Style};
 
 /// The name of one rendition in a [`StyleStore`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Default)]
@@ -142,7 +142,7 @@ impl StyleStore {
     }
 
     /// Whether giving another rendition an id should wait for a collection first.
-    pub(crate) fn is_full(&self) -> bool {
+    fn is_full(&self) -> bool {
         self.ids.len() >= self.limit
     }
 
@@ -166,6 +166,41 @@ impl StyleStore {
         self.unsent.push(id);
         self.recent = [(key, id), self.recent[0]];
         id
+    }
+
+    /// The id STYLE has, giving it one if it has none and collecting first if the table
+    /// is full.
+    ///
+    /// The whole of what an owner of a store does to reach an id, in one copy: the
+    /// terminal's `State::style_id` and the comint filter's `Stream::style_id` differ
+    /// only in what they have to mark, which is what LIVE answers with. It is called
+    /// only when a collection actually runs, and returns the cells still on show and the
+    /// runs produced but not yet handed to Emacs -- the two roots every owner has. Each
+    /// chains its own onto them: the terminal both grids, Emacs' copy of the screen and
+    /// the undrained scrollback, the filter the copy of the open line it may still have
+    /// to take back.
+    ///
+    /// See [`StyleStore::collect`] for what a missed root costs.
+    pub(crate) fn id_for<'a, C, R>(
+        &mut self,
+        style: Style,
+        live: impl FnOnce() -> (C, R),
+    ) -> StyleId
+    where
+        C: IntoIterator<Item = &'a Cell>,
+        R: IntoIterator<Item = RunRef<'a>>,
+    {
+        if let Some(id) = self.lookup(style) {
+            return id;
+        }
+        if self.is_full() {
+            self.collect(|mark| {
+                let (cells, runs) = live();
+                cells.into_iter().for_each(|cell| mark(cell.style()));
+                runs.into_iter().for_each(|run| mark(run.style));
+            });
+        }
+        self.insert(style)
     }
 
     /// The rendition ID names. An id this store never handed out reads as the default.
