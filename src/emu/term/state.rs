@@ -644,6 +644,12 @@ impl State {
     /// the anchor's: nothing else a drain carries changes between being queued and being
     /// sent. A drain with no events -- every drain of plain output -- allocates nothing
     /// here, since collecting an empty iterator does not.
+    ///
+    /// A drain that does carry events pays a move and a match for each, which is what
+    /// having two types costs: about 14 instructions an event, or 0.4% of the
+    /// `osc_dispatch` benchmark, where a single drain carries five thousand of them.
+    /// Handing the queue's buffer back with `drain(..)` instead of moving it out was
+    /// measured and is worse, the drop guard costing more than the reallocation saves.
     fn settle_events(&mut self, marks: &[(MarkId, Anchor<Chars>)]) -> Vec<Event> {
         let events = std::mem::take(&mut self.events);
         self.bell_queued = false;
