@@ -2238,7 +2238,7 @@ impl Shared {
     }
 
     /// Hand QUEUE to the child as far as it will take it, or throw it away once there is
-    /// no write half left to hand it on; see [`WriteHalf`].
+    /// no write half left to hand it on; see [`WriteHalf`](crate::pty::WriteHalf).
     ///
     /// Teardown empties the queue as it takes the half, so what this drops is a reply
     /// queued after that -- a drain in flight answering a query the child asked before it
