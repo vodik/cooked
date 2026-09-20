@@ -264,7 +264,7 @@ point of the protocol."
 
 ;; The strip list, the bracketing and the mode that chooses between them are the
 ;; core's, in src/emu/term/paste.rs: `cooked--strip-paste-controls',
-;; `cooked--bracketed-paste' and `cooked--send-paste-text'.  What is stripped is
+;; `cooked--send-paste-text' and `cooked--send-line'.  What is stripped is
 ;; security-relevant and what brackets is mode-dependent, and both were spelled
 ;; out here while the mode they answer to lived there -- one list to keep in step
 ;; across two languages, and a window between reading the mode and writing the

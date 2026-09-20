@@ -343,17 +343,21 @@ pub unsafe extern "C" fn emacs_module_init(runtime: *mut Runtime) -> std::ffi::c
         /// `cooked--strip-pasted-controls' over the yanked parts of a line being edited.
         "cooked--strip-paste-controls" 1..=1 => strip_paste_controls;
 
-        /// TEXT wrapped in the bracketed-paste markers, made safe to wrap.
+        /// Submit TEXT to SESSION's child as one line of input, the Return appended.
         ///
-        /// Any end marker inside TEXT is dropped, to a fixed point: one left in would
-        /// close the bracket early and hand whatever followed it to the child as if it
-        /// had been typed, which is how a copied line runs something nobody read.
+        /// TEXT is bracketed when it holds more than one line and the child's DEC mode
+        /// 2004 is read here, under the same lock the framing is built under, so the
+        /// mode cannot change between being read and being acted on -- see
+        /// `cooked--send-paste-text' for the paste this mirrors. A shell's line editor
+        /// otherwise reads every embedded newline in an unbracketed submission as its
+        /// own Enter and runs the lines one at a time rather than as the one edit they
+        /// were composed as.
         ///
-        /// `cooked--send-paste' does this itself when the child has asked for mode 2004.
-        /// This is for `cooked--send-input-string', which brackets a multi-line
-        /// submission -- so that a shell's line editor reads it as one edit rather than
-        /// running each line as it arrives -- and appends the Return itself.
-        "cooked--bracketed-paste" 1..=1 => bracketed_paste;
+        /// TEXT is not stripped here: `cooked--send-input-string' has already run its
+        /// pasted parts through `cooked--strip-paste-controls', keyed off a text
+        /// property the core cannot see, before calling this. What the user typed needs
+        /// no stripping, and stripping the whole line again would strip it twice.
+        "cooked--send-line" 2..=2 => send_line;
 
         /// Owe SESSION's child STRING, a reply, without waiting for it to be read.
         /// Queued behind earlier replies and written as far as the pty has room for now;
@@ -1143,9 +1147,29 @@ fn strip_paste_controls<'e>(env: Env<'e>, args: &[Value<'e>]) -> Result<Value<'e
     env.into_lisp(emu::strip_paste_controls(&text).as_str())
 }
 
-fn bracketed_paste<'e>(env: Env<'e>, args: &[Value<'e>]) -> Result<Value<'e>> {
-    let text = env.from_lisp::<String>(args[0])?;
-    env.into_lisp(emu::bracket_paste(&text).as_str())
+/// Compose a submitted line against the mode the child holds now; see
+/// `cooked--send-line'.
+fn send_line<'e>(env: Env<'e>, args: &[Value<'e>]) -> Result<Value<'e>> {
+    let mut text = env.from_lisp::<String>(args[1])?;
+    let mut bytes = {
+        let session = env.from_lisp::<&Session>(args[0])?;
+        // The lock covers the mode and the framing, and is let go before the write,
+        // which can wait out a child that is not reading.
+        session.term().submit_line(&text)
+    };
+    // A submitted line is typed input: the user pressed Return, and the frame that
+    // echoes it back is what they are waiting on, exactly as for a keystroke.
+    let result = write_input(env, args[0], &mut bytes, session::Input::Keyboard);
+    // TEXT can carry a credential pasted into the line and submitted with Return, so
+    // it is zeroed here alongside the bytes `write_input' zeroes, exactly as
+    // `send_paste_text' zeroes its own copy. TEXT was read out of a Lisp string,
+    // ordinarily the buffer's own text, and that string is left as it was.
+    for b in unsafe { text.as_bytes_mut() } {
+        unsafe { std::ptr::write_volatile(b, 0) };
+    }
+    std::sync::atomic::compiler_fence(std::sync::atomic::Ordering::SeqCst);
+    result?;
+    Ok(env.nil())
 }
 
 fn reply<'e>(env: Env<'e>, args: &[Value<'e>]) -> Result<Value<'e>> {

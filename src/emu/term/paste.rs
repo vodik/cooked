@@ -59,6 +59,38 @@ impl Term {
             text.replace('\n', "\r").into_bytes()
         }
     }
+
+    /// TEXT as this child should receive a submitted line of it, right now, the
+    /// Return appended as pressing it would send.
+    ///
+    /// Bracketed when TEXT holds more than one line and the child has asked for
+    /// mode 2004 -- the mode read here, under the same lock the framing is built
+    /// under, so it cannot move between being read and being acted on, exactly as
+    /// [`Term::paste`] reads it. A shell's line editor otherwise reads every
+    /// embedded newline as its own Enter and runs the lines one at a time rather
+    /// than as the one edit they were composed as.
+    ///
+    /// A single line, or a child that never asked, gets TEXT with the Return
+    /// appended and nothing else: unlike a paste, whose unbracketed newlines
+    /// [`Term::paste`] turns into carriage returns because nothing downstream of
+    /// it has a line discipline of its own, a submitted line's embedded newlines
+    /// are already what the kernel's line discipline treats as line endings, so
+    /// rewriting them here would be turning one terminator into another.
+    ///
+    /// TEXT is not stripped here. `cooked--send-input-string' has already run its
+    /// pasted parts through `cooked--strip-paste-controls', keyed off the
+    /// `cooked-pasted' text property, and what the user typed needs no stripping
+    /// at all; the core cannot see that property, so it cannot do this strip
+    /// itself and must not do it again over the whole line.
+    pub(crate) fn submit_line(&self, text: &str) -> Vec<u8> {
+        let mut bytes = if text.contains('\n') && self.bracketed_paste() {
+            bracket(text).into_bytes()
+        } else {
+            text.as_bytes().to_vec()
+        };
+        bytes.push(b'\r');
+        bytes
+    }
 }
 
 /// TEXT with every byte of [`DISALLOWED`] turned into a space.
@@ -170,5 +202,31 @@ mod tests {
         assert_eq!(t.paste("one\ntwo\n"), b"one\rtwo\r".as_slice());
         // And is stripped just the same: bracketing is not what makes a paste safe.
         assert_eq!(t.paste("rm\x03 -rf"), b"rm  -rf".as_slice());
+    }
+
+    #[test]
+    fn a_multi_line_submission_is_bracketed_when_the_mode_is_held_at_the_call() {
+        let mut t = term();
+        t.feed(b"\x1b[?2004h");
+        assert_eq!(
+            t.submit_line("one\ntwo"),
+            b"\x1b[200~one\ntwo\x1b[201~\r".as_slice()
+        );
+    }
+
+    #[test]
+    fn a_single_line_submission_is_never_bracketed_even_with_the_mode_held() {
+        let mut t = term();
+        t.feed(b"\x1b[?2004h");
+        assert_eq!(t.submit_line("one"), b"one\r".as_slice());
+    }
+
+    #[test]
+    fn a_multi_line_submission_with_no_mode_held_keeps_its_embedded_newlines() {
+        let t = term();
+        // Unlike a paste, whose unbracketed newlines become carriage returns: the
+        // kernel's own line discipline already treats these as line endings, so
+        // nothing here rewrites them.
+        assert_eq!(t.submit_line("one\ntwo"), b"one\ntwo\r".as_slice());
     }
 }

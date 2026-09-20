@@ -630,13 +630,14 @@ ends, so its line editor takes the whole thing as one insertion."
 (ert-deftest cooked-submitted-input-cannot-close-its-own-bracket ()
   "A multi-line submission is bracketed too, and gets the same guard.
 
-The submission path spelled the wrapping out for itself instead of going through
-`cooked--bracketed-paste', and so never stripped the end marker.  Reaching it
+The submission path used to spell the wrapping out for itself with a Lisp
+call to bracket the text, and never stripped the end marker.  Reaching it
 takes nothing exotic: the text is whatever sits in the input region, and a paste
 into that region carries whatever was on the kill ring.  Left unstripped, the
 bracket closed early and the shell took the rest as keystrokes -- which is the
 bug `cooked-paste-cannot-be-made-to-close-its-own-bracket' already rules out for
-the other path."
+the other path.  Now `cooked--send-line' does the framing itself, in the core,
+where the same guard applies."
   (cooked-tests--with-echoing-child "printf '\\033[?2004h'; "
     (should (cooked--bracketed-paste-p cooked--session))
     (cooked--send-input-string "a\n\e[201~; rm -rf /")
@@ -644,6 +645,40 @@ the other path."
              (lambda () (string-search "; rm -rf /^[[201~" (cooked-tests--text)))))
     (should (string-search "^[[200~a" (cooked-tests--text)))
     (should-not (string-search "^[[201~; rm" (cooked-tests--text)))))
+
+(ert-deftest cooked-a-two-line-submission-arrives-bracketed-when-2004-is-held ()
+  "The framing `cooked--send-line' gives a submitted line follows the mode the
+child holds at the moment of the call, the same guarantee
+`cooked--send-paste-text' gives a paste: read and acted on under the one lock,
+so the child cannot move the mode in between.
+
+This is the Rust-side counterpart of
+`cooked-submitted-input-cannot-close-its-own-bracket', which is about the end
+marker rather than the framing itself; a test that flips mode 2004 between
+Lisp asking `cooked--bracketed-paste-p' and Lisp sending is not constructible
+from Lisp any more, now that both the ask and the send happen in one core
+call -- so this is fixed at the child's mode instead."
+  (cooked-tests--with-echoing-child "printf '\\033[?2004h'; "
+    (should (cooked--bracketed-paste-p cooked--session))
+    (cooked--send-input-string "one\ntwo")
+    (should (cooked-tests--settle
+             (lambda ()
+               (and (string-search "^[[200~one" (cooked-tests--text))
+                    (string-search "two^[[201~^M" (cooked-tests--text))))))))
+
+(ert-deftest cooked-a-two-line-submission-arrives-as-before-with-no-2004-held ()
+  "A child that never asked for bracketed paste gets the submission the way it
+always has: the embedded newline is left alone -- the kernel's line discipline
+already ends a line on it, the same as a real Enter would -- with a Return
+appended after the last line, exactly as a single-line submission gets one."
+  (cooked-tests--with-echoing-child ""
+    (should-not (cooked--bracketed-paste-p cooked--session))
+    (cooked--send-input-string "one\ntwo")
+    (should (cooked-tests--settle
+             (lambda ()
+               (and (string-search "one" (cooked-tests--text))
+                    (string-search "two^M" (cooked-tests--text))))))
+    (should-not (string-search "^[[200~" (cooked-tests--text)))))
 
 (ert-deftest cooked-paste-cannot-be-made-to-close-its-own-bracket ()
   "An end marker inside the pasted text would close the bracket early and hand
@@ -653,8 +688,9 @@ something nobody read.  It cannot survive.
 Two guards now stand between the marker and the child and the outer one fires
 first: `cooked--strip-paste-controls' turns the ESC into a space, so what the
 child sees is the harmless remains of the sequence rather than nothing at all.
-`cooked--bracketed-paste' would still drop a marker that reached it, which is
-what the assertion below is about — no second `^[[201~' before cooked's own."
+The bracketing in `cooked--send-paste-text' would still drop a marker that
+reached it, which is what the assertion below is about — no second `^[[201~'
+before cooked's own."
   (cooked-tests--with-echoing-child "printf '\\033[?2004h'; "
     (cooked-tests--with-kill "a\e[201~; rm -rf /" (cooked-paste))
     (should (cooked-tests--settle

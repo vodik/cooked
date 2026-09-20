@@ -27,7 +27,7 @@
 (eval-and-compile
   (defconst cooked--core-functions
     '(cooked--alt-scroll-p cooked--answer-color-query
-      cooked--bracketed-paste cooked--bracketed-paste-p
+      cooked--bracketed-paste-p
       cooked--clear-to-prompt
       cooked--core-version cooked--drain cooked--feed cooked--filter-feed
       cooked--focus-events-p cooked--foreground-pid cooked--forget-history
@@ -38,7 +38,7 @@
       cooked--remove-rows cooked--reply cooked--reply-focus cooked--resize
       cooked--row-unsent
       cooked--sample-mode cooked--screen-text
-      cooked--send cooked--send-key cooked--send-mouse-report
+      cooked--send cooked--send-key cooked--send-line cooked--send-mouse-report
       cooked--send-paste-text cooked--set-attended
       cooked--set-color-scheme cooked--set-graphics-shown cooked--set-hidden
       cooked--set-palette

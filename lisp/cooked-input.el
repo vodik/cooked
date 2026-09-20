@@ -76,7 +76,16 @@ kill of \"ls ESC [ A\" would otherwise reach the shell as keystrokes on RET,
 and an interrupt character in it would kill the line it was part of.  What the
 user typed is sent as typed, so an ESC entered with \\[quoted-insert] still
 reaches the shell as ESC.  A plain string, such as `comint-input-sender' hands
-over, has no pasted parts and is sent unchanged."
+over, has no pasted parts and is sent unchanged.  This has to run over TEXT
+before `cooked--send-line' ever sees it: a yank into the input region can
+carry a literal `ESC [ 201 ~', the bracket's own end marker, and the core
+cannot tell a pasted part from a typed one, having no text property to read.
+
+The rest -- whether TEXT is bracketed, and the framing itself -- is
+`cooked--send-line's, made together against the mode the child holds at the
+moment of the write.  Composing it here instead, the way this used to, read
+the mode with `cooked--bracketed-paste-p' and wrote the bytes as two later
+calls, with the child free to change the mode in between."
   (setq text (cooked--strip-pasted-controls text))
   (let ((record (cooked--line)))
     (setf (cooked-line-submitted-input record)
@@ -91,21 +100,7 @@ over, has no pasted parts and is sent unchanged."
                      cooked--prompt-start)
                 (concat submitted "\n" (or line ""))
               line))))
-  (cooked--send-to-child
-   ;; A multi-line submission has to arrive as a paste, or the shell's line editor
-   ;; treats every embedded newline as its own Enter and runs the fragments one at
-   ;; a time.
-   ;;
-   ;; Through `cooked--bracketed-paste' rather than bracketing it here, because
-   ;; the end marker has to be stripped out of TEXT first.  TEXT is whatever is
-   ;; in the input region, and a paste into that region can carry a literal
-   ;; `ESC [ 201 ~' that would close the bracket early and hand the shell the
-   ;; rest as keystrokes.
-   (concat (if (and (string-search "\n" text)
-                    (cooked--bracketed-paste-p cooked--session))
-               (cooked--bracketed-paste text)
-             text)
-           "\r")))
+  (cooked--send-line (cooked--require-session) text))
 
 (defun cooked-newline ()
   "Insert a newline in the pending input without submitting it.
