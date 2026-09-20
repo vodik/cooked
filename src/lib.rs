@@ -913,6 +913,25 @@ fn screen_text<'e>(env: Env<'e>, args: &[Value<'e>]) -> Result<Value<'e>> {
     wire::screen_to_lisp(env, &rows)
 }
 
+/// Overwrite BYTES with zeros in a way the compiler may not drop.
+///
+/// `write_volatile` because an ordinary write to a buffer about to be freed is exactly
+/// the store a compiler is entitled to remove, and the fence keeps the writes ahead of
+/// whatever frees it.
+fn zero(bytes: &mut [u8]) {
+    for b in bytes.iter_mut() {
+        // SAFETY: `b` is a valid, exclusive reference to one initialised byte.
+        unsafe { std::ptr::write_volatile(b, 0) };
+    }
+    std::sync::atomic::compiler_fence(std::sync::atomic::Ordering::SeqCst);
+}
+
+/// [`zero`] for a string. A `\0` is valid UTF-8, so TEXT is still a string afterwards.
+fn zero_text(text: &mut str) {
+    // SAFETY: every byte is written as zero, which leaves the contents valid UTF-8.
+    zero(unsafe { text.as_bytes_mut() });
+}
+
 /// Write BYTES to SESSION's child as input the user produced, and zero them afterwards.
 ///
 /// The body of `cooked--send', and of every entry point that composes the bytes here
@@ -948,12 +967,7 @@ fn write_input<'e>(
         .map(|s| s.send(bytes, input, &|| env.should_quit()));
     // Zero unconditionally rather than only for secrets: at keystroke sizes it costs
     // nothing, and it means the password path needs no special case to be covered.
-    // `write_volatile` because an ordinary write to a buffer about to be freed is
-    // exactly the store a compiler is entitled to drop.
-    for b in bytes.iter_mut() {
-        unsafe { std::ptr::write_volatile(b, 0) };
-    }
-    std::sync::atomic::compiler_fence(std::sync::atomic::Ordering::SeqCst);
+    zero(bytes);
     match sent? {
         Err(crate::error::Error::Interrupted) => Ok(()),
         other => other.or_signal(env),
@@ -1134,10 +1148,7 @@ fn send_paste_text<'e>(env: Env<'e>, args: &[Value<'e>]) -> Result<Value<'e>> {
     // out of a Lisp string, ordinarily the kill ring's own entry, and that string is left
     // as it was: it is the user's copy, not this call's, and `cooked-paste' does not clear
     // it either.
-    for b in unsafe { text.as_bytes_mut() } {
-        unsafe { std::ptr::write_volatile(b, 0) };
-    }
-    std::sync::atomic::compiler_fence(std::sync::atomic::Ordering::SeqCst);
+    zero_text(&mut text);
     result?;
     Ok(env.nil())
 }
@@ -1164,10 +1175,7 @@ fn send_line<'e>(env: Env<'e>, args: &[Value<'e>]) -> Result<Value<'e>> {
     // it is zeroed here alongside the bytes `write_input' zeroes, exactly as
     // `send_paste_text' zeroes its own copy. TEXT was read out of a Lisp string,
     // ordinarily the buffer's own text, and that string is left as it was.
-    for b in unsafe { text.as_bytes_mut() } {
-        unsafe { std::ptr::write_volatile(b, 0) };
-    }
-    std::sync::atomic::compiler_fence(std::sync::atomic::Ordering::SeqCst);
+    zero_text(&mut text);
     result?;
     Ok(env.nil())
 }
