@@ -748,8 +748,11 @@ than to `completion-at-point'."
                "<remap> <move-beginning-of-line>" #'cooked-beginning-of-line)))
     ;; Last, so a delegated key wins over the binding it replaces -- which is the
     ;; point of naming it.
+    ;; `kbd' and `define-key' here, not `keymap-set': these strings are the
+    ;; user's, from `cooked-delegate-keys', and `keymap-set' signals on a spelling
+    ;; `kbd' has always taken, such as \"<C-return>\".
     (dolist (key delegated)
-      (keymap-set map key #'cooked-delegate-this-key))
+      (define-key map (kbd key) #'cooked-delegate-this-key))
     map))
 
 (defvar cooked-input-map
