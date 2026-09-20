@@ -137,12 +137,6 @@ impl PixelSize {
     }
 }
 
-impl From<(u32, u32)> for PixelSize {
-    fn from((w, h): (u32, u32)) -> Self {
-        Self { w, h }
-    }
-}
-
 /// A size in cells: how much of the grid something covers.
 ///
 /// Separate from [`PixelSize`] rather than a shared generic pair, because the whole point
