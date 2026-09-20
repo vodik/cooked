@@ -241,9 +241,11 @@ fn a_hidden_drain_with_nothing_scrolled_leaves_promotion_to_the_next() {
 #[test]
 fn rows_promoted_before_the_log_drops_its_moves_are_sent() {
     // `\r\n` twice promotes `A` and `B` by one scroll, `CSI 2 T` logs a second, and the
-    // third scroll finds the 2-row log full and drops both. The fourth is logged alone,
-    // and has no share of the promotion to give back: taken out of it, a blank row was
-    // lost from the buffer.
+    // third scroll finds the 2-row log full and drops both -- every row is damaged on the
+    // spot and sent whole, so neither has a share of the promotion to give back and `A`
+    // and `B` go as text instead. The fourth scroll, after the drop, moves rows that are
+    // already damaged for this drain, so it is not recorded either: replaying it in Lisp
+    // would only rotate text `cooked--render-rows` is about to overwrite.
     let mut t = settled(2, 12, b"A\r\nB");
     t.feed(b"\r\nC\r\nD\x1b[2T\r\nE\r\nF");
     let delta = t.drain_promoting();
@@ -252,13 +254,5 @@ fn rows_promoted_before_the_log_drops_its_moves_are_sent() {
         delta.scrolled.iter().map(runs_text).collect::<Vec<_>>(),
         ["A", "B", "", ""]
     );
-    assert_eq!(
-        delta.shifts,
-        vec![Shift {
-            top: 0,
-            bottom: 1,
-            count: 1,
-            direction: Direction::Up,
-        }]
-    );
+    assert_eq!(delta.shifts, vec![]);
 }

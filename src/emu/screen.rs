@@ -68,28 +68,32 @@ pub struct Shift {
 /// entry may be read as the scroll that took a promoted row off the top, so the two are
 /// one question and [`Shifts::leading_scroll`] is where it is asked.
 ///
-/// A field rather than the payload of two enum variants, because the log is there either
-/// way: moves recorded *after* a drop are a real state and not a contradiction. Dropping
-/// empties the log and damages every row, and the scroll after that is recorded as usual,
-/// so what [`Tracking`] says is whether the log begins where the drain window does.
+/// A field rather than the payload of two enum variants, because dropping is not a
+/// terminal state a fresh value would represent just as well: [`Shifts::record`] still
+/// has to answer every later call this same drain window, it just answers `false` without
+/// touching the log, and [`Shifts::take`] still has to hand the (empty) log back and put
+/// tracking to rights for the next window.
 #[derive(Debug, Clone, Default)]
 struct Shifts {
     /// The moves in the order they happened; see [`Shift`]. Written only by
-    /// [`Screen::shift`].
+    /// [`Shifts::record`]. Empty whenever `tracking` is [`Tracking::Dropped`]: nothing
+    /// recorded while dropped would reach Emacs, since [`Screen::drain_shifts`] hands the
+    /// log over regardless of `tracking`, so [`Shifts::record`] never lets one in.
     log: Vec<Shift>,
     /// Whether [`Shifts::log`] covers the whole window since the last drain.
     tracking: Tracking,
 }
 
-/// Whether a [`Shifts`] log has a hole in it; see [`Screen::shift`], which is the one
+/// Whether a [`Shifts`] log has a hole in it; see [`Shifts::record`], which is the one
 /// place a hole is made, and why it is safe there.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 enum Tracking {
     /// Every move since the last drain is in the log.
     #[default]
     Tracked,
-    /// The log grew as long as the screen is tall and was thrown away, so it holds only
-    /// the moves recorded since.
+    /// The log grew as long as the screen is tall and was thrown away: every row was
+    /// damaged on the spot, so every move from here to the next drain is redundant and
+    /// none of them are recorded.
     Dropped,
 }
 
@@ -100,9 +104,9 @@ impl Shifts {
     /// scroll, so Emacs may keep its own text for them and be told to open blanks at the
     /// bottom of the region instead -- see `Front::promote`. A log with a hole in it
     /// cannot answer it. A 2-row screen that scrolls up twice, down twice and up twice
-    /// more in one drain records the first two moves, drops them at the fifth and records
-    /// the sixth alone, so rows promoted by the first scroll would be taken out of the
-    /// sixth, which moved other rows.
+    /// more in one drain records the first two moves and drops them at the fifth, and
+    /// every move after that goes unrecorded too, so rows promoted by the first scroll
+    /// would be taken out of a scroll that never happened.
     fn leading_scroll(&self) -> Option<Shift> {
         match self.tracking {
             Tracking::Tracked => self.log.first().copied(),
@@ -129,23 +133,110 @@ impl Shifts {
         self.log.clear();
     }
 
-    /// Throw the log away and say so, so nothing may be promoted out of it until the next
-    /// drain. The allocation is kept, since a flood fills it again at once.
-    fn dropped(&mut self) {
-        self.log.clear();
-        self.tracking = Tracking::Dropped;
+    /// Record that `n` rows moved within `top..=bottom`, returning whether it was worth
+    /// recording; see [`Shift`] and [`Screen::shift`], its only caller.
+    ///
+    /// Coalescing is by identity of the region and direction, and only against the
+    /// preceding entry: two moves of the same rows the same way compose into one, which is
+    /// the only composition a flood produces. Anything else stays a separate entry.
+    ///
+    /// **False once the accumulated move reaches the region's height.** A `cat` of a
+    /// thousand lines turns a 24-row screen over forty times, recycling every row, so a
+    /// shift on top would be a whole-region delete and insert bought for nothing. The
+    /// caller damages the whole region instead, and [`Shifts::take`] drops the entry.
+    ///
+    /// The entry is *kept*, saturated at the height, rather than removed. Removed, the next
+    /// line feed would push a fresh entry that climbs back to the height, and a flood would
+    /// hand Emacs buffer edits per drain for rows it is about to rewrite. Kept, every later
+    /// scroll answers false in two comparisons.
+    ///
+    /// **False, and the log dropped, once it holds as many entries as the screen has
+    /// rows.** A drain normally takes the log every frame, so it never gets there; a
+    /// buffer no window shows is drained without it, and a child scrolling two regions in
+    /// turn would grow it by an entry per scroll for as long as nobody looks. Replaying
+    /// more moves than there are rows costs more than rewriting every row, so `rows`
+    /// (the caller's height) is marked damaged instead. Dropping the moves already logged
+    /// is safe because Emacs has applied none of them: its text and the core's copy of
+    /// that text still agree row for row, so the rows that match the copy are still left
+    /// out. A promotion is one of those moves, so the drain drops it too; see
+    /// [`Shifts::leading_scroll`].
+    ///
+    /// **False, and nothing recorded, for every call once dropped.** Every row is already
+    /// damaged for the rest of this drain window, and a later move over the same interval
+    /// only rearranges rows Emacs is about to be sent whole -- recording it would have
+    /// `cooked--apply-shifts` replay a rotation on top of text `cooked--render-rows` is
+    /// about to overwrite. Tracking resumes at the next drain; see [`Shifts::take`].
+    fn record(
+        &mut self,
+        top: usize,
+        bottom: usize,
+        n: usize,
+        direction: Direction,
+        rows: usize,
+    ) -> Recorded {
+        if self.tracking == Tracking::Dropped {
+            return Recorded::Redundant;
+        }
+        let height = bottom + 1 - top;
+        if let Some(last) = self.log.last_mut() {
+            if last.top == top && last.bottom == bottom && last.direction == direction {
+                last.count = (last.count + n).min(height);
+                return if last.count < height {
+                    Recorded::Kept
+                } else {
+                    Recorded::Saturated
+                };
+            }
+        }
+        if self.log.len() >= rows {
+            self.log.clear();
+            self.tracking = Tracking::Dropped;
+            return Recorded::JustDropped;
+        }
+        self.log.push(Shift {
+            top,
+            bottom,
+            count: n.min(height),
+            direction,
+        });
+        if n < height {
+            Recorded::Kept
+        } else {
+            Recorded::Saturated
+        }
     }
 
     /// The moves, for a drain that hands them to Emacs, and a complete log again.
     ///
     /// Saturated entries are dropped here, since a region that turned over completely has
-    /// every row damaged; see [`Screen::shift`] for why they stay in the log until then.
+    /// every row damaged; see [`Shifts::record`] for why they stay in the log until then.
+    /// The log is already empty when `tracking` is [`Tracking::Dropped`] -- see
+    /// [`Shifts::record`] -- so there is nothing here to filter for that case.
     fn take(&mut self) -> Vec<Shift> {
+        debug_assert!(self.tracking == Tracking::Tracked || self.log.is_empty());
         self.tracking = Tracking::Tracked;
         let mut shifts = std::mem::take(&mut self.log);
         shifts.retain(|s| s.count < s.bottom + 1 - s.top);
         shifts
     }
+}
+
+/// What [`Shifts::record`] did with a move, and how much of the screen the caller must
+/// mark damaged for it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Recorded {
+    /// Stayed in the log below the region's height. Only the rows the move recycled need
+    /// to be marked damaged.
+    Kept,
+    /// Turned the region over completely, or repeated a region already saturated. The
+    /// whole region needs to be marked damaged.
+    Saturated,
+    /// The log just reached the height of the screen and was thrown away. The whole
+    /// screen needs to be marked damaged, once, by the caller.
+    JustDropped,
+    /// The log dropped before this call, and every row is already damaged. Nothing was
+    /// recorded and there is nothing left for the caller to damage.
+    Redundant,
 }
 
 /// Which way a [`Shift`] moved its rows.
@@ -664,54 +755,23 @@ impl Screen {
         self.shifts.take()
     }
 
-    /// Record that `n` rows moved within `top..=bottom`, returning whether it was worth
-    /// recording; see [`Shift`].
+    /// Record that `n` rows moved within `top..=bottom`, marking the right amount of the
+    /// screen damaged for what [`Shifts::record`] did with it, and returning whether the
+    /// entry survives as a shift the caller may still touch only the recycled rows for.
     ///
-    /// Coalescing is by identity of the region and direction, and only against the
-    /// preceding entry: two moves of the same rows the same way compose into one, which is
-    /// the only composition a flood produces. Anything else stays a separate entry.
-    ///
-    /// **False once the accumulated move reaches the region's height.** A `cat` of a
-    /// thousand lines turns a 24-row screen over forty times, recycling every row, so a
-    /// shift on top would be a whole-region delete and insert bought for nothing. The
-    /// caller damages the whole region instead, and [`Screen::drain_shifts`] drops the
-    /// entry.
-    ///
-    /// The entry is *kept*, saturated at the height, rather than removed. Removed, the next
-    /// line feed would push a fresh entry that climbs back to the height, and a flood would
-    /// hand Emacs buffer edits per drain for rows it is about to rewrite. Kept, every later
-    /// scroll answers false in two comparisons.
-    ///
-    /// **False, and the log emptied, once it holds as many entries as the screen has
-    /// rows.** A drain normally takes the log every frame, so it never gets there; a
-    /// buffer no window shows is drained without it, and a child scrolling two regions in
-    /// turn would grow it by an entry per scroll for as long as nobody looks. Replaying
-    /// more moves than there are rows costs more than rewriting every row, so every row is
-    /// damaged instead. Dropping the moves is safe because Emacs has applied none of them:
-    /// its text and the core's copy of that text still agree row for row, so the rows
-    /// that match the copy are still left out. A promotion is one of those moves, so the
-    /// drain drops it too; see [`Shifts::leading_scroll`].
+    /// The whole-screen fill on a fresh drop belongs here rather than in [`Shifts::record`]:
+    /// `dirty` and `touches` are this screen's, not the log's, and [`Shifts`] has no reason
+    /// to know either exists.
     fn shift(&mut self, top: usize, bottom: usize, n: usize, direction: Direction) -> bool {
-        let height = bottom + 1 - top;
-        if let Some(last) = self.shifts.log.last_mut() {
-            if last.top == top && last.bottom == bottom && last.direction == direction {
-                last.count = (last.count + n).min(height);
-                return last.count < height;
+        match self.shifts.record(top, bottom, n, direction, self.height()) {
+            Recorded::Kept => true,
+            Recorded::Saturated | Recorded::Redundant => false,
+            Recorded::JustDropped => {
+                self.dirty.fill(true);
+                self.touches += 1;
+                false
             }
         }
-        if self.shifts.log.len() >= self.height() {
-            self.shifts.dropped();
-            self.dirty.fill(true);
-            self.touches += 1;
-            return false;
-        }
-        self.shifts.log.push(Shift {
-            top,
-            bottom,
-            count: n.min(height),
-            direction,
-        });
-        n < height
     }
 
     /// Every cell of the grid, slots in storage order rather than screen order, for a walk
@@ -2630,5 +2690,30 @@ mod tests {
         screen.insert_lines(1, Pen::default());
         assert_eq!(screen.row(2).unwrap().to_text(), "abcd");
         assert_eq!(wraps(&screen), [false, false, false]);
+    }
+
+    /// Once the log has dropped, a later move in the same drain window is not recorded:
+    /// every row is already damaged and will be sent whole, so replaying the move in Lisp
+    /// first would only rotate text `cooked--render-rows` is about to overwrite.
+    #[test]
+    fn a_shift_after_a_drop_is_not_recorded() {
+        let mut screen = Screen::new(4, 4);
+        // Alternating direction defeats coalescing, so each call is a distinct log entry:
+        // the screen is 4 rows tall, so the fifth call finds the log full and drops it.
+        for i in 0..5 {
+            if i % 2 == 0 {
+                screen.scroll_up(1, Pen::default()).discard();
+            } else {
+                screen.scroll_down(1, Pen::default());
+            }
+        }
+        // A further move in the same window, after the drop.
+        screen.scroll_up(1, Pen::default()).discard();
+
+        assert!(
+            screen.drain_shifts().is_empty(),
+            "a move recorded after a drop would be replayed in Lisp over rows the same \
+             drain sends whole"
+        );
     }
 }
