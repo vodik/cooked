@@ -1576,58 +1576,62 @@ which has no such seam at all."
                 (delete-region keep (line-end-position)))))
           ;; Now walk the rows just written.  Two things are per row and neither
           ;; can be done from the offsets in the table: the guard measures a row
-          ;; against Emacs' own layout of it, and it can *shorten* the row it is
-          ;; given, so every position after it has to be read from the buffer
-          ;; rather than computed from where the text was put.
+          ;; against Emacs' own layout of it, and the wrap mark goes on the
+          ;; newline after it, which an edit's LENGTH deletion has already
+          ;; moved.  So every position here is read from the buffer rather than
+          ;; computed from where the text was put.
           (let ((pos row-start)
                 (i 0))
             (dolist (row table)
               (pcase-let ((`(,_ ,cells ,uniform ,wrapped ,hash) row))
                 (goto-char pos)
+                ;; An edit leaves the characters it did not change where they
+                ;; are, so the guard's marks from the row as it was outlive the
+                ;; measurement they were made from.  A block deletes the row
+                ;; first and carries them off with it; see
+                ;; `cooked--clear-guard-marks'.
+                (when span (cooked--clear-guard-marks pos (line-end-position)))
                 ;; The row table's own measurements: how many cells the row
                 ;; occupies on the grid, whether anything in it could render
                 ;; wider than that, and its layout hash.  All three are
                 ;; by-products of the core building the row, so the guard need
                 ;; not measure them; see `cooked--guard-row-width'.
-                (when (and layout cells
-                           (cooked--guard-row-width
-                            pos cells layout
-                            (if (eq uniform 'glyph)
-                                (if (eq glyphs-drawn 'unset)
-                                    (setq glyphs-drawn
-                                          (and cooked-box-drawing-images
-                                               (image-type-available-p 'xbm)
-                                               (cooked--deco-cell-size)
-                                               t))
-                                  glyphs-drawn)
-                              uniform)
-                            cache hash)
-                           (user-ptrp cooked--session))
-                  ;; The guard deleted characters off the row, so what Emacs shows
-                  ;; is no longer what the core sent, and a repaint of the same
-                  ;; cells has to be sent rather than matched against its copy.
-                  (cooked--row-edited cooked--session (+ index i)))
+                ;;
+                ;; Nothing is owed to the core for what it does.  The guard
+                ;; hides the tail of a row Emacs lays out too wide rather than
+                ;; deleting it, so the buffer still holds the characters the
+                ;; core sent and its copy of the screen stays true.
+                (when (and layout cells)
+                  (cooked--guard-row-width
+                   pos cells layout
+                   (if (eq uniform 'glyph)
+                       (if (eq glyphs-drawn 'unset)
+                           (setq glyphs-drawn
+                                 (and cooked-box-drawing-images
+                                      (image-type-available-p 'xbm)
+                                      (cooked--deco-cell-size)
+                                      t))
+                         glyphs-drawn)
+                     uniform)
+                   cache hash))
                 (goto-char pos)
-                ;; After the guard, which is the one thing in this loop that can
-                ;; shorten a row -- and so move the newline this is about.
                 (cooked--mark-row-wrap (line-end-position) wrapped))
               ;; Nothing scans the row here.  Rewriting the text is what tells
               ;; jit-lock the row is no longer fontified, so redisplay asks
               ;; `cooked--fontify-region' for it -- and only if this frame is one
               ;; that reaches the screen.  See there.
               ;;
-              ;; The bounds are read after the guard, which is the one thing in
-              ;; this loop that can shorten a row: it trims a line Emacs laid out
-              ;; wider than `cooked--cols' assumed.
+              ;; The bounds are read after the guard rather than before it, so
+              ;; that a layer reading the row back sees the marks the guard put
+              ;; on it.  The guard does not move them: it hides the tail of a
+              ;; row Emacs laid out wider than `cooked--cols' assumed, and
+              ;; hidden characters are still characters.
               ;;
               ;; The optional layers are still announced from here rather than
               ;; from redisplay, because a mark on this screen is not yet where
               ;; it belongs; `cooked--notify-rows-rendered' is the other half of
               ;; that.
               (let ((eol (line-end-position)))
-                ;; After the guard for the same reason the bounds are: a carried
-                ;; position is clamped to the row's end, and the guard is what
-                ;; decides where that is.
                 (when relocations (cooked--place-relocations relocations i pos eol))
                 (when (and cooked-row-rendered-functions (not alt))
                   (push (cons pos eol) rendered))

@@ -2089,21 +2089,32 @@ evicted row keeps its own newline instead of being joined onto the line above."
       (with-current-buffer buffer (cooked--cleanup))
       (kill-buffer buffer))))
 
-(ert-deftest cooked-guard-row-width-trims-a-row-that-would-softwrap ()
+(ert-deftest cooked-guard-row-width-hides-the-tail-of-a-row-that-would-softwrap ()
   "A 26-character row whose `string-width' is 26 in a 26-column viewport — it
 should fit, but the mock says `vertical-motion' wraps at character 10,
-simulating the `é' rendering wider than one column.  The guard trims."
+simulating the `é' rendering wider than one column.  The guard hides the tail.
+
+Hides rather than deletes: the row is still the 26 characters the core sent,
+and it is the last ten of them that Emacs stops laying out."
   (with-temp-buffer
     (cooked-mode)
     (cooked-tests--display-buffer)
     (let ((cooked-rejoin-wrapped-lines t)
-          (inhibit-read-only t))
-      (insert (make-string 5 ?x) "é" (make-string 20 ?y) "\n")
+          (inhibit-read-only t)
+          (text (concat (make-string 5 ?x) "é" (make-string 20 ?y))))
+      (insert text "\n")
       (cooked-tests--with-mocked-wrap 10 (cooked--guard-row-width (point-min) 26))
       (goto-char (point-min))
-      (should (= (- (line-end-position) (point-min)) 10))
-      ;; A terminal frame, so the marker spends the last column rather than the fringe.
-      (should (equal (get-text-property (1- (line-end-position)) 'display) "$")))))
+      (should (equal (buffer-substring-no-properties (point-min) (line-end-position))
+                     text))
+      (let ((cut (+ (point-min) 10)))
+        (should (eq (get-text-property cut 'invisible) 'cooked-overflow))
+        (should-not (get-text-property (1- cut) 'invisible))
+        (should (= (next-single-property-change cut 'invisible nil (point-max))
+                   (line-end-position)))
+        ;; A terminal frame, so the marker spends the last column rather than the
+        ;; fringe -- the last one still laid out, which is the one before the cut.
+        (should (equal (get-text-property (1- cut) 'display) "$"))))))
 
 (ert-deftest cooked-guard-row-width-leaves-a-row-that-fits-alone ()
   (with-temp-buffer
@@ -2205,10 +2216,11 @@ what a proportional family answers.  The row is ASCII and is checked anyway."
         (cooked-tests--with-mocked-wrap 10
           (cooked--guard-row-width (point-min) 40 nil t)))
       (goto-char (point-min))
-      (should (= (- (line-end-position) (point-min)) 10))
+      (should (= (- (line-end-position) (point-min)) 40))
+      (should (eq (get-text-property (+ (point-min) 10) 'invisible) 'cooked-overflow))
       ;; The fringe is outside the text area, so the marker costs no column: it rides an
       ;; overlay string, and the character it is anchored to is still the row's own.
-      (should-not (get-text-property (1- (line-end-position)) 'display))
+      (should-not (get-text-property (+ (point-min) 9) 'display))
       ;; Anchored at the row's *start*, as a `before-string'.  At the end it needs a
       ;; column's worth of room to be placed in, which a row the trim left flush with
       ;; the right edge of the text area does not have -- see `cooked--mark-truncation'.
@@ -2327,13 +2339,13 @@ if `window-max-chars-per-line' agreed with `cooked--cols', because
           (cooked--cols 26)
           (inhibit-read-only t))
       (insert (make-string 5 ?x) "é" (make-string 20 ?y) "\n")
-      (cl-letf (((symbol-function 'window-max-chars-per-line) (lambda (&rest _) 10))
-                ((symbol-function 'vertical-motion)
-                 (lambda (&rest _) (goto-char (min (point-max) (+ (point) 10))))))
-        (cooked--guard-row-width (point-min) 26))
+      (cl-letf (((symbol-function 'window-max-chars-per-line) (lambda (&rest _) 10)))
+        (cooked-tests--with-mocked-wrap 10
+          (cooked--guard-row-width (point-min) 26)))
       (goto-char (point-min))
-      (should (= (- (line-end-position) (point-min)) 10))
-      (should (equal (get-text-property (1- (line-end-position)) 'display) "$")))))
+      (should (= (- (line-end-position) (point-min)) 26))
+      (should (eq (get-text-property (+ (point-min) 10) 'invisible) 'cooked-overflow))
+      (should (equal (get-text-property (+ (point-min) 9) 'display) "$")))))
 
 (ert-deftest cooked-guard-row-width-leaves-a-genuinely-wider-row-alone ()
   "A row from a wider grid -- scrollback from before a resize narrowed the
@@ -2418,38 +2430,41 @@ to agree with it."
   `(cl-letf (((symbol-function 'vertical-motion)
               (lambda (&rest _)
                 (setq ,count (1+ ,count))
-                (goto-char (min (point-max) (+ (point) 10))))))
+                (cooked-tests--motion-to-wrap 10))))
      ,@body))
 
 (ert-deftest cooked-a-row-trimmed-once-is-trimmed-again-without-being-measured ()
   "A status bar that never fits is repainted on every frame of a full-screen
 program.  The first sight of it pays a layout query to learn that it wraps and
-one more per character deleted; the repaint, which writes the same row back,
-must cost none, and must leave exactly what the measured trim left."
+one more per character hidden; the repaint, which writes the same row back,
+must cost none, and must leave exactly what the measured pass left."
   (with-temp-buffer
     (cooked-mode)
     (cooked-tests--display-buffer)
     (let ((cooked-rejoin-wrapped-lines t)
           (inhibit-read-only t)
           (measured 0)
+          (cut (+ (point-min) 10))
           (row (concat (make-string 5 ?x) "é" (make-string 6 ?y))))
       (cooked-tests--counting-wraps measured
         (insert row "\n")
         (should (cooked--guard-row-width (point-min) 12 nil nil nil 7))
-        (let ((first (buffer-string))
-              (cost measured))
-          (should (equal first (concat (substring row 0 10) "\n")))
+        (let ((cost measured))
           (should (> cost 1))
-          ;; The repaint: the core sends the row whole again, since Lisp said
-          ;; its copy was no longer true.
+          (should (eq (get-text-property cut 'invisible) 'cooked-overflow))
+          ;; The repaint, which now arrives as an ordinary redraw of a row the
+          ;; core still believes it knows: the guard no longer tells it the
+          ;; buffer holds anything other than what it sent.
           (erase-buffer)
           (insert row "\n")
           (should (cooked--guard-row-width (point-min) 12 nil nil nil 7))
-          (should (equal (buffer-string) first))
           (should (= measured cost))
-          (goto-char (point-min))
-          (should (equal (get-text-property (1- (line-end-position)) 'display)
-                         "$")))))))
+          (should (equal (buffer-substring-no-properties
+                          (point-min) (line-end-position))
+                         row))
+          (should (eq (get-text-property cut 'invisible) 'cooked-overflow))
+          (should-not (get-text-property (1- cut) 'invisible))
+          (should (equal (get-text-property (1- cut) 'display) "$")))))))
 
 (ert-deftest cooked-a-remembered-trim-is-never-spent-on-another-row ()
   "The safety half.  Two rows with one layout hash -- a collision, stated here by
@@ -4551,25 +4566,86 @@ is only there to say the rewrite has arrived."
                (lambda () (string-match-p "done" (cooked-tests--text)))))
       (should (= (- marker (cooked--screen-start-position)) 3)))))
 
-(ert-deftest cooked-a-row-the-guard-trimmed-is-forgotten-by-the-core ()
-  "Each row the width guard shortens is reported to the core by its screen index.
+(ert-deftest cooked-a-row-the-guard-fitted-costs-the-core-nothing ()
+  "The width guard says nothing to the core, and owes it nothing.
 
-The core would otherwise match a later repaint of the same cells against the
-text it sent, which is no longer what the buffer holds."
+Each row it shortened used to be reported by its screen index with
+`cooked--row-edited', because the characters it deleted made the buffer's row
+differ from the copy of the screen the core matches later repaints against.  It
+hides the overflow instead -- see `cooked--hide-overflow' -- so the row is still
+the characters the core sent and the copy stays true.  A status bar with one
+glyph the font draws too wide therefore costs an edit per frame again, rather
+than its whole row.
+
+The guard is stubbed to say it acted on every row, since what the real one
+measures cannot be provoked on a terminal frame."
   :tags '(pty)
   (cooked-tests--with-session '("/bin/sh" "-c" "printf 'one\\ntwo'; sleep 5")
     (cooked-tests--display-buffer)
     (should (cooked-tests--settle
              (lambda () (string-match-p "two" (cooked-tests--text)))))
     (let ((cooked-rejoin-wrapped-lines t)
-          (unsent nil))
+          (told nil))
       (cl-letf (((symbol-function 'cooked--guard-row-width) (lambda (&rest _) t))
                 ((symbol-function 'cooked--row-edited)
-                 (lambda (_session row) (push row unsent))))
+                 (lambda (&rest args) (push args told))))
         (cooked--redraw cooked--session)
         (cooked--apply (cooked--drain cooked--session t)))
-      (should (member 0 unsent))
-      (should (member 1 unsent)))))
+      (should-not told))))
+
+(ert-deftest cooked-a-copy-of-a-guarded-row-carries-the-child-s-own-text ()
+  "A yank of a row the guard shortened gives back what the child wrote.
+
+The point of hiding the overflow rather than deleting it.  The row here renders
+wider than its cells say -- the mock puts Emacs' wrap at ten characters of a
+twenty-six character row -- so the guard hides the last sixteen; they are still
+in the buffer, so `filter-buffer-substring', which is what every kill and copy
+in this buffer goes through, carries them away with the rest."
+  (with-temp-buffer
+    (cooked-mode)
+    (cooked-tests--display-buffer)
+    (let ((cooked-rejoin-wrapped-lines t)
+          (inhibit-read-only t)
+          (kill-ring nil)
+          (text (concat (make-string 5 ?x) "é" (make-string 20 ?y))))
+      (insert text "\n")
+      (cooked-tests--with-mocked-wrap 10 (cooked--guard-row-width (point-min) 26))
+      (goto-char (point-min))
+      (should (eq (get-text-property (+ (point-min) 10) 'invisible) 'cooked-overflow))
+      (copy-region-as-kill (point-min) (line-end-position))
+      (should (equal (substring-no-properties (current-kill 0)) text)))))
+
+(ert-deftest cooked-an-edit-takes-the-guard-s-marks-off-the-row-it-rewrites ()
+  "A row the core edits in place loses the marks the guard left on it.
+
+The guard's hidden tail and truncation glyph belong to the row as it was
+measured, and a block carries them off with the text it deletes.  An edit does
+not: the core sends only the character that changed and the rest of the row
+stays where it is, which it may now that the guard deletes none of it.  So a
+row that has lost the glyph it could not fit would keep its tail hidden for as
+long as nothing repainted the whole of it -- see `cooked--clear-guard-marks'.
+
+The marks are put on by hand rather than by the guard, whose real trigger is a
+font measurement no terminal frame can make.  Changing one character of the row
+is what makes the core send an edit rather than a block."
+  :tags '(pty)
+  (cooked-tests--with-session
+      '("/bin/sh" "-c" "printf 'abcdefghij'; sleep 0.4; printf '\\rZ'; sleep 5")
+    (cooked-tests--display-buffer)
+    (should (cooked-tests--settle
+             (lambda () (string-match-p "abcdefghij" (cooked-tests--text)))))
+    (let* ((start (cooked--screen-start-position))
+           (eol (save-excursion (goto-char start) (line-end-position)))
+           (inhibit-read-only t))
+      (put-text-property (- eol 3) eol 'invisible 'cooked-overflow)
+      (cooked--mark-truncation start (- eol 3) (selected-window)))
+    (should (cooked-tests--settle
+             (lambda () (string-match-p "Zbcdefghij" (cooked-tests--text)))))
+    (goto-char (cooked--screen-start-position))
+    (should-not (text-property-any (point) (line-end-position)
+                                   'invisible 'cooked-overflow))
+    (should-not (text-property-any (point) (line-end-position)
+                                   'cooked-truncation t))))
 
 (ert-deftest cooked-a-theme-change-costs-the-core-nothing ()
   "A theme change says nothing to the core at all, and owes it nothing.

@@ -6,8 +6,10 @@
 ;; to disagree.  When it does, a live row renders wider than the window and Emacs
 ;; softwraps it, which is never legitimate output.  `cooked--guard-row-width' is
 ;; the one place that notices: it measures the row against Emacs' own layout,
-;; scales a glyph that does not fit its cells, and trims the row with a
-;; truncation mark as the last resort.
+;; scales a glyph that does not fit its cells, and hides the tail of the row
+;; behind a truncation mark as the last resort.  Hides rather than deletes, so
+;; the buffer's text is still the grid's and everything that reads a row back --
+;; a yank, a link scan, `cooked--screen-cell' -- sees what the child sent.
 ;;
 ;; It sits on cooked-state.el and is called by the row renderer in
 ;; cooked-screen.el; nothing here reaches further up.
@@ -63,9 +65,9 @@ TABLE maps a row's layout hash to t when Emacs was seen to lay that row out on
 a single screen line.  Only that direction is recorded *here*, and the
 asymmetry is the whole safety argument for keying on a hash.  A colliding
 \"this does not wrap\" costs a row that softwraps until something rewrites it.
-A colliding \"this wraps\" would delete characters off a row that fits, which
-is the failure this guard exists to avoid -- so no hash is ever allowed to say
-it.
+A colliding \"this wraps\" would hide characters off the end of a row that
+fits, which is the failure this guard exists to avoid -- so no hash is ever
+allowed to say it.
 
 A row that did wrap is remembered too, but in a table of its own and under a
 key that cannot collide: see `cooked--wrap-cache' for the TRIMS table and
@@ -216,7 +218,7 @@ three, and because the stamp is the expensive part: a second cache with a
 second stamp would cost more than any table saves.
 
 TRIMS is keyed by `cooked--wrap-fallback-key', the row's own text and faces,
-and not by the layout hash WRAPS uses.  An entry there deletes characters, so
+and not by the layout hash WRAPS uses.  An entry there hides characters, so
 its key has to be the row and not a digest of it; a row that wraps is rare
 enough that copying it out of the buffer is cheap next to the layout queries
 the entry saves.
@@ -341,49 +343,66 @@ about to measure.  Without one, as for a row driven from Lisp,
           (puthash key t memo))
         wraps))))
 
-(defun cooked--trim-to-one-line (start window)
-  "Delete characters from the end of the row at START until it stops wrapping.
+(defun cooked--hide-overflow (start window)
+  "Hide characters at the end of the row at START until it stops wrapping.
+
+Returns where the hidden tail begins, or nil if the row already fitted.  Rarely
+more than a character or two, since the mismatch is usually a column.
+
+The characters stay in the buffer and only stop being laid out, so the row's
+text is still exactly the cells the core sent it: a yank of the row gives the
+child's text, `cooked--screen-cell' reads the same column the grid holds, and
+the core's copy of the screen is still true, which is why nothing here owes
+`cooked--row-edited'.  The mark is the `invisible' property `cooked-overflow',
+which `cooked-mode' registers in `buffer-invisibility-spec' -- a symbol rather
+than a bare t for the reason `cooked-toggle-fold' gives, and a property rather
+than an overlay so that `buffer-substring' carries the text away with it.
 
 WINDOW is the window whose layout decides what wrapping means; it is passed
 through to `vertical-motion', and nil there means the selected window.  See
 `cooked--guard-row-width', the only caller, for why that choice matters.
 
-Returns non-nil if anything went.  Rarely more than a character or two, since
-the mismatch is usually a column.
+`vertical-motion' skips invisible text, so hiding one more character is what
+moves the answer, and a row that has come to fit lands the motion on the line
+*below* -- past `line-end-position' rather than short of it.  The position is
+read once, before the loop, because nothing moves it any more.
 
-`line-end-position' is captured before each `vertical-motion' and never after:
-taken after, it measures the end of whatever line the motion landed on rather
-than this row's own end, so a row that does not wrap at all still reads as short
-of it -- and the loop then eats the newline above START and the row below."
-  (let (trimmed eol)
-    (while (progn (goto-char start)
-                  (setq eol (line-end-position))
-                  (vertical-motion 1 window)
-                  (< (point) eol))
-      (setq trimmed t)
-      (delete-region (1- eol) eol))
-    trimmed))
+The loop stops with a character to spare whatever `vertical-motion' says.  A
+window too narrow to lay out even one cell of the row would otherwise hide the
+whole of it, and the truncation mark a terminal frame draws needs a character
+of the row to sit on."
+  (let ((eol (save-excursion (goto-char start) (line-end-position)))
+        (cut nil))
+    (while (and (progn (goto-char start)
+                       (vertical-motion 1 window)
+                       (< (point) eol))
+                (> (or cut eol) (1+ start)))
+      (setq cut (1- (or cut eol)))
+      (put-text-property cut (1+ cut) 'invisible 'cooked-overflow))
+    cut))
 
 (defun cooked--fit-row (start end window memo trims hash)
-  "Cut the row START..END back to one screen line, if Emacs lays it out on more.
+  "Fit the row START..END to one screen line, if Emacs lays it out on more.
 
-Returns non-nil when characters were deleted.
+Returns where the hidden tail begins, or nil when the row was left as it is.
+Nothing is deleted; see `cooked--hide-overflow' for what hiding means.
 
 The three answers, cheapest first.  MEMO says the row was seen to fit, by HASH,
 and nothing is asked.  TRIMS says this very row was cut before, and to how many
 characters, and it is cut to that again with nothing measured.  Only a row
-neither table knows reaches `vertical-motion', and the trim loop after it.
+neither table knows reaches `vertical-motion', and the hide loop after it.
 
 TRIMS is what keeps a row that never fits from being expensive for ever.  A
 status bar carrying an icon the font draws two cells wide is repainted on every
 frame of a full-screen program, and without the table each repaint paid one
-layout query to learn that it wraps and one more per character deleted to learn
+layout query to learn that it wraps and one more per character hidden to learn
 where it stops -- the same answer every time, to the same row under the same
 font.
 
 The key is `cooked--wrap-fallback-key', read off the row as it stands: after
-`cooked--scale-offenders', which the caller runs first, and before anything is
-deleted, so the row that is looked up is the row that was recorded.  See
+`cooked--scale-offenders', which the caller runs first.  The row's text is the
+same before and after a hide, so a row looked up here is the same row that was
+recorded whichever side of the hiding it is read from.  See
 `cooked--wrap-cache' for why this table may not be keyed by HASH.  The stamp
 that guards MEMO guards this too, so an entry never outlives the font or the
 width it was measured under.
@@ -396,17 +415,16 @@ wrapping row is measured."
                      (cooked--wrap-fallback-key start end)))
          (kept (and exact (gethash exact trims))))
     (cond ((and kept (< (+ start kept) end))
-           (delete-region (+ start kept) end)
-           t)
-          ((and (cooked--row-wraps-p start end window memo hash)
-                (cooked--trim-to-one-line start window))
-           (when exact
-             ;; Bounded as the other two tables are; see `cooked-wrap-cache-limit'.
-             (when (> (hash-table-count trims) cooked-wrap-cache-limit)
-               (clrhash trims))
-             (goto-char start)
-             (puthash exact (- (line-end-position) start) trims))
-           t))))
+           (put-text-property (+ start kept) end 'invisible 'cooked-overflow)
+           (+ start kept))
+          ((when-let* (((cooked--row-wraps-p start end window memo hash))
+                       (cut (cooked--hide-overflow start window)))
+             (when exact
+               ;; Bounded as the other two tables are; see `cooked-wrap-cache-limit'.
+               (when (> (hash-table-count trims) cooked-wrap-cache-limit)
+                 (clrhash trims))
+               (puthash exact (- cut start) trims))
+             cut)))))
 
 (defcustom cooked-glyph-scale-floor 0.5
   "How far a glyph may be shrunk to make it fit its cell, or nil not to shrink.
@@ -802,14 +820,19 @@ chance when it is displayed.  Computing WINDOW means asking
 that per row would run `select-window' advice in the middle of a render; see
 docs/DESIGN.md.
 
-Returns non-nil when characters were deleted, which makes the buffer's row
-differ from what the core sent; the caller says so with `cooked--row-edited'.
+Returns non-nil when the row's tail was hidden.  Not a character of it is
+deleted -- see `cooked--hide-overflow' -- so the buffer's row is still what the
+core sent and nothing here owes `cooked--row-edited'.  What the guard does
+leave behind is its own marks, the hidden tail and the truncation glyph, and
+those belong to the row's text: a rewritten row loses them with the text they
+were on, and a row the core *edits* in place keeps them until
+`cooked--clear-guard-marks' takes them off.
 
 The cut is marked with the truncation bitmap `truncate-lines' would show, by
 hand, because `cooked-rejoin-wrapped-lines' keeps `truncate-lines' off
 buffer-wide so a genuinely wrapped scrollback line still reflows for free.
 
-Trimming by character rather than by grapheme cluster is an accepted gap: a cut
+Cutting by character rather than by grapheme cluster is an accepted gap: a cut
 between a base character and a combining mark is possible in principle and
 vanishingly unlikely in practice, the trigger being a character whose own width
 was mismeasured rather than an adjacent one."
@@ -825,10 +848,35 @@ was mismeasured rather than an adjacent one."
           ;; too *tall*, such as a CJK character from a fallback font, makes
           ;; the row deeper while its width fits and the wrap check says nil.
           (cooked--scale-offenders start end window metrics)
-          (when (cooked--fit-row start end window memo trims hash)
-            (goto-char start)
-            (cooked--mark-truncation start (1- (line-end-position)) window)
+          (when-let* ((cut (cooked--fit-row start end window memo trims hash)))
+            (cooked--mark-truncation start cut window)
             t))))))
+
+(defun cooked--clear-guard-marks (start end)
+  "Take the width guard's own marks off the row START..END.
+
+The hidden tail and the truncation glyph are properties of the row's text, and
+the guard is free to leave them there because the renderer deletes a damaged
+row before rewriting it.  An *edit* is the one path that does not: the core
+sends the characters that changed and the rest of the row stays where it is --
+which it may, now that the guard no longer deletes any of it -- so marks made
+for the row as it was would otherwise outlive the row they measured.  A status
+line that loses its wide glyph would keep its tail hidden for as long as
+nothing repainted the whole of it.
+
+`invisible' is removed wholesale: the only other thing in this package that
+hides text is `cooked-toggle-fold', which uses an overlay.  The truncation
+glyph is a `display' property, which decorations and glyph scaling also use, so
+it is found by the `cooked-truncation' beside it and removed one character at a
+time; the same property names the fringe overlay a graphical frame marks with."
+  (remove-text-properties start end '(invisible nil))
+  (let ((pos start))
+    (while (setq pos (text-property-any pos end 'cooked-truncation t))
+      (remove-text-properties pos (1+ pos) '(cooked-truncation nil display nil))
+      (setq pos (1+ pos))))
+  (dolist (overlay (overlays-in start (min (1+ start) end)))
+    (when (overlay-get overlay 'cooked-truncation)
+      (delete-overlay overlay))))
 
 (defcustom cooked-truncation-bitmap nil
   "Fringe bitmap `cooked--truncation-bitmap' draws for a trimmed row.
@@ -842,7 +890,7 @@ this to a bitmap symbol -- one of `fringe-bitmaps', or one of your own from
   :group 'cooked)
 
 (defun cooked--mark-truncation (start cut window)
-  "Mark the row from START to CUT as having had characters trimmed.
+  "Mark the row at START as having had its tail hidden from CUT onwards.
 
 Where the marker goes depends on whether WINDOW -- the one the trim was measured
 in -- has a fringe to put it in, and the difference is a column of the user's
@@ -866,7 +914,11 @@ enough to matter, and redisplay opens an empty continuation line to put it on.
 Column zero is never full.
 
 On a terminal frame there is no fringe, so the marker has to cost a column,
-exactly as `truncate-lines' spends the last one on `$'.
+exactly as `truncate-lines' spends the last one on `$'.  It goes on the last
+character still laid out, the one before CUT, since the characters from CUT on
+draw nothing at all.  Both marks carry `cooked-truncation' as well, which is
+how `cooked--clear-guard-marks' finds them again on a row the core edits in
+place.
 
 Known gap: a graphical frame whose window has no right fringe has nowhere to
 draw the bitmap, so the marker is invisible there.  See docs/DESIGN.md."
@@ -877,8 +929,9 @@ draw the bitmap, so the marker is invisible there.  See docs/DESIGN.md."
         (overlay-put overlay 'before-string
                      (propertize " " 'display
                                  (list 'right-fringe (cooked--truncation-bitmap)))))
-    (put-text-property cut (1+ cut) 'display
-                       (string (cooked--truncation-glyph)))))
+    (add-text-properties (1- cut) cut
+                         (list 'display (string (cooked--truncation-glyph))
+                               'cooked-truncation t))))
 
 (defun cooked--truncation-bitmap ()
   "The fringe bitmap Emacs marks a line truncated on the right with.

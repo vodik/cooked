@@ -968,11 +968,35 @@ them — the arrangement every seam bug needs."
 which defaults to 80 -- large enough that the short rows these tests write
 always fit, so the mocked wrap below is what drives the trim path rather
 than the gate.  Tests that need a *smaller*, genuinely-narrower terminal —
-the \"genuinely wider row\" case — bind `cooked--cols' themselves."
+the \"genuinely wider row\" case — bind `cooked--cols' themselves.
+
+WRAP-AT counts the characters Emacs would *lay out*, which is what the real
+`vertical-motion' counts: `cooked--hide-overflow' shortens a row by hiding its
+tail rather than deleting it, so a mock that stepped over the buffer by
+character would be told nothing by each hide and would never stop.  A row whose
+visible text fits leaves point at the start of the line below, as the real one
+does -- which is how the guard tells a row that fits from one that does not."
   (declare (indent 1))
   `(cl-letf (((symbol-function 'vertical-motion)
-              (lambda (&rest _) (goto-char (min (point-max) (+ (point) ,wrap-at))))))
+              (lambda (&rest _) (cooked-tests--motion-to-wrap ,wrap-at))))
      ,@body))
+
+(defun cooked-tests--motion-to-wrap (wrap-at)
+  "Move point as `vertical-motion' would over a screen line WRAP-AT cells wide.
+
+What `cooked-tests--with-mocked-wrap' and `cooked-tests--counting-wraps' both
+stand `vertical-motion' up as.  Invisible characters are stepped over without
+being counted, which is what the real one does and what the guard's hide loop
+needs: each hidden character has to move the answer, or the loop measures the
+same row for ever."
+  (let ((seen 0))
+    (while (and (not (eobp))
+                (not (eq (char-after) ?\n))
+                (or (< seen wrap-at) (invisible-p (point))))
+      (unless (invisible-p (point)) (setq seen (1+ seen)))
+      (forward-char 1))
+    (when (eq (char-after) ?\n) (forward-char 1))
+    1))
 
 (defun cooked-tests--prompt-lines ()
   "The text of the line at each of `cooked--prompt-starts\\='."

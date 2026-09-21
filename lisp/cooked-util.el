@@ -387,12 +387,13 @@ stayed.
 keeps a copy of what Emacs is showing and leaves a damaged row out of a drain
 when its cells match that copy, so BODY editing a live row -- anything below
 `cooked--screen-start' -- must leave that copy true or say that it has not.
-The three that edit one today, and which of them owes anything:
+The three that edit one today, and none of them owes anything:
 
-  - `cooked--guard-row-width' deletes characters off a row Emacs laid out wider
-    than the grid budgeted, and the buffer's row then differs from what the core
-    sent for as long as it stands.  It owes `cooked--row-edited' for that row,
-    and calls it.
+  - `cooked--guard-row-width' hides the tail of a row Emacs laid out wider than
+    the grid budgeted.  The characters stay, so the row is still the one the
+    core sent and only its layout differs; it used to delete them and owe
+    `cooked--row-edited' for the row, which is why that function has no Lisp
+    caller left.
   - `cooked--pad-to-cursor' appends the trailing blanks the render trimmed.  The
     grid has those blanks, so the row matches the copy again and nothing is
     owed; the drain's LENGTH already counts them.
@@ -401,7 +402,7 @@ The three that edit one today, and which of them owes anything:
     the answer is not to say anything but to have no drain: the composition is
     on `cooked-inhibit-redraw-functions' for its whole life.
 
-A fourth would owe the first of those answers."
+A fourth that left the copy untrue would owe `cooked--row-edited'."
   (declare (indent 0) (debug body))
   `(let ((inhibit-read-only t)
          (buffer-undo-list t))
@@ -569,10 +570,11 @@ replace it.
 Damaging is the strong form, and the only one anything asks for now.  The weak
 one -- telling the core its copy of the screen is stale without damaging
 anything, so that a repaint of the same cells is not matched against it -- has
-two callers left and neither goes through here: `cooked--ready' says it for a
-drain Emacs failed to apply, and `cooked--guard-row-width' for the one row it
-trimmed.  A theme change needs neither; see the comment at the foot of
-cooked-screen.el.
+one caller left and it does not go through here: `cooked--ready' says it for a
+drain Emacs failed to apply.  The width guard used to say it too, for the row
+it trimmed, and does not any more: it hides the overflow rather than deleting
+it, so the copy stays true.  A theme change needs neither; see the comment at
+the foot of cooked-screen.el.
 
 From `cooked--wrap-cache' when `cooked--layout-stamp' moves, and from
 `cooked--set-rendering-option' by way of `cooked--redraw-every-screen'."
@@ -787,7 +789,7 @@ of ours: the minibuffer while a completion session previews this buffer in
 another window, or a neighbouring window while the frame is being resized.
 Measuring a row against a window that shows someone else's buffer at someone
 else's width is not a weaker measurement, it is a meaningless one, and
-`cooked--guard-row-width' acts on the answer by deleting text.
+`cooked--guard-row-width' acts on the answer by hiding text.
 
 The incumbent's width is carried rather than re-measured.  Asking it again per
 candidate made the walk measure the same window once for every window after it,

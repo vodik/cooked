@@ -2011,6 +2011,14 @@ to the child verbatim."
               outline-search-function #'cooked--outline-search
               outline-level #'cooked--outline-level
               bookmark-make-record-function #'cooked--bookmark-record)
+  ;; What the width guard hides the tail of a row with when Emacs lays it out
+  ;; wider than the grid budgeted; see `cooked--hide-overflow'.  A symbol and
+  ;; not a bare t for the reason `cooked-toggle-fold' gives -- t is invisible
+  ;; only while `buffer-invisibility-spec' is itself t, which is merely its
+  ;; default -- and registered here rather than at the first hide, since the
+  ;; guard runs from inside the process filter and the spec is a property of
+  ;; the buffer rather than of any one row.
+  (add-to-invisibility-spec 'cooked-overflow)
   ;; comint would send the line to the process behind the buffer, which here is the
   ;; wakeup pipe.  Every submission goes to the child instead, so `comint-send-input'
   ;; is a working command rather than something to be remapped around -- and nothing
