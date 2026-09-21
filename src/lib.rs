@@ -644,10 +644,10 @@ pub unsafe extern "C" fn emacs_module_init(runtime: *mut Runtime) -> std::ffi::c
 
         /// Send SIGNAL to SESSION's foreground group.
         ///
-        /// SIGNAL is a symbol naming it -- `sigtstp', `sigcont' -- or, for a caller with a
-        /// number already in hand, the number. Prefer the name: the numbers differ between
-        /// Linux and the BSDs, and Lisp has no way to tell which it is running on. See
-        /// `to_signal`.
+        /// SIGNAL is a symbol naming it -- `sigint', `sigtstp', `sigcont'. Only a name:
+        /// the numbers differ between Linux and the BSDs, and Lisp has no way to tell
+        /// which it is running on, so this side does the naming and the side that links
+        /// libc does the numbering. See `to_signal`.
         "cooked--signal" 2..=2 => signal;
 
         /// SESSION's job-control characters, as a plist.
@@ -1142,8 +1142,9 @@ fn send_mouse_report<'e>(env: Env<'e>, args: &[Value<'e>]) -> Result<Value<'e>> 
 /// event reduces to -- is a key this terminal has no spelling for, and `None' is how the
 /// caller is told there is nothing to send.
 fn to_key<'e>(env: Env<'e>, value: Value<'e>) -> Result<Option<Key>> {
-    // `symbolp' first, as `to_signal' asks it: a failed `from_lisp' leaves a non-local
-    // exit pending, so there is no extracting the integer and falling back to the name.
+    // `symbolp' first rather than a failed `from_lisp' and a fallback: a failed
+    // conversion leaves a non-local exit pending on the Emacs side, and everything after
+    // it is a no-op until Lisp unwinds.
     if !env.is_nil(env.funcall(sym!(env, "symbolp")?, &[value])?) {
         return Ok(Key::parse_name(&symbol_name(env, value)?));
     }
@@ -1618,35 +1619,18 @@ fn signal<'e>(env: Env<'e>, args: &[Value<'e>]) -> Result<Value<'e>> {
     Ok(env.nil())
 }
 
-/// The signal named by a Lisp `sigtstp'-style symbol, or given as a raw number.
+/// The signal named by a Lisp `sigtstp'-style symbol.
 ///
-/// Names exist because the numbers are not portable: `SIGTSTP` is 20 on Linux and 18 on
-/// the BSDs, where 20 is `SIGCHLD` and 18 is what Linux calls `SIGCONT`. A number written
-/// in Lisp would suspend on one platform and do something else on the other, and this is
-/// the side that links libc.
-///
-/// Numbers still work, validated here rather than in `Pty::signal`, so a number that is
-/// not a signal gets the Lisp condition for a wrong argument rather than a
-/// `cooked-error' string.
+/// A name and nothing else, because the numbers are not portable: `SIGTSTP` is 20 on
+/// Linux and 18 on the BSDs, where 20 is `SIGCHLD` and 18 is what Linux calls `SIGCONT`.
+/// A number written in Lisp would suspend on one platform and do something else on the
+/// other, and this is the side that links libc. A caller that passes one gets the Lisp
+/// condition for a wrong argument, from `symbol-name` itself.
 fn to_signal(env: Env, value: Value) -> Result<Signal> {
-    // Asked before `from_lisp`, not after: a failed conversion leaves a non-local exit
-    // pending on the Emacs side, and everything after it is a no-op until Lisp unwinds.
-    // So there is no trying the number first and falling back to the name.
-    if !env.is_nil(env.funcall(sym!(env, "symbolp")?, &[value])?) {
-        let name = env.from_lisp::<String>(env.funcall(sym!(env, "symbol-name")?, &[value])?)?;
-        return name
-            .to_uppercase()
-            .parse()
-            .map_err(|_| env.signal("args-out-of-range", "not a signal name"));
-    }
-    // `try_from` rather than `as i32`: the cast wraps, so 4294967305 would arrive as 9
-    // and kill the child outright. Lisp integers are wider than the signal number they
-    // stand in for, and one that does not fit is a mistake to report rather than a bit
-    // pattern to truncate.
-    i32::try_from(env.from_lisp::<i64>(value)?)
-        .ok()
-        .and_then(|n| Signal::try_from(n).ok())
-        .ok_or_else(|| env.signal("args-out-of-range", "not a signal number"))
+    symbol_name(env, value)?
+        .to_uppercase()
+        .parse()
+        .map_err(|_| env.signal("args-out-of-range", "not a signal name"))
 }
 
 /// Not an `accessors!` entry: those take the handle alone, and this carries a flag.

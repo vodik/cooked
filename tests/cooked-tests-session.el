@@ -80,24 +80,27 @@ defun is added and so stays quiet through exactly the drift that bites."
            (cons "/nonexistent/libcooked.so" (time-subtract built-at 3600))))
       (should-not (cooked--check-core-drift file)))))
 
-(ert-deftest cooked-signal-refuses-a-number-that-is-not-one ()
-  "Regression: a signal number wider than an int used to wrap into a real signal.
+(ert-deftest cooked-signal-refuses-a-number ()
+  "A signal number is the wrong kind of thing to ask for, 2 included.
 
-The number arrives as a Lisp integer, which is wider than the `int' a signal
-is, and the conversion used to be a cast.  4294967305 truncates to 9, so asking
-for a signal that does not exist killed the child outright -- the one number in
-range where getting it wrong is unrecoverable.  It is rejected now, and the
-child is still there afterwards to prove it."
+Regression, twice over.  A number arrives as a Lisp integer, which is wider
+than the `int' a signal is, and the conversion used to be a cast: 4294967305
+truncates to 9, so asking for a signal that does not exist killed the child
+outright -- the one number in range where getting it wrong is unrecoverable.
+And a number that is a signal here is not the same signal everywhere, which is
+what `cooked-signal-takes-a-name' is about.  Both go away by refusing the
+number: 2 is SIGINT on every platform cooked runs on, but a caller allowed to
+write it is a caller allowed to write 20, so the door is shut rather than
+watched.  The child is still there afterwards to prove nothing was guessed at."
   :tags '(pty)
   (cooked-tests--with-session (list "/bin/sh")
     (should (cooked-tests--settle (lambda () (cooked--live-p cooked--session))))
-    (dolist (n (list 9999 4294967305 99999999999 -1))
-      (should-error (cooked--signal cooked--session n) :type (quote args-out-of-range)))
-    (should (cooked--live-p cooked--session))
-    ;; A real one still gets through, so the check is not simply refusing everything.
-    (should-not (cooked--signal cooked--session 2))))
+    (dolist (n (list 2 9999 4294967305 99999999999 -1))
+      (should-error (cooked--signal cooked--session n)
+                    :type (quote wrong-type-argument)))
+    (should (cooked--live-p cooked--session))))
 
-(ert-deftest cooked-signal-takes-a-name-as-well-as-a-number ()
+(ert-deftest cooked-signal-takes-a-name ()
   "Regression: the signal numbers written down in Lisp were Linux's.
 
 SIGTSTP is 20 there and 18 on the BSDs, where 20 is SIGCHLD and 18 is what
@@ -106,16 +109,16 @@ ignores, and `cooked-continue' sent it the one that stops the job it means to
 restart.  Naming the signal moves the number to the side that links libc and
 can see which platform it is on; see `cooked--send-job-control'.
 
-A name that is not a signal is refused the same way a number that is not one
-is, and the child is still there afterwards to prove nothing was guessed at."
+A name that is not a signal is refused as the wrong value, and the child is
+still there afterwards to prove nothing was guessed at."
   :tags '(pty)
   (cooked-tests--with-session (list "/bin/sh")
     (should (cooked-tests--settle (lambda () (cooked--live-p cooked--session))))
     (dolist (name '(sigwoof sig nil t))
       (should-error (cooked--signal cooked--session name)
                     :type (quote args-out-of-range)))
-    ;; Neither a symbol nor a number, so it is the wrong kind of thing rather
-    ;; than the wrong value -- which is what double-quoting the name looks like.
+    ;; Not a symbol at all, so it is the wrong kind of thing rather than the
+    ;; wrong value -- which is what double-quoting the name looks like.
     (should-error (cooked--signal cooked--session ''sigtstp)
                   :type (quote wrong-type-argument))
     (should (cooked--live-p cooked--session))

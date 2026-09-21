@@ -801,7 +801,7 @@ does at a terminal and what `interrupt-process' on a pipe cannot do at all."
   (when-let* ((host (buffer-local-value 'cooked-process--host buffer))
               ((buffer-live-p host))
               (session (buffer-local-value 'cooked-process--session host)))
-    (with-current-buffer host (cooked--signal session 2))
+    (with-current-buffer host (cooked--signal session 'sigint))
     t))
 
 (defun cooked-process-send-string (buffer string)
