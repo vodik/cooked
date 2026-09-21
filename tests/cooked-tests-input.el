@@ -2169,7 +2169,7 @@ cost one byte each."
 (ert-deftest cooked-delegation-spells-the-cursor-back-against-decckm ()
   "The left-arrows that put ZLE's cursor back follow the mode the child holds.
 
-Regression: they used to be `cooked--csi' calls, spelled `ESC [ D' no matter
+Regression: they used to be built in Lisp, spelled `ESC [ D' no matter
 what.  Under DECCKM the child reads cursor keys as `ESC O D', so a delegated
 line whose suffix is more than empty left the child's cursor short of where
 the rest of the line expects it."

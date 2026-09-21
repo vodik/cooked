@@ -391,56 +391,6 @@ down the wrong connection."
   (and cooked--host
        (not (cooked--local-host-p cooked--host))))
 
-(defun cooked--csi (final &rest params)
-  "The control sequence `ESC [ PARAMS FINAL', with PARAMS joined by `;'.
-
-Every escape sequence cooked sends the child that is not an OSC is framed
-here, and for the same reason an OSC handler calls `cooked--reply-osc' rather
-than writing the brackets out itself: the framing is the part that is
-identical every time, so it is the part that has no business being respelled
-at each call site, across the mouse, the focus reports and the completion
-channel.  What actually differs between those sites is the parameters and the
-final byte, and that is all they say.
-
-FINAL is a string rather than a character because every call site already
-holds the final byte as one, having spelled it directly rather than computed
-it from an event -- a key press instead goes through `cooked--send-key',
-which spells the whole escape sequence in the core.
-
-PARAMS are numbers, so `(cooked--csi \"~\" 5 2)' is `ESC [ 5 ; 2 ~', the
-modified spelling of `prior'.  None of them at all is the unparameterised
-sequence `ESC [ FINAL', which is what an unmodified cursor key and `backtab'
-are.  A string is taken as the parameter verbatim, which is
-for the kitty keyboard protocol: its fields carry colon-separated sub-fields and
-may be empty, `ESC [ 97 : 65 ; ; 65 u', and neither is a number.
-
-See `cooked--csi-private' for the one sequence that carries a
-private-parameter prefix."
-  (apply #'cooked--csi-private nil final params))
-
-(defun cooked--csi-private (prefix final &rest params)
-  "The control sequence `ESC [ PREFIX PARAMS FINAL'.
-
-PREFIX is the byte ECMA-48 sets aside ahead of the parameters for private use,
-as a string, or nil for the ordinary sequence `cooked--csi' builds.  Lisp sends
-one: `>' introduces the completion request in `cooked--shell-completions',
-which is private in the stronger sense that nothing but cooked's own shell
-integration will ever recognise it, and which is why it may take a free-form
-payload after the final byte that no other sequence here would.
-
-The other private prefix cooked sends, the `<' of an SGR mouse report, is not
-built here.  A report is spelled by the core, which is the only end that knows
-which of the three spellings the child is reading at the moment the pointer
-moves; see `cooked--send-mouse-report'.
-
-A second function rather than an optional argument in front of FINAL, because
-the prefix is the rare case: reading a nil through every ordinary call site
-would bury the two things a reader wants from one of these, which are the
-parameters and the final byte."
-  (concat "\e[" prefix
-          (mapconcat (lambda (p) (if (stringp p) p (number-to-string p))) params ";")
-          final))
-
 ;;;; Who owns the keyboard
 ;;
 ;; The question the whole package turns on, and the reason this is here rather than

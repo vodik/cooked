@@ -129,6 +129,19 @@ table, which looks to the user like TAB having simply misfired.  See
 ;; description is arbitrary text and one control byte in it would end the sequence
 ;; carrying it.
 
+(defconst cooked--completion-request "\e[>99u"
+  "The key the shell widget is bound to, and so the request's first bytes.
+
+Not a terminal sequence with a meaning of its own: `ESC [ > 99 u' is spelled
+like the kitty protocol's flag push, and 99 is no set of kitty flags, so a
+terminal that is not cooked ignores it and the shells bind it as an ordinary
+key -- `bindkey -M emacs $'\\e[>99u'' in shell-integration/cooked-completion.zsh,
+and the same string in the bash and fish scripts.  Written out here because
+those four spellings have to agree byte for byte, and a builder would hide that
+this one is a literal shared with files outside lisp/.
+
+The request's own fields follow it; see the exchange above.")
+
 (defvar-local cooked--completion-serial 0
   "Counter distinguishing completion requests, so a late reply can be dropped.")
 
@@ -194,7 +207,7 @@ writes, so pumping that process is what lets it in."
           (buffer (current-buffer)))
       (setq cooked--completion-reply nil)
       (cooked--send-if-live
-       (concat (cooked--csi-private ">" "u" 99)
+       (concat cooked--completion-request
                (format "%s;%d;%d;%s\n"
                        (cooked-line-completion-nonce (cooked--line)) serial point
                        (cooked--completion-encode line))))
