@@ -841,7 +841,40 @@ fn a_carried_position_survives_a_rewrap_and_the_scroll_that_evicts_it() {
     assert!(after.carried.is_empty() && after.marks.is_empty());
 }
 
-/// The id the core mints for a carried position comes off its cell as the answer is
+/// A carried position on a character a narrowing wraps early goes down with it.
+///
+/// The Lisp-facing half of
+/// `a_mark_on_a_character_an_early_wrap_moved_down_goes_with_it` in screen.rs: `abcd\u{6f22}x`
+/// re-chunked at five columns leaves column 4 empty for the `\u{6f22}` that moved down whole,
+/// and a point Emacs was holding on that character must be answered on the row the
+/// character is on, not on the empty column above it. Both go through one chunking, so
+/// this is the same fix seen from the end that has a user: a transient anchor rides a
+/// cell exactly as a semantic mark does.
+#[test]
+fn a_carried_position_on_an_early_wrapped_character_moves_down_with_it() {
+    let mut t = term(4, 10, "abcd\u{6f22}x".as_bytes());
+    t.drain();
+    // Four characters in, which is the `\u{6f22}`.
+    t.carry(&[(CarryKey(0), 0, Chars::new(4))]);
+    t.resize(4, 5);
+
+    let delta = t.drain();
+    let (_, at) = delta
+        .carried
+        .first()
+        .copied()
+        .expect("the carry is answered");
+    assert!(delta.scrolled.is_empty(), "nothing left the grid");
+    assert_eq!(text(&t, 0), "abcd");
+    assert_eq!(text(&t, 1), "\u{6f22}x");
+    assert_eq!(
+        (at.row, at.col),
+        (1, Chars::new(0)),
+        "the character is the first on row 1, and the carry names the character"
+    );
+}
+
+/// The id the core mints for a carried position comes off its cell as the answer is/// The id the core mints for a carried position comes off its cell as the answer is
 /// taken, which is what bounds its life to the one rewrap. Left on the grid it would be
 /// reported as a semantic mark on every later resize -- an id Emacs holds no marker for,
 /// naming a position nobody asked about.

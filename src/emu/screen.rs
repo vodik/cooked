@@ -2134,10 +2134,20 @@ impl Logical {
         // Against the row's *columns*, not its text: the row is padded out to `cols`, and
         // a mark on a blank column of it is on this row however little text reaches that
         // far. `taken` is where the cells stop, `start + cols` is where the row does.
+        //
+        // Except for an early wrap's own padding, which is the room the character that
+        // moved down would have needed and so belongs to the row below: at five columns
+        // `abcd漢` leaves column 4 empty, and a mark on the `漢` is a mark on the next
+        // chunk's first cell, not on the boundary above it. Those columns are exactly
+        // `taken..start + cols`, since `chunk` pads only where it cut a character short.
+        let claimed = match wrap {
+            Wrap::Early(_) => taken,
+            Wrap::No | Wrap::Full => start + cols,
+        };
         extras.extend(
             self.marks
                 .iter()
-                .filter(|(at, _)| (start..start + cols).contains(at))
+                .filter(|(at, _)| (start..claimed).contains(at))
                 .map(|(at, id)| ((at - start) as u16, Extra::Mark(*id))),
         );
         extras.sort_by_key(|(at, _)| *at);
@@ -2561,6 +2571,60 @@ mod tests {
             "漢",
             "the pair must move down whole rather than straddle the edge"
         );
+    }
+
+    /// Where a mark is, given its id, as (row, column).
+    fn mark_at(screen: &Screen, id: MarkId) -> Option<(usize, usize)> {
+        (0..screen.height()).find_map(|index| {
+            screen
+                .row(index)?
+                .marks()
+                .find(|(_, on_row)| *on_row == id)
+                .map(|(at, _)| (index, at.get()))
+        })
+    }
+
+    /// A mark rides its cell, and a cell an early wrap moved down is on the row below.
+    ///
+    /// The leftover column an early wrap leaves at the end of a row belongs to the
+    /// character that moved down, not to the row that was cut short: at five columns
+    /// `abcd漢x` leaves column 4 empty and the `漢` starts the row below. A mark on that
+    /// character used to be claimed by the row above it, because a chunk claimed every
+    /// column of the row it was padded out to -- so a semantic mark, or a point carried
+    /// across the resize, landed on the row boundary rather than on the character it
+    /// names, at exactly the widths where that room exists.
+    #[test]
+    fn a_mark_on_a_character_an_early_wrap_moved_down_goes_with_it() {
+        let mut screen = Screen::new(4, 10);
+        write(&mut screen, "abcd漢x");
+        let id = MarkId::from_index(0);
+        screen.mark(0, Cols::new(4), id);
+
+        screen.resize(4, 5, Resize::Rewrap).discard();
+
+        assert_eq!(screen.row(0).unwrap().to_text(), "abcd");
+        assert_eq!(screen.row(1).unwrap().to_text(), "漢x");
+        assert_eq!(
+            mark_at(&screen, id),
+            Some((1, 0)),
+            "the mark names the character, which is on the row below now"
+        );
+    }
+
+    /// The other half of the same rule: a mark really on the blank columns of a row's
+    /// own line stays where it is. Only an early wrap's padding belongs to the row below,
+    /// and a row that ends its line -- the last chunk -- has no padding at all, so a mark
+    /// past its text is on it.
+    #[test]
+    fn a_mark_past_a_rows_text_stays_on_that_row() {
+        let mut screen = Screen::new(4, 10);
+        write(&mut screen, "abcd");
+        let id = MarkId::from_index(0);
+        screen.mark(0, Cols::new(4), id);
+
+        screen.resize(4, 5, Resize::Rewrap).discard();
+
+        assert_eq!(mark_at(&screen, id), Some((0, 4)));
     }
 
     /// The blank a wide character leaves behind when it will not fit is padding, not a
