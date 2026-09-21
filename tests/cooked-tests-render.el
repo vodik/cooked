@@ -1647,16 +1647,14 @@ copy."
         (cooked-tests--fed-resize 5 cols)
         (should (equal (cooked-tests--at (mark t) 3) "MNO"))))))
 
-
 (ert-deftest cooked-a-rewrap-puts-the-mark-where-the-core-puts-its-own ()
   "The mark and a semantic mark on the same character stay on it together.
 
-The oracle for `cooked--logical-place' and `cooked--wrap-blanks'.  Emacs carries
-the mark across a rewrap by counting its own `cooked-wrap' newlines and the
-blanks a row marked with an integer hides, while the core carries an OSC 133
-mark on the same cell by re-laying `Logical' and reporting where it landed --
-two mechanisms with nothing in common but the rule that a wrapped row is the
-screen's full width.
+The oracle from when Emacs carried the mark itself, kept now that it does not:
+the mark rides a transient anchor and the OSC 133 mark rides a cell of its own,
+so the two are still separate registrations of the same character through the
+same reflow, and a rewrap that answered one of them differently would be a
+carry that had come adrift from the marks beside it.
 Put both on `d' of a line whose first row is `ab' and eight blanks, and every
 width has to leave them on the same character: agreeing with each other is the
 only check either one has that it agrees with the grid.
@@ -1761,12 +1759,12 @@ different one at every width where they are not."
   "A row with its own trailing blanks that then wraps early is not padded twice.
 
 `ab' followed by two of the child's own blanks left only one column of room
-for a two-column character, which moved to the row below whole.
-`cooked--wrap-blanks' used to count three blanks there -- the row's own two
-plus the character's one column of leftover room, indistinguishable by width
-alone -- so a mark past the wrap on `c' rewrapped one character short and
-landed on `d' instead.  The core now reports the one column of padding
-separately, and the mark stays on `c' at every width."
+for a two-column character, which moved to the row below whole.  The row is
+then three columns short of five, and only one of the three is the character's
+leftover room rather than a blank of the line -- a difference no width tells,
+and one Emacs got wrong when it counted the blanks back in for itself, landing
+a mark past the wrap on `d' instead of `c'.  The core counts it and the mark
+stays on `c' at every width."
   (let ((cooked-rejoin-wrapped-lines t))
     (cooked-tests--with-fed-screen 5 5
       (cooked-tests--fed "one\r\nab  語cd")

@@ -162,10 +162,10 @@ column 13.  See `cooked--mouse-glyph', which measures the same way."
                 (string-width (buffer-substring-no-properties (max bol start) pos))))))))
 
 (defun cooked--screen-place (&optional pos)
-  "Screen row of POS and the characters of that row before it, or nil if it is
-not on the screen.
+  "Screen row of POS and the characters of that row before it, or nil.
 
-The unit an anchor is spelled in, which is why this exists beside
+Nil when POS is not on the screen at all.  The unit an anchor is spelled in,
+which is why this exists beside
 `cooked--screen-cell': the core counts a row in characters and not in cells, so
 a position handed to `cooked--resize' to be carried across a rewrap has to be
 counted the same way.  On `日本X' the `X' is column 4 and two characters in.
