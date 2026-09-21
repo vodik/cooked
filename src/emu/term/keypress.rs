@@ -56,7 +56,7 @@ impl Modifiers {
         Self(self.0 & !other.0)
     }
 
-    const fn holds(self, other: Self) -> bool {
+    pub(super) const fn holds(self, other: Self) -> bool {
         self.0 & other.0 != 0
     }
 

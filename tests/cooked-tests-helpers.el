@@ -291,7 +291,7 @@ means \"and keep the mouse on\", it says `:enabled t' as well."
 (defmacro cooked-tests--recording-reports (var &rest body)
   "Run BODY with mouse reports collected into VAR instead of sent, newest first.
 
-Each entry is the (BUTTON ROW COL PRESSED DX DY) intent `cooked--send-mouse'
+Each entry is the (BUTTON KIND MODS ROW COL DX DY) intent `cooked--send-mouse'
 hands the core.  That intent is what these tests are about -- which button at
 which cell, and whether it is reported at all -- while the bytes those
 arguments turn into are the core's, spelled against modes only it holds and

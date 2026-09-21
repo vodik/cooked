@@ -554,7 +554,7 @@ arrived between the press and the release."
           (cooked-tests--displayed
             (let ((last-input-event (list 'down-mouse-1 (cooked-tests--posn row))))
               (cooked-mouse-event))
-            (should (equal cooked--mouse-held '(0)))
+            (should (equal cooked--mouse-held '(left)))
             (let* ((release (list 'mouse-2 (cooked-tests--posn at)))
                    (last-input-event release)
                    (last-nonmenu-event release)

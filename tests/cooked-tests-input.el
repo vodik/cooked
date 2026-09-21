@@ -2675,8 +2675,8 @@ that the intent crosses the wire and the bytes land in the child."
       '("/bin/sh" "-c" "printf '\\033[?1000h\\033[?1006h'; stty raw -echo; exec cat -v")
     (should (cooked-tests--settle
              (lambda () (cooked-mouse-state-enabled cooked--mouse-state))))
-    (should (cooked--send-mouse-report cooked--session 0 4 9 t))
-    (should (cooked--send-mouse-report cooked--session 0 4 9 nil))
+    (should (cooked--send-mouse-report cooked--session 'left 'press nil 4 9))
+    (should (cooked--send-mouse-report cooked--session 'left 'release nil 4 9))
     (should (cooked-tests--settle
              (lambda ()
                (string-match-p "\\[<0;10;5M.*\\[<0;10;5m" (cooked-tests--text)))))))
@@ -2689,7 +2689,7 @@ X10 biases every coordinate by 32 and counts from 1, so column 0 is `!'."
       '("/bin/sh" "-c" "printf '\\033[?1000h'; stty raw -echo; exec cat -v")
     (should (cooked-tests--settle
              (lambda () (cooked-mouse-state-enabled cooked--mouse-state))))
-    (should (cooked--send-mouse-report cooked--session 0 2 4 t))
+    (should (cooked--send-mouse-report cooked--session 'left 'press nil 2 4))
     (should (cooked-tests--settle
              (lambda () (string-match-p "\\[M %#" (cooked-tests--text)))))))
 
@@ -2706,7 +2706,7 @@ the core -- rather than encoded against a copy of them that is a drain old."
     (should (cooked-tests--settle
              (lambda () (cooked-mouse-state-enabled cooked--mouse-state))))
     (cooked--feed cooked--session "\e[?1000l")
-    (should-not (cooked--send-mouse-report cooked--session 0 2 4 t))
+    (should-not (cooked--send-mouse-report cooked--session 'left 'press nil 2 4))
     ;; And Lisp still believes the child wants it, which is the whole point.
     (should (cooked-mouse-state-enabled cooked--mouse-state))))
 
@@ -3476,7 +3476,7 @@ drew and could only escape by leaving the buffer."
     (activate-mark)
     (should mark-active)
     (cooked-tests--recording-reports sent
-      (cooked--send-mouse 0 1 2 t)
+      (cooked--send-mouse 'left 'press 1 2)
       (should sent))
     (should-not mark-active)))
 
@@ -3504,7 +3504,7 @@ visual state rather than entering it."
     (should mark-active)
     (cooked-tests--recording-reports _sent
       (let ((this-command 'cooked-mouse-event))
-        (cooked--send-mouse 0 1 2 t)))
+        (cooked--send-mouse 'left 'press 1 2)))
     (should-not mark-active)
     (should-not (evil-visual-state-p))))
 
@@ -3525,7 +3525,7 @@ the same reason with no command to read -- so both go through
     (evil-visual-state)
     (cooked-tests--recording-reports _sent
       (let ((this-command nil))
-        (cooked--send-mouse 0 1 2 t)))
+        (cooked--send-mouse 'left 'press 1 2)))
     (should-not mark-active)
     (should-not (evil-visual-state-p))))
 
@@ -3572,47 +3572,45 @@ unable to know whether motion reports were asked for at all."
     (should (cooked-mouse-state-enabled cooked--mouse-state))
     (should-not (cooked-mouse-state-drag cooked--mouse-state))))
 
-(ert-deftest cooked-motion-reports-carry-the-motion-bit ()
-  "32 added to the button being dragged, and 3 for no button at all."
+(ert-deftest cooked-motion-reports-name-the-button-being-dragged ()
+  "The button held, or no button at all, and always the `motion' kind."
   (with-temp-buffer
     (cooked-mode)
     (cooked-tests--recording-reports sent
       (cooked--report-motion 4 9)
-      (should (equal (car sent) '(35 4 9 t nil nil)))
+      (should (equal (car sent) '(nil motion nil 4 9 nil nil)))
       ;; The same cell twice is nothing the child needs to hear: Emacs tracks
       ;; the pointer by pixel, and this is what keeps that affordable.
       (cooked--report-motion 4 9)
       (should (equal (length sent) 1))
-      (cooked--report-button 0 4 9 t)
+      (cooked--report-button 'left 4 9 t)
       (cooked--report-motion 5 9)
-      (should (equal (car sent) '(32 5 9 t nil nil)))
-      ;; And the release puts the button down again, so motion goes back to 3.
-      (cooked--report-button 0 5 9 nil)
+      (should (equal (car sent) '(left motion nil 5 9 nil nil)))
+      ;; And the release puts the button down again, so motion names none.
+      (cooked--report-button 'left 5 9 nil)
       (cooked--report-motion 6 9)
-      (should (equal (car sent) '(35 6 9 t nil nil))))))
+      (should (equal (car sent) '(nil motion nil 6 9 nil nil))))))
 
 (ert-deftest cooked-a-modified-click-names-its-modifiers ()
-  "Control is 16 and Meta is 8, added to the button as xterm adds them, and held
-through the drag because a movement event names no modifier of its own."
+  "The modifiers cross as the symbols Emacs names them with -- the bits xterm
+adds to the button number are the core's -- and are held through the drag
+because a movement event names no modifier of its own."
   (with-temp-buffer
     (cooked-mode)
-    (setq cooked--mouse-modifiers (cooked--mouse-modifier-number '(control down)))
+    (setq cooked--mouse-modifiers '(control down))
     (cooked-tests--recording-reports sent
-      (cooked--report-button 0 4 9 t)
-      (should (equal (car sent) '(16 4 9 t nil nil)))
+      (cooked--report-button 'left 4 9 t)
+      (should (equal (car sent) '(left press (control down) 4 9 nil nil)))
       (cooked--report-motion 5 9)
-      (should (equal (car sent) '(48 5 9 t nil nil)))
-      ;; Still button 0 as far as the release is concerned: the modifiers are in
-      ;; the report, not in what is remembered as held.
-      (should (equal cooked--mouse-held '(0)))
-      (cooked--report-button 0 5 9 nil)
-      (should (equal (car sent) '(16 5 9 nil nil nil)))
+      (should (equal (car sent) '(left motion (control down) 5 9 nil nil)))
+      ;; Still the left button as far as the release is concerned: the modifiers
+      ;; ride beside the report, not in what is remembered as held.
+      (should (equal cooked--mouse-held '(left)))
+      (cooked--report-button 'left 5 9 nil)
+      (should (equal (car sent) '(left release (control down) 5 9 nil nil)))
       ;; And the gesture takes them with it, so hover is bare again.
       (cooked--report-motion 6 9)
-      (should (equal (car sent) '(35 6 9 t nil nil))))
-    (should (= (cooked--mouse-modifier-number '(control meta click)) 24))
-    ;; Shift is Emacs', so that a shifted drag can select out of the program.
-    (should (= (cooked--mouse-modifier-number '(shift down)) 0))))
+      (should (equal (car sent) '(nil motion nil 6 9 nil nil))))))
 
 (ert-deftest cooked-the-mouse-map-claims-control-and-meta-but-not-shift ()
   "A control-click is the child's while it has the mouse; a shifted one never
@@ -3635,13 +3633,13 @@ to be nobody's binding, so the child held the button forever."
   (with-temp-buffer
     (cooked-mode)
     (cooked-tests--mouse :enabled t)
-    (setq cooked--mouse-held '(0) cooked--mouse-last-cell '(4 . 9))
+    (setq cooked--mouse-held '(left) cooked--mouse-last-cell '(4 . 9))
     (cooked-tests--recording-reports sent
       (let ((last-input-event (list 'C-mouse-1 (cooked-tests--posn nil))))
         (cooked-mouse-event))
-      (should (equal sent '((16 4 9 nil nil nil)))))
+      (should (equal sent '((left release (control click) 4 9 nil nil)))))
     (should-not cooked--mouse-held)
-    (should (= cooked--mouse-modifiers 0))))
+    (should-not cooked--mouse-modifiers)))
 
 (ert-deftest cooked-a-release-off-the-screen-still-reaches-the-child ()
   "Let go past the last row and `posn-point' is nil, but the button is still down
@@ -3649,12 +3647,12 @@ as far as the child knows.  Falling through to Emacs there left it held forever.
   (with-temp-buffer
     (cooked-mode)
     (cooked-tests--mouse :enabled t)
-    (setq cooked--mouse-held '(0) cooked--mouse-last-cell '(4 . 9))
+    (setq cooked--mouse-held '(left) cooked--mouse-last-cell '(4 . 9))
     (cooked-tests--recording-reports sent
       (let ((last-input-event (list 'drag-mouse-1 (cooked-tests--posn nil)
                                     (cooked-tests--posn nil))))
         (cooked-mouse-event))
-      (should (equal sent '((0 4 9 nil nil nil)))))
+      (should (equal sent '((left release (drag) 4 9 nil nil)))))
     (should-not cooked--mouse-held)))
 
 (defmacro cooked-tests--with-mouse-rows (rows &rest body)
@@ -3733,13 +3731,11 @@ column 0 of that row for a pointer over no cell at all."
               (cooked-mouse-event))))
         (should (equal (length sent) 1))
         ;; A press, at the cell the pointer was over and not the one the row's
-        ;; text ended at.  Anything non-nil is a press, which is what the event
-        ;; hands through.  The offset is measured and sent along whether the
+        ;; text ended at.  The offset is measured and sent along whether the
         ;; child asked for pixels or not -- what this checks is the cell, which
         ;; is `_dx'/`_dy''s business only in `cooked-mouse-offset-stays-inside-the-characters-cells'.
-        (pcase-let ((`(,button ,row ,col ,pressed ,_dx ,_dy) (car sent)))
-          (should (equal (list button row col) '(0 0 12)))
-          (should pressed)))
+        (pcase-let ((`(,button ,kind ,_mods ,row ,col ,_dx ,_dy) (car sent)))
+          (should (equal (list button kind row col) '(left press 0 12)))))
       (should (= (length fallback) 1)))))
 
 (ert-deftest cooked-mouse-offset-stays-inside-the-characters-cells ()
@@ -3776,18 +3772,18 @@ right key, the right number of times, and that a horizontal one sends nothing."
                 ((symbol-function 'cooked--send-key)
                  (lambda (_session key &rest _) (push key sent))))
         (let ((cooked-alternate-scroll-lines 3))
-          (cooked--alt-scroll-keys 64)
+          (cooked--alt-scroll-keys 'wheel-up)
           (should (equal (reverse sent) '(up up up)))
           (setq sent nil)
-          (cooked--alt-scroll-keys 65)
+          (cooked--alt-scroll-keys 'wheel-down)
           (should (equal (reverse sent) '(down down down))))
         (setq sent nil)
         (let ((cooked-alternate-scroll-lines 1))
-          (cooked--alt-scroll-keys 64))
+          (cooked--alt-scroll-keys 'wheel-up))
         (should (equal sent '(up)))
         ;; Horizontal notches have no cursor-key spelling and send nothing.
         (setq sent nil)
-        (cooked--alt-scroll-keys 66)
+        (cooked--alt-scroll-keys 'wheel-left)
         (should-not sent)))))
 
 (ert-deftest cooked-the-sender-says-whether-the-user-typed-it ()
@@ -3829,7 +3825,7 @@ What is left for this one is who says what, which those two cannot see."
                  (lambda (_session key _mods _assumed &optional translated)
                    (push (cons key translated) sent))))
         (let ((cooked-alternate-scroll-lines 1))
-          (cooked--alt-scroll-keys 64))
+          (cooked--alt-scroll-keys 'wheel-up))
         (should (equal sent '((up . t))))))))
 
 (ert-deftest cooked-alternate-scroll-sends-a-trackpads-rows-not-its-events ()

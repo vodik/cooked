@@ -26,8 +26,8 @@ mod wire;
 pub mod wire_gen;
 
 use emu::{
-    Assumed, Button, CellMetrics, ColorScheme, Drain, FrameSize, ImageFormat, ImageId, Key,
-    Modifiers, NamedKey, PasteOutcome, PixelSize, ShownFormats,
+    Assumed, CellMetrics, ColorScheme, Drain, FrameSize, ImageFormat, ImageId, Key, Modifiers,
+    MouseButton, MouseKind, MouseReport, NamedKey, PasteOutcome, PixelSize, ShownFormats,
 };
 use env::{Env, FromLisp, IntoLisp, Result, Runtime, UserPtr, Value, plist, sym};
 use nix::sys::signal::Signal;
@@ -273,7 +273,14 @@ pub unsafe extern "C" fn emacs_module_init(runtime: *mut Runtime) -> std::ffi::c
         /// request or a process filter's write.
         "cooked--send" 2..=3 => send;
 
-        /// Report BUTTON at ROW/COL to SESSION's child, PRESSED or released.
+        /// Report BUTTON doing KIND at ROW/COL to SESSION's child, held with MODS.
+        ///
+        /// BUTTON is one of the symbols `cooked--mouse-buttons' answers -- `left',
+        /// `middle', `right' or one of `wheel-up', `wheel-down', `wheel-left' and
+        /// `wheel-right' -- or nil, which is the pointer moving with nothing held. KIND
+        /// is `press', `release' or `motion', and MODS is a list of `event-modifiers'
+        /// symbols, as `cooked--send-key' takes it. The xterm button byte those spell is
+        /// the core's, as the bytes of a key press are.
         ///
         /// ROW and COL are cells counted from zero, as `cooked--mouse-cell' answers them;
         /// every wire form counts from one and the core adds the bias. DX and DY, each
@@ -283,11 +290,12 @@ pub unsafe extern "C" fn emacs_module_init(runtime: *mut Runtime) -> std::ffi::c
         /// to say -- a wheel notch over the fringe, a release carried off the screen.
         ///
         /// Returns t if the child was told, and nil if it has stopped asking for the
-        /// mouse or for this much of it: BUTTON carries the motion bit and the wheel
-        /// bit, so a report of the pointer merely moving is dropped unless the mode the
-        /// child holds *now* covers motion -- 1003 for motion with nothing held, 1002 or
-        /// 1003 for a drag. A press, a release and a wheel notch are covered by every
-        /// mode and are never dropped for this reason.
+        /// mouse or for this much of it: a report of the pointer merely moving is dropped
+        /// unless the mode the child holds *now* covers motion -- 1003 for motion with
+        /// nothing held, 1002 or 1003 for a drag. A press, a release and a wheel notch
+        /// are covered by every mode and are never dropped for this reason. nil as well
+        /// for a BUTTON and KIND no mouse could pair: a notch released or dragged, and a
+        /// press or a release of no button.
         ///
         /// Which spelling it gets -- X10, SGR or SGR in pixels -- and the cell
         /// size the pixels are measured in are read here, under the terminal lock,
@@ -296,7 +304,7 @@ pub unsafe extern "C" fn emacs_module_init(runtime: *mut Runtime) -> std::ffi::c
         /// answer is read by the child as a different event. Deciding *whether* a click
         /// is the child's is still Lisp's, since that is a question about windows, the
         /// region and where the pointer is.
-        "cooked--send-mouse-report" 5..=7 => send_mouse_report;
+        "cooked--send-mouse-report" 6..=8 => send_mouse_report;
 
         /// Send KEY, held with MODS, to SESSION's child, and return t if it was sent.
         ///
@@ -1091,28 +1099,27 @@ fn send<'e>(env: Env<'e>, args: &[Value<'e>]) -> Result<Value<'e>> {
 /// Spell one mouse report against the modes the child holds now; see
 /// `cooked--send-mouse-report'.
 fn send_mouse_report<'e>(env: Env<'e>, args: &[Value<'e>]) -> Result<Value<'e>> {
-    // Refused rather than clamped: a number outside the byte xterm's encoding has room
-    // for names no button, and a clamp would spell it as whichever button sits at the
-    // edge. See [`Button`].
-    let Ok(button) = Button::try_from(env.from_lisp::<i64>(args[1])?) else {
+    let button = env.from_lisp::<Option<MouseButton>>(args[1])?;
+    let kind = env.from_lisp::<MouseKind>(args[2])?;
+    // Refused rather than coerced into the nearest sensible report: a notch let go of, or
+    // a press of no button, is a caller that has confused two gestures, and spelling it
+    // as either would name something the user never did. See [`MouseReport::new`].
+    let Some(report) = MouseReport::new(button, kind) else {
         return Ok(env.nil());
     };
+    let mods = to_modifiers(env, args[3])?;
     let cell = |i: usize| -> Result<u64> { Ok(env.from_lisp::<i64>(args[i])?.max(0) as u64) };
-    let (row, col) = (cell(2)?, cell(3)?);
-    let pressed = !env.is_nil(args[4]);
+    let (row, col) = (cell(4)?, cell(5)?);
     // Either half nil is the other half alone rather than no offset at all: the pair is
     // how far into the cell the pointer is on each axis, and a caller that has one axis
     // to report is reporting a pointer, not standing in for one.
-    let (dx, dy) = (env.opt::<i64>(args, 5)?, env.opt::<i64>(args, 6)?);
+    let (dx, dy) = (env.opt::<i64>(args, 6)?, env.opt::<i64>(args, 7)?);
     let offset = dx.or(dy).map(|_| (dx.unwrap_or(0), dy.unwrap_or(0)));
     let session = env.from_lisp::<&Session>(args[0])?;
     // The lock is held for the spelling and released before the write, which can wait out
     // a child that is not reading. What it has to cover is the two readings and the bytes
     // built from them; the pty's own ordering is the writer's, not this lock's.
-    let Some(mut bytes) = session
-        .term()
-        .mouse_report(button, row, col, pressed, offset)
-    else {
+    let Some(mut bytes) = session.term().mouse_report(report, mods, row, col, offset) else {
         return Ok(env.nil());
     };
     // Never a keystroke, whatever the user pressed to get here: a pointer sweep under
@@ -1409,6 +1416,30 @@ impl<'e> FromLisp<'e> for Drain {
         } else {
             Err(env.signal_wrong_type("cooked-drain-mode-p", v))
         }
+    }
+}
+
+impl<'e> FromLisp<'e> for MouseButton {
+    /// `cooked--send-mouse-report''s BUTTON: the symbol `cooked--mouse-buttons' answers
+    /// for an Emacs mouse event.
+    ///
+    /// Read by name, as a key symbol is in [`to_key`]: the seven names and the three of
+    /// [`MouseKind`] are one table in `mouse.rs`, beside the bits they spell, rather than
+    /// a second table of interned symbols here for them to drift from. Nil is handled a
+    /// level up, by `Option`, because it means something the others do not -- the pointer
+    /// moving with nothing held.
+    fn from_lisp(env: &Env<'e>, v: Value<'e>) -> Result<Self> {
+        Self::parse(&symbol_name(*env, v)?)
+            .ok_or_else(|| env.signal_wrong_type("cooked-mouse-button-p", v))
+    }
+}
+
+impl<'e> FromLisp<'e> for MouseKind {
+    /// `cooked--send-mouse-report''s KIND: `press', `release' or `motion', which is the
+    /// whole of what Emacs can tell cooked a mouse event was.
+    fn from_lisp(env: &Env<'e>, v: Value<'e>) -> Result<Self> {
+        Self::parse(&symbol_name(*env, v)?)
+            .ok_or_else(|| env.signal_wrong_type("cooked-mouse-kind-p", v))
     }
 }
 
