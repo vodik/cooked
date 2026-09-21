@@ -381,10 +381,8 @@ next whole drain.")
     (:reverse-toggles . "As `:reverse'.")
     (:app-cursor . "A key encoding, for a buffer that can take a keystroke;
 one with no window cannot, and the whole drain that shows it catches it up.")
-    (:keys . "As `:app-cursor'.")
-    (:kitty-flags . "As `:app-cursor'.  See
-`cooked-showing-a-hidden-buffer-catches-up-its-kitty-flags-first'.")
-    (:modify-other-keys . "As `:app-cursor'."))
+    (:keys . "As `:app-cursor'.  See
+`cooked-showing-a-hidden-buffer-catches-up-its-key-encoding-first'."))
   "Why `cooked--apply-withheld' leaves each remaining key of a drain alone.
 
 Not an inventory of the drain -- the core's docstring is that -- but the
@@ -753,9 +751,7 @@ keymap from a grid and a key encoding this drain has already put in place."
                                         :width (plist-get update :width)
                                         :used (plist-get update :used)
                                         :head (plist-get update :head))
-        cooked--keys (plist-get update :keys)
-        cooked--kitty-flags (or (plist-get update :kitty-flags) 0)
-        cooked--modify-other-keys (or (plist-get update :modify-other-keys) 0))
+        cooked--keys (plist-get update :keys))
   (cooked--set-alt (plist-get update :alt))
   (cooked--set-reverse-screen (plist-get update :reverse)
                               (plist-get update :reverse-toggles))

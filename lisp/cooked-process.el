@@ -591,8 +591,6 @@ screen region starts and whether to pin it, and there is no region here.")
 the consumer's process object is the stand-in shell, and what reaches the child
 goes through `cooked-process-send-string' as bytes the caller composed.")
     (:keys . "As `:app-cursor'.")
-    (:kitty-flags . "As `:app-cursor'.")
-    (:modify-other-keys . "As `:app-cursor'.")
     (:withheld . "Nil on every drain this file takes.  A `scrolled' drain
 leaves the screen out without withholding it: the damage waits in the core for
 a whole drain nobody here asks for, and a consumer with no screen is owed

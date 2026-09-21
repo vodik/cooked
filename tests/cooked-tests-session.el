@@ -1450,28 +1450,29 @@ cursor starts at the top of the screen, where an insertion leaves point behind."
           (should (= (point) (cooked--cursor-position))))
       (ignore-errors (delete-file done)))))
 
-(ert-deftest cooked-showing-a-hidden-buffer-catches-up-its-kitty-flags-first ()
+(ert-deftest cooked-showing-a-hidden-buffer-catches-up-its-key-encoding-first ()
   "NOT REAL, question 3 of the review3 split-brain probe (see FABEL.org, task
 \"Check: two trackers of where the prompt is, and two statements of
-\\='hidden\\='\"): whether `cooked--kitty-flags', the drain-old copy that gates which
+\\='hidden\\='\"): whether `cooked--keys', the drain-old copy that gates which
 keys `cooked--build-passthrough-map' takes from Emacs, can be stale for a key a
 program negotiating the kitty protocol is owed.
 
-A withheld drain never touches `cooked--kitty-flags' -- `cooked--apply-withheld'
+A withheld drain never touches `cooked--keys' -- `cooked--apply-withheld'
 calls no `cooked--apply-levels' -- so while a session is genuinely hidden a push
 can sit unreported indefinitely; see
 `a_kitty_flags_push_neither_wakes_a_hidden_session_nor_forces_a_whole_drain' in
 src/emu/term/tests/hidden.rs for the Rust half of that. But nothing can type a
 key into a buffer with no window, and `cooked--sync-before-redisplay' forces a
 whole drain -- which is what actually refreshes the copy -- before the window
-is redrawn.  This is the Lisp half: the flags are still stale immediately after
-the push, and already correct by the time the buffer can take a keystroke."
+is redrawn.  This is the Lisp half: the encoding is still stale immediately
+after the push, and already correct by the time the buffer can take a
+keystroke."
   :tags '(pty)
   (cooked-tests--with-session
       (list "/bin/sh" "-c" "stty raw -echo; printf 'ready\\r'; read -r _; printf '\\033[>1u'; cat -v")
     (should (cooked-tests--settle
              (lambda () (string-match-p "ready" (cooked-tests--text)))))
-    (should (= cooked--kitty-flags 0))
+    (should (eq cooked--keys 'legacy))
     (cooked-tests--hide-buffer)
     (cooked--send cooked--session "\n")
     ;; Long enough for the push to have reached the core and for a hidden session's
@@ -1479,11 +1480,11 @@ the push, and already correct by the time the buffer can take a keystroke."
     ;; test this docstring names.
     (cooked-tests--pump 0.3)
     ;; The withheld drain must not have picked up the push.
-    (should (= cooked--kitty-flags 0))
+    (should (eq cooked--keys 'legacy))
     (let ((window (cooked-tests--show-buffer)))
       (cooked--sync-before-redisplay window))
     ;; The whole drain showing the buffer forces must have caught it up.
-    (should (= cooked--kitty-flags 1))
+    (should (eq cooked--keys 'kitty))
     (should (equal (cooked-tests--spell 'escape) "\e[27u"))))
 
 (ert-deftest cooked-xtgettcap-answers-for-the-entry-term-names ()

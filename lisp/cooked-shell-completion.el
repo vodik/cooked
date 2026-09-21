@@ -135,10 +135,10 @@ table, which looks to the user like TAB having simply misfired.  See
 Not a terminal sequence with a meaning of its own: `ESC [ > 99 u' is spelled
 like the kitty protocol's flag push, and 99 is no set of kitty flags, so a
 terminal that is not cooked ignores it and the shells bind it as an ordinary
-key -- `bindkey -M emacs $'\\e[>99u'' in shell-integration/cooked-completion.zsh,
-and the same string in the bash and fish scripts.  Written out here because
-those four spellings have to agree byte for byte, and a builder would hide that
-this one is a literal shared with files outside lisp/.
+key -- a `bindkey' of `\\e[>99u' in shell-integration/cooked-completion.zsh, and
+the same string in the bash and fish scripts.  Written out here because those
+four spellings have to agree byte for byte, and a builder would hide that this
+one is a literal shared with files outside lisp/.
 
 The request's own fields follow it; see the exchange above.")
 

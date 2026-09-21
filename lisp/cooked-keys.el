@@ -137,7 +137,7 @@ that encoding only for a child whose flags switch it on -- flag 1, or flag 8,
 which disambiguates every key by construction; flags 4 and 16 only add a field
 to an escape code something else already chose to send -- so
 `KeyEncoding::kitty' in src/emu/term/keys.rs is the one place that test is made
-and there is nothing here to re-derive from `cooked--kitty-flags'.
+and the flags themselves never cross the seam.
 
 What it rules out is a `kitty' that nobody negotiated, which
 `cooked-key-protocol-overrides' assumes for a program that reads the protocol

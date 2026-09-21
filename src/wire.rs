@@ -70,8 +70,9 @@ lisp_enum! {
     }
 }
 
-/// What the child negotiated, as the symbol `:keys' carries. The flags or the level the
-/// encoding holds cross beside it as `:kitty-flags' and `:modify-other-keys'.
+/// What the child negotiated, as the symbol `:keys' carries. Which keys the protocol
+/// covers -- the kitty flags pushed, the modifyOtherKeys level set -- stays here: it is
+/// read at the moment each key is spelled, and Lisp has no use for it.
 impl<'e> env::IntoLisp<'e> for KeyEncoding {
     fn into_lisp(self, env: &Env<'e>) -> Result<Value<'e>> {
         match self {
@@ -327,8 +328,6 @@ pub(crate) fn update_to_lisp<'e>(env: Env<'e>, update: &Update, rejoin: bool) ->
         ":alt"         => levels.alt,
         ":app-cursor"  => levels.app_cursor,
         ":keys"        => levels.keys,
-        ":kitty-flags" => u32::from(levels.keys.kitty_flags().bits()),
-        ":modify-other-keys" => u32::from(levels.keys.modify_other_keys_level()),
         ":mode"        => update.mode,
         ":foreground"  => foreground,
         ":images"      => images_to_lisp(env, &update.delta.images)?,

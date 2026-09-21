@@ -169,8 +169,7 @@ pub unsafe extern "C" fn emacs_module_init(runtime: *mut Runtime) -> std::ffi::c
         /// Collect everything that changed in SESSION since the last call.
         /// Returns a plist with :scrolled, :promoted, :shifts, :rows, :edits, :height, :width,
         /// :used, :head, :cursor, :reverse, :reverse-toggles, :marks, :alt, :app-cursor, :keys,
-        /// :kitty-flags, :modify-other-keys, :mode, :foreground, :images, :links, :styles,
-        /// :events, :exit and :withheld.
+        /// :mode, :foreground, :images, :links, :styles, :events, :exit and :withheld.
         ///
         /// :exit is the child's status once it has one, or the symbol `lost' for a
         /// session whose reader gave up on the pty with the child still unreapable.

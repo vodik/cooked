@@ -4061,7 +4061,6 @@ src/emu/term/tests/keyboard.rs, which carry the cases this file used to."
     ;; Lisp's copy of all this is still what it was before the first feed, which
     ;; is what the spelling used to read: nothing here would move if it still did.
     (should (eq cooked--keys 'legacy))
-    (should (= cooked--kitty-flags 0))
     (should (equal (cooked-tests--spell 'S-return) "\e[13;2u"))
     (should (equal (cooked-tests--spell 'escape) "\e[27u"))
     ;; And a pop puts back what the push replaced.
@@ -4142,26 +4141,29 @@ listening for that."
     (cooked-tests--negotiate "\e[<1u")
     (should (equal (cooked--override-bytes-for :kitty 'backtab) "\e[9;2u"))))
 
-(ert-deftest cooked-kitty-flags-arrive-with-the-drain ()
-  "The flags a child pushes reach `cooked--kitty-flags', masked to what is
+(ert-deftest cooked-kitty-flags-reach-the-spelling-and-not-lisp ()
+  "The flags a child pushes reach the keys it is sent, masked to what is
 honoured: bit 2 asks for release events Emacs never delivers.
 
-The copy is what decides which keys the passthrough map takes away from Emacs;
-what the child is sent is spelled against the flags the core holds."
+The flags themselves never cross the seam.  `cooked--keys' says the protocol
+was negotiated, which is what decides which keys the passthrough map takes away
+from Emacs, and which keys the protocol covers is answered where each key is
+spelled -- so a push of 31 shows up as the shifted key and the text riding the
+escape code for `A', and nowhere else."
   :tags '(pty)
   (cooked-tests--with-session
       '("/bin/sh" "-c" "printf '\033[>31u'; sleep 5")
     (should (cooked-tests--settle (lambda () (eq cooked--keys 'kitty))))
-    (should (= cooked--kitty-flags 29))
     (should (equal (cooked-tests--spell ?A) "\e[97:65;2;65u"))))
 
-(ert-deftest cooked-modify-other-keys-level-arrives-with-the-drain ()
-  "The level a child sets reaches `cooked--modify-other-keys', level 1 included."
+(ert-deftest cooked-modify-other-keys-level-reaches-the-spelling ()
+  "The level a child sets shows in the keys it is sent, level 1 included.
+The level is the core's, as the kitty flags are; `cooked--keys' carries only
+that a negotiation happened."
   :tags '(pty)
   (cooked-tests--with-session
       '("/bin/sh" "-c" "printf '\033[>4;1m'; sleep 5")
     (should (cooked-tests--settle (lambda () (eq cooked--keys 'modify-other))))
-    (should (= cooked--modify-other-keys 1))
     (should (equal (cooked-tests--spell ?\C-\;) "\e[27;5;59~"))
     ;; Level 1 leaves alone every chord that already means something, where
     ;; level 2 re-spells it; the levels are told apart by the core.

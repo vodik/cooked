@@ -328,29 +328,13 @@ the `editing' binding in `cooked--apply'."
 
 One of `legacy', `modify-other' or `kitty', as negotiated by the child itself —
 see `cooked-key-protocol-overrides' for why this cannot simply be assumed.
-Which keys a protocol covers is a second question, answered by
-`cooked--kitty-flags' and `cooked--modify-other-keys'.
+Which keys a protocol covers is a second question, and it is not asked here:
+the kitty flags a child pushed and the modifyOtherKeys level it set stay in the
+core, which reads them at the moment it spells each key.
 
 The copy a drain leaves here says which keys the passthrough map takes away
 from Emacs; what the child is sent is spelled by the core against the
 negotiation it holds at the moment of the write.")
-(defvar-local cooked--kitty-flags 0
-  "The kitty keyboard flags the child pushed, masked to what cooked honours.
-
-A bit field, as the protocol defines it: 1 disambiguates escape codes, 4 adds
-the shifted key, 8 sends every key as an escape code and 16 adds the text a key
-produces.  Nonzero only while `cooked--keys' is `kitty', since the flags a
-child pushed are what put it there; which keys they cover is the core's to
-decide, at the moment of each write, and nothing in Lisp reads the bits.  What
-Lisp does ask is whether the protocol was negotiated at all, and `cooked--keys'
-answers that by itself: see `cooked--kitty-negotiated-p'.")
-(defvar-local cooked--modify-other-keys 0
-  "The modifyOtherKeys level the child set with `CSI > 4 ; LEVEL m', or 0.
-
-1 or 2; the core reports anything else as 0.  Read only while `cooked--keys'
-is `modify-other', and the difference between 0 and a level there is the
-difference between a guess and a negotiation -- see
-`cooked-key-protocol-overrides'.")
 (defvar-local cooked-title nil
   "Title the child last set, via OSC 0 or 2, or nil if it never set one.
 

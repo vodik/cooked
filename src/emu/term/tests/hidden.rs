@@ -119,8 +119,8 @@ fn a_hidden_buffer_is_woken_only_for_events_and_a_filling_backlog() {
 ///
 /// That is safe rather than a bug: nothing can type a key into a buffer with no window,
 /// and `cooked--sync-before-redisplay` forces a whole drain, which is what actually
-/// refreshes Lisp's `cooked--kitty-flags` copy, before the window is redrawn -- see
-/// `cooked-showing-a-hidden-buffer-catches-it-up-before-it-is-drawn` in
+/// refreshes Lisp's `cooked--keys` copy, before the window is redrawn -- see
+/// `cooked-showing-a-hidden-buffer-catches-up-its-key-encoding-first` in
 /// tests/cooked-tests-session.el. This test pins the Rust half of that story: the flags
 /// really do go unreported while hidden, so the Lisp-side catch-up is load-bearing and
 /// not merely defensive.
