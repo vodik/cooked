@@ -377,6 +377,36 @@ pub(crate) fn chars_before<'a>(
     Chars::new(base + marks)
 }
 
+/// The column CHARS characters into a row of CELLS and EXTRAS: the inverse of
+/// [`chars_before`].
+///
+/// Emacs counts a row in characters, so a position it asks the core to carry across a
+/// rewrap arrives as one and has to be turned back into a cell; see `State::carry`. On
+/// `日本X` the second character is `本`, which is column 2, and a count past everything
+/// the row holds lands on the column after its last cell. A count that falls among the
+/// combining marks riding a cell names that cell, which is where they are drawn.
+pub(crate) fn col_at_chars(cells: &[Cell], extras: &[(u16, Extra)], chars: Chars) -> Cols {
+    let mut seen = 0;
+    for (col, cell) in cells.iter().enumerate() {
+        if cell.is_continuation() {
+            continue;
+        }
+        let marks: usize = extras
+            .iter()
+            .filter(|(at, _)| usize::from(*at) == col)
+            .map(|(_, extra)| match extra {
+                Extra::Marks(text) => text.chars().count(),
+                _ => 0,
+            })
+            .sum();
+        seen += 1 + marks;
+        if chars.get() < seen {
+            return Cols::new(col);
+        }
+    }
+    Cols::new(cells.len())
+}
+
 impl Default for Cell {
     fn default() -> Self {
         Self::blank(StyleId::DEFAULT)
@@ -1665,6 +1695,11 @@ impl<C: Borrow<[Cell]>, M: Borrow<RowMeta>> RowOf<C, M> {
         chars_before(self.cells(), self.extras().iter(), col)
     }
 
+    /// The column CHARS characters into this row's text; see [`col_at_chars`].
+    pub fn col_at_chars(&self, chars: Chars) -> Cols {
+        col_at_chars(self.cells(), self.extras(), chars)
+    }
+
     /// Style-grouped runs with trailing default-styled blanks trimmed.
     ///
     /// Dispatches on whether the row has a side table: [`Row::build_plain_runs`] for
@@ -2066,6 +2101,20 @@ impl<C: BorrowMut<[Cell]>, M: BorrowMut<RowMeta>> RowOf<C, M> {
             return;
         }
         self.attach(col, Extra::Mark(id));
+    }
+
+    /// Take the mark named ID off whichever column of this row carries it.
+    ///
+    /// The one way a mark leaves a cell it was not drawn over, and it exists for the
+    /// carried positions of `State::carry`, whose ids the core mints for one rewrap and
+    /// must not go on reporting afterwards. A semantic mark is never removed: Emacs holds
+    /// a marker for it for the rest of the session.
+    pub fn unmark(&mut self, id: MarkId) {
+        self.edit_extras(|extras| {
+            extras
+                .entries
+                .retain(|(_, extra)| !matches!(extra, Extra::Mark(mark) if *mark == id));
+        });
     }
 
     /// Make room for one more mark on a row that is at [`MARKS_PER_ROW`], returning

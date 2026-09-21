@@ -1550,9 +1550,14 @@ each is now an edit of the cell that changed, as a lone row already was."
       (should (= (overlay-end overlay) (+ (overlay-start overlay) 3))))))
 
 (defun cooked-tests--fed-resize (rows cols)
-  "Resize this buffer's emulator to ROWS by COLS, then drain and apply."
-  (setq cooked--rows rows cooked--cols cols cooked--last-size (cons rows cols))
-  (cooked--resize cooked--session rows cols)
+  "Resize this buffer's emulator to ROWS by COLS, then drain and apply.
+
+The carry goes with the resize, as `cooked--sync-size' sends it: the positions
+a rewrap moves are the core's to answer, and a resize issued without them is a
+resize that drags them."
+  (let ((carry (cooked--carry-positions cols)))
+    (setq cooked--rows rows cooked--cols cols cooked--last-size (cons rows cols))
+    (cooked--resize cooked--session rows cols nil nil carry))
   (cooked--drain-and-apply))
 
 (ert-deftest cooked-a-rewrap-keeps-the-mark-on-its-character ()
@@ -1588,6 +1593,60 @@ the cursor is kept on its character the same way."
       (should (equal (cooked-tests--at (mark t) 2) "cd"))
       (should (equal (cooked-tests--text)
                      "one\nabcdefghijKLMNOPQRST\nab        cd")))))
+
+(ert-deftest cooked-a-rewrap-carries-a-position-past-a-wide-character-that-wrapped-early ()
+  "Point in the room a wide character left, and the mark on the character itself.
+
+The shape with no cell of its own to be carried by.  `日本語abc' at five columns
+puts `日本' on row 0 and moves `語' down whole, leaving column 4 as room that
+belongs to no character of the line; point parked at the end of that row is
+standing in it, and the mark one character along is on the `語' that was pushed
+onto the continuation.  A rewrap re-chunks the line and that room moves or stops
+existing, so neither position can be found again by the cell it was on -- which
+is why both are registered with the resize and answered by the drain.
+
+Nine and twelve columns lay the line out as one row and four as three, and the
+mark is on `語' throughout with point still in the gap before it.  Five columns
+is left out: there the grid has nothing between `本' and `語' to resolve either
+position onto and both land on the row boundary, which is the same corner
+`cooked-a-rewrap-keeps-a-wandered-point-on-a-wide-character' keeps away from."
+  (let ((cooked-rejoin-wrapped-lines t))
+    (cooked-tests--with-fed-screen 5 5
+      (cooked-tests--fed "one\r\n日本語abc")
+      (should (equal (cooked-tests--text) "one\n日本\n語abc"))
+      (let ((break (save-excursion
+                     (goto-char (cooked--screen-start-position))
+                     (forward-line 1)
+                     (line-end-position))))
+        (goto-char break)
+        (setq cooked--wandered t)
+        (set-mark (1+ break)))
+      (dolist (cols '(9 4 12))
+        (cooked-tests--fed-resize 5 cols)
+        (should (equal (cooked-tests--at (mark t) 1) "語"))
+        (should (equal (cooked-tests--at (point) 1) "語"))
+        (should (member (cooked-tests--at (1- (point)) 1) '("本" "\n"))))
+      (should (equal (cooked-tests--text) "one\n日本語abc")))))
+
+(ert-deftest cooked-a-rewrap-carries-the-mark-with-wrapped-rows-kept-apart ()
+  "`cooked-rejoin-wrapped-lines' off carries a position across a rewrap too.
+
+The mode keeps every grid row a buffer line of its own, so the buffer holds no
+logical lines for a position to be counted in -- which is why Lisp used to
+decline the question here and let the row rewrite drag the mark to the top of
+whatever it replaced.  The core rewraps either way and the mark rides a cell
+either way, so the answer no longer depends on how Emacs punctuates its own
+copy."
+  (let ((cooked-rejoin-wrapped-lines nil))
+    (cooked-tests--with-fed-screen 5 10
+      (cooked-tests--fed "one\r\nabcdefghijKLMNOPQRST")
+      (set-mark (save-excursion
+                  (goto-char (cooked--screen-start-position))
+                  (search-forward "M") (1- (point))))
+      (dolist (cols '(20 4 10))
+        (cooked-tests--fed-resize 5 cols)
+        (should (equal (cooked-tests--at (mark t) 3) "MNO"))))))
+
 
 (ert-deftest cooked-a-rewrap-puts-the-mark-where-the-core-puts-its-own ()
   "The mark and a semantic mark on the same character stay on it together.
@@ -4984,14 +5043,19 @@ comes out in the new theme's colours from ids the core already sent."
       (should (member "https://example.invalid/"
                       (hash-table-values cooked--link-uris))))))
 
-(ert-deftest cooked-the-reflow-width-is-the-width-the-rows-were-laid-out-at ()
-  "Only a drain that rewrapped the primary screen names a width to count from."
+(ert-deftest cooked-only-a-width-change-on-the-primary-screen-rewraps ()
+  "A resize carries positions only when it is going to move them along a line.
+
+A height change evicts rows off the top and moves nothing within a line, so
+Emacs\' own markers follow the text; the alternate screen is clipped rather than
+rewrapped.  Neither registers a carry, and a carry registered for either would
+overwrite positions nothing had disturbed."
   (cooked-tests--with-fed-screen 3 20
-    (should-not (cooked--reflow-width '(:width 20)))
-    (should (= (cooked--reflow-width '(:width 10)) 20))
-    (should-not (cooked--reflow-width '(:width 10 :alt t)))
-    (let ((cooked-rejoin-wrapped-lines nil))
-      (should-not (cooked--reflow-width '(:width 10))))))
+    (should-not (cooked--rewraps-p 20))
+    (should (cooked--rewraps-p 10))
+    (should-not (cooked--carry-positions 20))
+    (let ((cooked--alt t))
+      (should-not (cooked--rewraps-p 10)))))
 
 (ert-deftest cooked-the-scrollback-stage-says-where-the-evicted-rows-landed ()
   "Rows that scrolled off the top are in the buffer above the screen, at the answer."
@@ -5026,7 +5090,7 @@ comes out in the new theme's colours from ids the core already sent."
            (buffer-undo-list t)
            (cooked--deco-pass (list 'unset))
            (cooked--deco-cursor (cons 0 0))
-           (viewport (cooked--capture-viewport nil))
+           (viewport (cooked--capture-viewport))
            (rendered (cooked--apply-rows update viewport)))
       (should (equal (cooked-tests--screen-row-text 1) "two"))
       (should rendered)
@@ -5059,7 +5123,8 @@ comes out in the new theme's colours from ids the core already sent."
            (announced nil)
            (cooked-row-rendered-functions
             (list (lambda (beg end) (push (cons beg end) announced)))))
-      (cooked--apply-events (list :events nil :marks nil) row
+      (cooked--apply-events (list :events nil :marks nil)
+                            (cooked--capture-viewport) row
                             (list (cons row (+ row 3))))
       (should-not cooked--pin-screen-top)
       (should (equal announced (list (cons row (+ row 3))))))))

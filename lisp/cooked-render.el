@@ -563,15 +563,12 @@ once, while these are handed to `cooked--render-rows' and corrected *during* the
 render.  They are captured with the rest because the question they answer -- who
 is going to be moved by something else, and so needs no carrying -- is only
 answerable before the render, exactly like `others' above.  See
-`cooked--capture-relocations'.")
-  (reflow nil :documentation "\
-For a drain that rewraps the screen, (BASE . POINT), and nil for any other.
+`cooked--capture-relocations'.  A drain answering a carry corrects them again
+afterwards, which is the point: the row and column are right for a row this
+drain rewrote and meaningless for one it rewrapped, and only the core can say
+where a rewrapped cell went.  See `cooked--carry-positions'."))
 
-BASE is where the places in RELOCATIONS are counted from, and POINT is
-point's own place when it had wandered, standing in for `wandered', whose
-cell the rewrap gives to another character.  See `cooked--logical-place'."))
-
-(defun cooked--capture-relocations (others &optional reflow)
+(defun cooked--capture-relocations (others)
   "The positions this drain would otherwise drag, as `cooked-relocation's.
 
 The policy half of the floor cooked-screen.el implements; see the commentary
@@ -592,10 +589,9 @@ later -- and worse than pointless if the two ever disagreed about which windows
 those are.  The list is the same one, for that reason: OTHERS, as
 `cooked--following-windows' just answered it.
 
-REFLOW, for a drain that rewraps the screen, is (BASE . COLS): each position is
-then captured as its place in the logical lines counted from BASE at COLS wide,
-since the row and column it had name another character once the rows are laid
-out again.  See `cooked--logical-place'."
+The same policy `cooked--carry-positions' asks at the resize, and it has to stay
+the same one: a drain that rewraps corrects these positions from the carry, so
+the two lists disagreeing would leave a window carried by neither."
   (let ((start (cooked--screen-start-position))
         (relocations nil))
     (when start
@@ -605,38 +601,141 @@ out again.  See `cooked--logical-place'."
       (unless (cooked--follow-p)
         (dolist (window others)
           (push (cooked--relocation-make :window window) relocations))))
-    (when reflow
-      (dolist (relocation relocations)
-        (when-let* ((position (cooked--relocation-position relocation)))
-          (setf (cooked-relocation-place relocation)
-                (cooked--logical-place position (car reflow) (cdr reflow))))))
     relocations))
 
-(defun cooked--capture-viewport (&optional cols)
+(defun cooked--capture-viewport ()
   "Snapshot the view, before the render invalidates every part of it.
 
-COLS, for a drain that rewraps the screen, is the width its rows are laid out
-at now, before the drain; see the `reflow' field."
-  (let* ((others (cooked--following-windows))
-         (base (and cols (cooked--screen-start-position)
-                    (cooked--logical-base)))
-         (reflow (and base (cons base cols)))
-         (wandered (and cooked--wandered (cooked--screen-cell))))
+`wandered' is left unanswered while a carry is outstanding: the cell point sat
+on belongs to another character once the rows are rewrapped, and
+`cooked--place-carried' fills the field in from what the drain reports."
+  (let ((others (cooked--following-windows)))
     (cooked--viewport-make
      :editing (when-let* ((region (cooked--input-region))
                           ((<= (car region) (point) (cdr region))))
                 (- (point) (car region)))
      :follow (and (cooked--follow-p)
                   (>= (point) (cooked--screen-start-position)))
-     :wandered (and (not reflow) wandered)
+     :wandered (and cooked--wandered (not cooked--carried) (cooked--screen-cell))
      :stale-mark (and cooked-clear-selection-on-output
                       mark-active (mark)
                       (>= (mark) (cooked--screen-start-position)))
      :others others
-     :relocations (cooked--capture-relocations others reflow)
-     :reflow (and reflow
-                  (cons base (and wandered
-                                  (cooked--logical-place (point) base cols)))))))
+     :relocations (cooked--capture-relocations others))))
+
+;;;; Carrying a position across a rewrap
+
+(defvar-local cooked--carried nil
+  "Positions the core is carrying across a rewrap, as (KEY . WHAT).
+
+WHAT is `point', `mark', or a window whose `window-point' is being carried, and
+KEY is what the core reports the answer under in the next drain's `:marks'; see
+`cooked--carry-positions' and `Delta::carried' in src/emu/term/mod.rs.
+
+Live only between `cooked--resize' and the whole drain that answers it, which is
+usually the same command: `cooked--sync-size' issues the resize and forces the
+drain right after it.")
+
+(defun cooked--rewraps-p (cols)
+  "Whether resizing this buffer's grid to COLS rewraps the rows it holds.
+
+A width change is the whole of it.  A height change evicts rows off the top and
+moves nothing along a line, so Emacs' own markers follow the text, and the
+alternate screen is clipped rather than rewrapped -- its grid is a running
+program's frame, which the child redraws on SIGWINCH."
+  (and cooked--grid (not cooked--alt)
+       (not (eql cols (cooked-grid-width cooked--grid)))))
+
+(defun cooked--carried-things ()
+  "What a rewrap has to carry, in the order the keys are handed out.
+
+The mark and a held window's point for the reasons the commentary above
+`cooked-relocation' gives: they are the two positions with no intent above them
+to be re-derived from.  The same policy `cooked--capture-relocations' asks of
+every drain, asked here at the resize instead, which is when the core reflows.
+
+Point joins them only for a rewrap.  Every other drain re-finds a wandered point
+by the screen cell it was on, and a rewrap is exactly the case where that cell
+goes to another character."
+  (when-let* ((start (cooked--screen-start-position)))
+    (append (and cooked--wandered (>= (point) start) '(point))
+            (and (mark t) (>= (mark t) start) '(mark))
+            (unless (cooked--follow-p) (cooked--following-windows)))))
+
+(defun cooked--carried-position (what)
+  "Where WHAT currently points, or nil if there is nothing to carry."
+  (pcase what
+    ('point (point))
+    ('mark (mark t))
+    (window (and (window-live-p window) (window-point window)))))
+
+(defun cooked--carried-set (what position)
+  "Put WHAT at POSITION."
+  (pcase what
+    ('point (goto-char position))
+    ('mark (set-marker (mark-marker) position))
+    (window (when (window-live-p window) (set-window-point window position)))))
+
+(defun cooked--carry-positions (cols)
+  "The positions a resize to COLS has to carry, as `cooked--resize' takes them.
+
+A list of (KEY ROW . CHARS), each naming a place on the screen as Emacs is
+showing it now.  The core turns each into a cell before it rewraps, carries the
+cell through the reflow and through whatever the child scrolls before Emacs
+drains, and reports where it ended up once, under KEY, in the next whole drain's
+`:marks'.  `cooked--place-carried' reads the answers back.
+
+Nil unless the resize rewraps.  Asked here, at the resize, rather than at the
+drain, because this is the moment the buffer and the grid still agree about what
+a row holds: the resize is issued from a window hook and the reflow happens
+inside it.
+
+One owner for the answer, which is the point of the mechanism.  Lisp used to
+measure each position against its own `cooked-wrap' marks and walk the rewrapped
+text to find it again -- the reflow implemented twice, once in the core and once
+over its output."
+  (setq cooked--carried nil)
+  (when (cooked--rewraps-p cols)
+    (let ((key 0)
+          (carry nil))
+      (dolist (what (cooked--carried-things))
+        (when-let* ((position (cooked--carried-position what))
+                    (place (cooked--screen-place position)))
+          (push (cons key what) cooked--carried)
+          (push (cons key place) carry)
+          (setq key (1+ key))))
+      (nreverse carry))))
+
+(defun cooked--place-carried (update viewport batch-start)
+  "Put back the positions the core carried across a rewrap.
+
+UPDATE's `:marks' holds them under `(carry . KEY)', beside the semantic marks
+and in the same coordinates, so `cooked--anchor-position' resolves both against
+the rows this drain has just rendered.  BATCH-START is where its scrollback
+landed, for a `scrolled' anchor -- which is what a position gets when the row it
+was on left the grid between Emacs' last drain and the resize.
+
+Point is answered as a cell rather than a position, which is what
+`cooked--place-point' restores a wandered point from, and left to VIEWPORT
+accordingly; a rewrap that pushed its character up into history leaves no cell,
+and point goes there directly.
+
+The carry is dropped whenever the drain showed the primary screen, answered or
+not: that is exactly when `State::take_carried' reports it and forgets it.  A
+key with no answer -- its cell overwritten before the drain -- keeps whatever
+the render's own relocation made of it."
+  (when cooked--carried
+    (let ((marks (plist-get update :marks)))
+      (pcase-dolist (`(,key . ,what) cooked--carried)
+        (when-let* ((anchor (assoc (cons 'carry key) marks))
+                    (position (cooked--anchor-position (cdr anchor) batch-start)))
+          (if (eq what 'point)
+              (setf (cooked-viewport-wandered viewport)
+                    (or (cooked--screen-cell position)
+                        (progn (goto-char position) nil)))
+            (cooked--carried-set what position)))))
+    (unless (plist-get update :alt)
+      (setq cooked--carried nil))))
 
 (defun cooked--apply-levels (update cursor)
   "Adopt UPDATE's levels: the state as of this drain, for redisplay to read.
@@ -841,24 +940,6 @@ redisplay run between them and fails if this reads a redisplay behind."
      ((cooked-viewport-follow viewport)
       (cooked--pin-transcript-bottom (append here others) target (point-max))))))
 
-(defun cooked--reflow-width (update)
-  "The width this buffer's rows are laid out at, when UPDATE rewrapped them.
-
-A drain reporting another width has rewrapped the primary screen's rows, which
-moves every character on them to another cell; the width the buffer's rows are
-laid out at is the last drain's, and that is what `cooked--capture-viewport'
-needs to count the places it carries.  Nil when nothing was rewrapped.
-
-Nil too with `cooked-rejoin-wrapped-lines' off, where the rows that scroll into
-history keep newlines nothing marks, so the logical lines a position is counted
-in cannot be read back; and nil on the alternate screen, which is clipped rather
-than rewrapped."
-  (let ((was (cooked-grid-width cooked--grid))
-        (now (plist-get update :width)))
-    (and was now (/= was now)
-         cooked-rejoin-wrapped-lines
-         (not cooked--alt) (not (plist-get update :alt))
-         was)))
 
 (defun cooked--apply-scrollback (update)
   "Hand UPDATE's evicted rows to the scrollback, and say where they landed.
@@ -875,30 +956,21 @@ first rows and the top of the screen, and the rest is inserted after them."
     (or promoted inserted)))
 
 (defun cooked--apply-rows (update viewport)
-  "Write UPDATE's damaged rows, and place what a rewrap moved.
+  "Write UPDATE's damaged rows.
 
 Returns the bounds `cooked--render-rows' rewrote, for
-`cooked--notify-rows-rendered'.
+`cooked--notify-rows-rendered'."
+  (cooked--render-rows (plist-get update :rows)
+                       (plist-get update :alt)
+                       (cooked-viewport-relocations viewport)
+                       (plist-get update :edits)))
 
-The places are put back here, right after the rows and before anything else
-inserts or deletes: a place is counted in the lines as the render leaves them.
-VIEWPORT's `wandered' is answered by that count, the rewrap having given the
-cell point sat on to another character."
-  (let ((rendered (cooked--render-rows (plist-get update :rows)
-                                       (plist-get update :alt)
-                                       (cooked-viewport-relocations viewport)
-                                       (plist-get update :edits))))
-    (when-let* ((reflow (cooked-viewport-reflow viewport)))
-      (setf (cooked-viewport-wandered viewport)
-            (cooked--place-reflowed (cooked-viewport-relocations viewport)
-                                    reflow (plist-get update :width))))
-    rendered))
-
-(defun cooked--apply-events (update batch-start rendered)
+(defun cooked--apply-events (update viewport batch-start rendered)
   "React to everything in UPDATE that is not a row.
 
-BATCH-START is where this drain's scrollback began, from
-`cooked--apply-scrollback', and RENDERED the bounds `cooked--apply-rows' wrote.
+VIEWPORT is what `cooked--capture-viewport' read before the render, BATCH-START
+where this drain's scrollback began, from `cooked--apply-scrollback', and
+RENDERED the bounds `cooked--apply-rows' wrote.
 
 After both render passes, which is what every step here needs: a mark's anchor
 is resolved against text that has to be in the buffer before it can be pointed
@@ -909,6 +981,9 @@ at, and `cooked-row-rendered-functions' is documented against that order too."
   ;; A drain that both resizes and carries a fresh mark should end with the
   ;; fresh mark's own anchor.
   (cooked--relocate-marks (plist-get update :marks) batch-start)
+  ;; Beside the marks, being the same answer to the same question: both are
+  ;; anchors the core resolved against rows this drain has now rendered.
+  (cooked--place-carried update viewport batch-start)
   (cooked--route-events update #'cooked--handle-event batch-start)
   (cooked--notify-rows-rendered rendered)
   ;; After the render, so the cursor is where this drain put it: a row the URL
@@ -1019,7 +1094,7 @@ five with the shifts moved after the rows."
          (cooked--deco-pass (list 'unset))
          (cooked--deco-cursor
           (cons (cooked-cursor-row cursor) (cooked-cursor-chars cursor)))
-         (viewport (cooked--capture-viewport (cooked--reflow-width update)))
+         (viewport (cooked--capture-viewport))
          (pending (cooked--take-pending-input))
          (batch-start (cooked--apply-scrollback update))
          ;; After the scrollback, which is what the line ends or continues after,
@@ -1028,7 +1103,7 @@ five with the shifts moved after the rows."
          (_ (cooked--apply-shifts (plist-get update :shifts)))
          (rendered (cooked--apply-rows update viewport)))
     (cooked--apply-levels update cursor)
-    (cooked--apply-events update batch-start rendered)
+    (cooked--apply-events update viewport batch-start rendered)
     (cooked--apply-shape update batch-start pending)
     (cooked--apply-view viewport)
     (when cooked--exit (cooked--on-exit cooked--exit)))

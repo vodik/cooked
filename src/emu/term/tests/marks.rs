@@ -791,3 +791,100 @@ fn a_non_evicting_rewrap_leaves_prompt_start_naming_the_wrong_row() {
         "the prompt should now be the top two rows of the grid"
     );
 }
+
+/// A position Emacs asked to have carried rides the rewrap on a cell of its own, goes
+/// on riding it through a scroll that takes the row off the grid, and is reported once.
+///
+/// The whole of what a transient anchor is for. Emacs measured `b' on screen row 1 and
+/// the core answers where `b' is, whatever has happened to it in between -- which here is
+/// a rewrap that put it on row 2 and three linefeeds that pushed that row into the
+/// scrollback this drain is carrying, so the answer is spelled into the batch rather than
+/// onto the grid.
+#[test]
+fn a_carried_position_survives_a_rewrap_and_the_scroll_that_evicts_it() {
+    // Thirteen cells of one logical line at ten columns: row 0 full and wrapped, row 1
+    // holding "abc". Emacs is given that, so its screen row 1 is the grid's.
+    let mut t = term(4, 10, b"0123456789abc");
+    t.drain();
+    t.carry(&[(CarryKey(7), 1, Chars::new(1))]);
+    t.resize(4, 4);
+    t.feed(b"\r\n\r\n\r\n");
+
+    let delta = t.drain();
+    let (key, at) = delta
+        .carried
+        .first()
+        .copied()
+        .expect("the carry is answered");
+    assert_eq!(key, CarryKey(7));
+    assert!(
+        at.row < delta.scrolled_base + delta.scrolled.len(),
+        "the row left with the scroll, so the anchor is in this drain's batch: {at:?}"
+    );
+    assert_eq!(
+        runs_text(&delta.scrolled[at.row - delta.scrolled_base]),
+        "89ab",
+        "and it names the row `b' ended up on once the line was re-chunked at four"
+    );
+    assert_eq!(at.col, Chars::new(3), "`b' is three characters into it");
+    assert!(
+        delta.marks.is_empty(),
+        "the id the core minted for the carry is not a mark Emacs holds: {:?}",
+        delta.marks
+    );
+
+    // Reported once. The next drain has nothing to say about it, and neither has the
+    // next resize -- which would report the mark all over again had the cell kept it.
+    assert!(t.drain().carried.is_empty());
+    t.resize(4, 6);
+    let after = t.drain();
+    assert!(after.carried.is_empty() && after.marks.is_empty());
+}
+
+/// The case the carry exists to answer: between Emacs' last drain and the resize the
+/// reader thread has gone on feeding the grid, so the row Emacs names is not the row the
+/// grid has at that index -- it may not be on the grid at all.
+///
+/// `State::drained_at` is what closes it. Emacs reports screen row 1 while the grid has
+/// scrolled five rows past it, and the answer still names the text that was on row 1.
+#[test]
+fn a_carried_position_is_read_in_the_screen_emacs_was_last_given() {
+    let mut t = term(4, 10, b"one\r\nMARK\r\ntwo\r\nthree");
+    t.drain();
+    // Fed and not drained: the grid moves on, the buffer does not.
+    t.feed(b"\r\nA\r\nB\r\nC\r\nD\r\nE");
+    t.carry(&[(CarryKey(0), 1, Chars::new(0))]);
+    t.resize(4, 6);
+
+    let delta = t.drain();
+    let (_, at) = delta
+        .carried
+        .first()
+        .copied()
+        .expect("the carry is answered");
+    let row = &delta.scrolled[at.row - delta.scrolled_base];
+    assert_eq!(runs_text(row), "MARK", "the row Emacs was pointing at");
+    assert_eq!(at.col, Chars::new(0));
+}
+
+/// A screenless drain hands Emacs no rows for an anchor to be resolved against, so it
+/// settles the carry and keeps it. Without that, a row evicted while the buffer was
+/// hidden would take the measurement into a drain that could not report it.
+#[test]
+fn a_hidden_drain_holds_a_carried_position_for_the_next_whole_one() {
+    let mut t = term(3, 10, b"one\r\nMARK\r\ntwo");
+    t.drain();
+    t.carry(&[(CarryKey(0), 1, Chars::new(0))]);
+    t.resize(3, 6);
+    t.feed(b"\r\n\r\n\r\n");
+    assert!(
+        t.drain_hidden().carried.is_empty(),
+        "a hidden drain reports no carry"
+    );
+    let delta = t.drain();
+    let (_, at) = delta.carried.first().copied().expect("the carry survived");
+    assert!(
+        at.row < delta.scrolled_base + delta.scrolled.len(),
+        "measured as its row departed, and spelled into the batch that carries it"
+    );
+}

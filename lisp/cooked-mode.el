@@ -981,7 +981,12 @@ the trigger for `cooked--rescale-deco'."
               cooked--last-cell cell
               cooked--rows rows
               cooked--cols cols)
-        (cooked--resize cooked--session rows cols (car cell) (cdr cell))
+        ;; The carry is read before the resize and handed over with it, which is
+        ;; the only moment the buffer and the grid still agree about what a row
+        ;; holds: the reflow happens inside the call.  See
+        ;; `cooked--carry-positions'.
+        (cooked--resize cooked--session rows cols (car cell) (cdr cell)
+                        (cooked--carry-positions cols))
         ;; The width is what a long line is measured in, so adopting one is
         ;; adopting the other.  See `cooked--sync-long-line-threshold'.
         (cooked--sync-long-line-threshold)

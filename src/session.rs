@@ -4,7 +4,9 @@
 //! the reader never touches Lisp. It parses into the shared [`Term`] and pokes a pipe
 //! descriptor obtained from `open_channel`; Emacs' filter then drains on the main thread.
 
-use crate::emu::{ColorScheme, Delta, Drain, Feed, FrameSize, Palette, Reply, ReplyKind, Term};
+use crate::emu::{
+    CarryKey, Chars, ColorScheme, Delta, Drain, Feed, FrameSize, Palette, Reply, ReplyKind, Term,
+};
 use crate::error::Result;
 use crate::lock::{CondvarExt, LockExt};
 use crate::pty::{
@@ -1881,13 +1883,17 @@ impl Session {
     /// So the size is recorded as pending, and the reader thread re-applies it until the
     /// tty reads back with it. That converges within a poll tick and then stops, so a
     /// child that later sets its own size is left alone.
-    pub(crate) fn resize(&self, size: Winsize) -> Result<()> {
+    pub(crate) fn resize(&self, size: Winsize, carry: &[(CarryKey, usize, Chars)]) -> Result<()> {
         // The cell size is reported together with the rows and columns because they
         // change together: a font change moves both in one event.
-        let report =
-            self.shared
-                .term_for_lisp()
-                .set_size(size.rows.into(), size.cols.into(), size.cell);
+        //
+        // CARRY is registered on the same lock as the resize and before it, so the cells
+        // the positions name are the ones Emacs measured; see `Term::carry`.
+        let report = {
+            let mut term = self.shared.term_for_lisp();
+            term.carry(carry);
+            term.set_size(size.rows.into(), size.cols.into(), size.cell)
+        };
         self.shared.state.held().pending_resize = Some(size);
         // Wake the reader rather than leaving the retry to its next tick, which under
         // [`UNATTENDED_TICK_CAP`] can be seconds away for a buffer resized while off
@@ -5361,7 +5367,10 @@ mod tests {
         ]);
         wait_for(&session, |u| rendered(u).contains("ready"));
         session
-            .resize(Winsize::new(12, 40).with_cell(CellMetrics::new(10, 20).expect("nonzero")))
+            .resize(
+                Winsize::new(12, 40).with_cell(CellMetrics::new(10, 20).expect("nonzero")),
+                &[],
+            )
             .expect("resize");
         // The answer to `2048 h` first, sent by the reader as it parsed the request, then
         // the report the resize owes.
@@ -5385,7 +5394,7 @@ mod tests {
         let started = std::time::Instant::now();
         for n in 0..10_000u16 {
             session
-                .resize(Winsize::new(24 + n % 2, 80))
+                .resize(Winsize::new(24 + n % 2, 80), &[])
                 .expect("resize");
             // Checked as it goes, so a regression fails in seconds rather than hours.
             assert!(
@@ -5427,7 +5436,7 @@ mod tests {
     #[test]
     fn resize_reaches_the_child() {
         let (session, _read) = session(&["/bin/sh", "-c", "sleep 0.3; stty size"]);
-        session.resize(Winsize::new(12, 40)).expect("resize");
+        session.resize(Winsize::new(12, 40), &[]).expect("resize");
         let update = wait_for_within(&session, 10.0, |u| rendered(u).contains("12 40"));
         assert!(rendered(&update).contains("12 40"));
     }

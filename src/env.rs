@@ -374,6 +374,9 @@ symbols! {
     // cell on the live grid.
     AtScrolled => "scrolled",
     AtScreen => "screen",
+    // How a position Emacs asked to have carried across a rewrap is named in `:marks',
+    // so that it cannot be mistaken for a semantic mark's id; see `Delta::carried`.
+    Carry => "carry",
     // The event tags. One per event of every drain that has any.
     Bell => "bell",
     Osc => "osc",

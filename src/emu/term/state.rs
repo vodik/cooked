@@ -441,6 +441,117 @@ impl State {
         self.archive(evicted);
     }
 
+    /// Carry POSITIONS, each `(KEY, ROW, CHARS)` in the screen Emacs was last given,
+    /// across whatever the next resize does to the grid.
+    ///
+    /// Called with the resize and before it, so the cell each position names is the cell it
+    /// named when Emacs measured it. From here on the core owns the question: the position
+    /// rides a cell exactly as a semantic mark does, through the reflow, through any scroll
+    /// or eviction the child makes before Emacs drains, and is reported once in
+    /// [`Delta::carried`].
+    ///
+    /// ROW is a row of the screen Emacs is *showing*, which is not a row of the grid: the
+    /// reader thread has been feeding the grid since the last drain, so a mark the buffer
+    /// reports on screen row 2 can be off the grid altogether by now. [`State::drained_at`]
+    /// is what closes that gap -- it turns Emacs' row into the absolute row the buffer's
+    /// text actually came from -- and a row that has since left the grid needs no cell,
+    /// its anchor being final already.
+    ///
+    /// A second call replaces the first, because Emacs measures against the same unrewrapped
+    /// buffer each time: a drag that resizes the window five times before the buffer catches
+    /// up registers the same positions five times, and only the last set may be left on the
+    /// grid.
+    pub(super) fn carry(&mut self, positions: &[(CarryKey, usize, Chars)]) {
+        self.drop_carried();
+        for &(key, row, chars) in positions {
+            let absolute = self.drained_at + row;
+            let at = match absolute.checked_sub(self.evicted_total) {
+                Some(index) => {
+                    let Some(col) = self
+                        .screens
+                        .primary
+                        .row(index)
+                        .map(|row| row.col_at_chars(chars))
+                    else {
+                        continue;
+                    };
+                    CarriedAt::OnGrid(self.take_mark(Anchor { row: absolute, col }))
+                }
+                None => CarriedAt::Measured(Anchor {
+                    row: absolute,
+                    col: chars,
+                }),
+            };
+            self.carried.push(Carried { key, at });
+        }
+    }
+
+    /// Take every carried position off the grid and forget it, for a set replacing it.
+    fn drop_carried(&mut self) {
+        for carried in std::mem::take(&mut self.carried) {
+            if let CarriedAt::OnGrid(id) = carried.at {
+                self.screens.primary.unmark(id);
+            }
+        }
+    }
+
+    /// Read off MARKS what has happened to each carried position still riding a cell, and
+    /// take those ids out of MARKS.
+    ///
+    /// MARKS is the drain's own relocations, which is where every mark that moved -- on the
+    /// grid or out of it into this drain's scrollback -- has just been measured. The ids
+    /// the core minted for the carry are not marks Emacs holds a marker for, so they must
+    /// not reach `cooked--relocate-marks'.
+    ///
+    /// Called by both drain shapes. A screenless drain settles them and keeps them, because
+    /// it hands Emacs no rows to resolve an anchor against; without that, a row evicted
+    /// while the buffer was hidden would take its measurement into a drain that could not
+    /// report it.
+    /// The cell goes as the measurement is taken, which is what bounds the id's life to
+    /// the one rewrap: a mark left on the grid would be reported as a semantic one on
+    /// every resize for the rest of the session.
+    pub(super) fn settle_carried(&mut self, marks: &mut Vec<(MarkId, Anchor<Chars>)>) {
+        if self.carried.is_empty() {
+            return;
+        }
+        let mut settled = Vec::new();
+        for carried in &mut self.carried {
+            if let CarriedAt::OnGrid(id) = carried.at
+                && let Some(index) = marks.iter().position(|(mark, _)| *mark == id)
+            {
+                carried.at = CarriedAt::Measured(marks.remove(index).1);
+                settled.push(id);
+            }
+        }
+        for id in settled {
+            self.screens.primary.unmark(id);
+        }
+    }
+
+    /// Where every carried position ended up, forgetting them: the move that makes
+    /// "reported once" a fact of the type rather than a convention.
+    ///
+    /// Nothing while the alternate screen is showing. An anchor names a row of the primary
+    /// grid, and Emacs would resolve it against the alternate frame's text, so the
+    /// positions wait for the drain that shows the primary again -- which is what
+    /// [`State::marks_dirty`] does for a semantic mark, for the same reason.
+    ///
+    /// A position whose cell was overwritten before the drain has no measurement and is
+    /// left out; Emacs then keeps whatever its own markers made of the row rewrite.
+    pub(super) fn take_carried(&mut self) -> Vec<(CarryKey, Anchor<Chars>)> {
+        if self.carried.is_empty() || self.shown.is_alternate() {
+            return Vec::new();
+        }
+        let mut answers = Vec::with_capacity(self.carried.len());
+        for carried in std::mem::take(&mut self.carried) {
+            match carried.at {
+                CarriedAt::Measured(at) => answers.push((carried.key, at)),
+                CarriedAt::OnGrid(id) => self.screens.primary.unmark(id),
+            }
+        }
+        answers
+    }
+
     /// Drop the bytes of any image transmitted this drain that nothing is left showing.
     ///
     /// The frame-rate governor. Transmitting is not displaying: `viu` sends about 2MB a
@@ -569,7 +680,14 @@ impl State {
         // Read here, off the grid as it stands, rather than when the resize re-laid it:
         // the child is signalled on a resize and answers by redrawing, and anything it
         // scrolls in between moves every mark still on the grid with its row.
-        let marks = self.take_marks();
+        let mut marks = self.take_marks();
+        // Before the events, which are settled against the marks Emacs is being given:
+        // this takes the carry's own ids back out of that list.
+        self.settle_carried(&mut marks);
+        let carried = self.take_carried();
+        // Emacs' screen row 0 is this drain's row 0 from here on, which is what the next
+        // resize measures a position Emacs hands over against.
+        self.drained_at = self.evicted_total;
         let events = self.settle_events(&marks);
         let levels = Levels::of(self);
         let cursor_chars = cursor_chars(self.screen(), levels.cursor);
@@ -635,6 +753,7 @@ impl State {
             cursor_chars,
             events,
             marks,
+            carried,
             withheld: false,
         }
     }
@@ -664,7 +783,11 @@ impl State {
         // Only the marks that left the grid, whose rows are in `scrolled`. `marks_dirty`
         // stays up, so the next whole drain still reports the ones on the grid, against
         // rows it has sent by then.
-        let marks = std::mem::take(&mut self.evicted_marks);
+        let mut marks = std::mem::take(&mut self.evicted_marks);
+        // Settled but not taken: this drain hands Emacs no rows, so there is nothing for an
+        // anchor to be resolved against. The measurement would be lost otherwise, the row
+        // it was on having left the grid in exactly this drain.
+        self.settle_carried(&mut marks);
         let events = self.settle_events(&marks);
         let images = std::mem::take(&mut self.pending_images);
         let links = std::mem::take(&mut self.pending_links);

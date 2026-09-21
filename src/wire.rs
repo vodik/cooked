@@ -275,7 +275,13 @@ pub(crate) fn update_to_lisp<'e>(env: Env<'e>, update: &Update, rejoin: bool) ->
         .collect::<Result<Vec<_>>>()?;
     // `(ID . ANCHOR)`, in the same coordinates a mark's own event carries, so Lisp
     // resolves both with `cooked--anchor-position'. Empty on every drain but a resize.
-    let marks = update
+    //
+    // A position Emacs asked to have carried across the rewrap rides the same list under
+    // `(carry . KEY)': one list because the two are the same answer to the same question,
+    // and two spellings because a semantic mark is Emacs' for the session while a carried
+    // position is reported once. `cooked--relocate-marks' reads the integer ids and
+    // `cooked--place-carried' the conses. See `Delta::carried`.
+    let mut marks = update
         .delta
         .marks
         .iter()
@@ -286,6 +292,10 @@ pub(crate) fn update_to_lisp<'e>(env: Env<'e>, update: &Update, rejoin: bool) ->
             )
         })
         .collect::<Result<Vec<_>>>()?;
+    for (key, at) in &update.delta.carried {
+        let name = env.cons(sym!(env, "carry")?, env.into_lisp(key.0)?)?;
+        marks.push(env.cons(name, update.anchor_to_lisp(env, *at, &spans)?)?);
+    }
 
     // `(PGRP . NAME)`: the process group holding the child's tty and the program its
     // leader is running, or nil while nothing holds it. NAME is nil on a platform that
@@ -450,17 +460,18 @@ struct BlockRow {
 ///
 /// The values `cooked--mark-row-wrap' puts on a newline, decided here because the core
 /// is what knows the difference. [`WrapMark::Blank`] says the row's line goes on below
-/// over blanks its own text stops short of, which Emacs puts back as spaces when it
-/// reads the line as one string — a URL split across the break, or a position carried
-/// across a rewrap. A row a wide character wrapped early stops short of its line's end
-/// too, but those extra columns are *not* blanks of the line: `日本語` at five columns
-/// leaves column 4 to the `語` that moved down whole. Emacs cannot tell the two apart by
-/// width alone, since both reach it as a row of four columns out of five — and a row can
-/// be both at once, its own trailing blanks *and* a wide character's leftover room, as
-/// `ab` followed by two blanks and a character with one column to spare is. `Blank`
-/// therefore carries how many of the columns it stands for are the latter, so
-/// `cooked--wrap-blanks` can leave them out of what it puts back: zero for an ordinary
-/// wrap, the early wrap's own pad otherwise.
+/// over blanks its own text stops short of, which `cooked-link--join-wrapped' puts back
+/// as one space when it reads the line as a single string, so that a URL split across
+/// the break is not spliced onto what follows it. A row a wide character wrapped early
+/// stops short of its line's end too, but those extra columns are *not* blanks of the
+/// line: `日本語` at five columns leaves column 4 to the `語` that moved down whole.
+/// Emacs cannot tell the two apart by width alone, since both reach it as a row of four
+/// columns out of five — and a row can be both at once, its own trailing blanks *and* a
+/// wide character's leftover room, as `ab` followed by two blanks and a character with
+/// one column to spare is. `Blank` therefore carries how many of the columns it stands
+/// for are the latter: zero for an ordinary wrap, the early wrap's own pad otherwise.
+/// Nothing in Lisp reads that number today — the rewrap arithmetic that did is gone, a
+/// position across a rewrap being the core's to carry now; see `Delta::carried`.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 enum WrapMark {
     /// The line ends with this row; its newline is the child's own.

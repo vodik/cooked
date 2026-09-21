@@ -26,8 +26,9 @@ mod wire;
 pub mod wire_gen;
 
 use emu::{
-    Assumed, CellMetrics, ColorScheme, Drain, FrameSize, ImageFormat, ImageId, Key, Modifiers,
-    MouseButton, MouseKind, MouseReport, NamedKey, PasteOutcome, PixelSize, ShownFormats,
+    Assumed, CarryKey, CellMetrics, Chars, ColorScheme, Drain, FrameSize, ImageFormat, ImageId,
+    Key, Modifiers, MouseButton, MouseKind, MouseReport, NamedKey, PasteOutcome, PixelSize,
+    ShownFormats,
 };
 use env::{Env, FromLisp, IntoLisp, Result, Runtime, UserPtr, Value, plist, sym};
 use nix::sys::signal::Signal;
@@ -477,7 +478,13 @@ pub unsafe extern "C" fn emacs_module_init(runtime: *mut Runtime) -> std::ffi::c
         /// The cell size may be nil or omitted, which is what a terminal frame has to
         /// say: it reaches the child as a zero `ws_xpixel'/`ws_ypixel', meaning "not
         /// reported", and leaves image sizing in pixels with nothing to work from.
-        "cooked--resize" 3..=5 => resize;
+        ///
+        /// CARRY, a list of (KEY ROW . CHARS), names positions on the screen Emacs was
+        /// last given that this resize has to carry: the core turns each into a cell
+        /// before it rewraps, moves it with that cell, and reports where it ended up
+        /// once, under KEY, in the next whole drain's `:marks'.  See
+        /// `cooked--carry-positions'.
+        "cooked--resize" 3..=6 => resize;
 
         /// Remove COUNT rows from SESSION's grid, starting at screen row FIRST.
         ///
@@ -1346,8 +1353,18 @@ fn resize<'e>(env: Env<'e>, args: &[Value<'e>]) -> Result<Value<'e>> {
         cols: env.from_lisp::<u16>(args[2])?.max(1),
         cell: CellMetrics::new(cell(3)?, cell(4)?),
     };
+    let carry = match args.get(5) {
+        Some(list) if !env.is_nil(*list) => each(env, *list, |item| {
+            let key = CarryKey(env.from_lisp::<i64>(env.car(item)?)?);
+            let place = env.cdr(item)?;
+            let row = env.from_lisp::<i64>(env.car(place)?)?.max(0) as usize;
+            let chars = env.from_lisp::<i64>(env.cdr(place)?)?.max(0) as usize;
+            Ok((key, row, Chars::new(chars)))
+        })?,
+        _ => Vec::new(),
+    };
     env.from_lisp::<&Session>(args[0])?
-        .resize(size)
+        .resize(size, &carry)
         .or_signal(env)?;
     Ok(env.nil())
 }

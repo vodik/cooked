@@ -128,6 +128,42 @@ impl Anchor<Cols> {
     }
 }
 
+/// Emacs' name for one position it has asked the core to carry across a rewrap.
+///
+/// Opaque here, and deliberately not a [`MarkId`]: `cooked--carry-positions' hands out one
+/// small integer per position it is carrying -- the mark, point, a held window's point --
+/// and reads the answer back under the same one. The two names share the `:marks' list on
+/// the wire and must not be mistaken for one another, so they are different types here and
+/// spelled differently there; see [`Delta::carried`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CarryKey(pub i64);
+
+/// A position Emacs asked the core to carry across a rewrap, and where it is being held
+/// until the drain that reports it.
+///
+/// A mark with a lifetime. A semantic mark is Emacs' for the rest of the session and the
+/// core reports where it is whenever it moves; a carried position is the core's for one
+/// rewrap, is reported by exactly one drain, and is gone the moment it is. "Reported once,
+/// then forgotten" is a move out of [`State::carried`](State#structfield.carried), so a
+/// second report has no spelling.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Carried {
+    key: CarryKey,
+    at: CarriedAt,
+}
+
+/// Where a [`Carried`] position is until it is reported.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CarriedAt {
+    /// On a cell of the grid, under a mark id the core minted for it. The rewrap moves the
+    /// cell and the mark rides it, exactly as a semantic mark does, and a scroll afterwards
+    /// carries it into the scrollback the same way.
+    OnGrid(MarkId),
+    /// Measured already, and so final: either the row had left the grid before the resize
+    /// was issued, or a drain since has read the mark off the row as it departed.
+    Measured(Anchor<Chars>),
+}
+
 /// An OSC 133 mark: where a shell says its prompt, its input and its command's output
 /// begin and end.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -618,6 +654,18 @@ pub struct Delta {
     /// Marks that left the grid during a resize are here too, anchored into this drain's
     /// scrollback batch, which `anchor_to_lisp` already knows how to spell.
     pub marks: Vec<(MarkId, Anchor<Chars>)>,
+    /// Where each position Emacs asked to have carried across a rewrap is now, as
+    /// `(KEY, ANCHOR)`; see [`Carried`] and `State::carry`.
+    ///
+    /// Empty on every drain but the first whole one after a resize Emacs handed positions
+    /// to. It reports each of them exactly once and forgets them, which is what makes the
+    /// core the only owner of where a cell went: Emacs reads the answer back rather than
+    /// re-deriving it from the rows the same reflow produced.
+    ///
+    /// Spelled in the same coordinates as [`Delta::marks`] -- the anchor of a row still on
+    /// the grid, or of one this drain's scrollback carries -- and reported through the same
+    /// `:marks' list, under a [`CarryKey`] rather than a [`MarkId`].
+    pub carried: Vec<(CarryKey, Anchor<Chars>)>,
     /// Whether the consumer is owed the screen by a later drain: `rows`, `shifts` and the
     /// marks still on the grid wait in the core, and the next drain that is not hidden
     /// brings them.
@@ -1235,6 +1283,12 @@ impl Term {
 
     pub fn resize(&mut self, rows: usize, cols: usize) {
         self.state.resize(rows, cols);
+    }
+
+    /// Carry POSITIONS across the next resize, each `(KEY, ROW, CHARS)` naming a place on
+    /// the screen Emacs was last given; see `State::carry` and [`Delta::carried`].
+    pub fn carry(&mut self, positions: &[(CarryKey, usize, Chars)]) {
+        self.state.carry(positions);
     }
 
     /// Tell the emulator how big one cell is, in pixels.
@@ -1931,6 +1985,19 @@ struct State {
     /// cannot go stale either: a row's absolute number is fixed the moment it is
     /// archived.
     evicted_marks: Vec<(MarkId, Anchor<Chars>)>,
+    /// Positions Emacs asked to have carried across a rewrap; see [`Delta::carried`].
+    ///
+    /// Empty except between a resize and the whole drain that answers it, which is usually
+    /// the same command: `cooked--sync-size' issues the resize and forces the drain.
+    carried: Vec<Carried>,
+    /// The absolute row number of the screen row Emacs is showing as row 0.
+    ///
+    /// `evicted_total` as the last whole drain left it, which is the coordinate system the
+    /// buffer is still in: the reader thread goes on feeding the grid between drains, so a
+    /// position Emacs reports on screen row 2 is row 2 of the screen it was last *given*.
+    /// Turning that into an absolute row is the whole of what lets the core answer a
+    /// question about a cell Emacs names; see `State::carry`.
+    drained_at: usize,
     /// Everything DECSTR and RIS put back; see [`Modes`].
     modes: Modes,
     /// [`Levels::reverse_screen_toggles`]. Beside [`Modes`] rather than in it, so that a

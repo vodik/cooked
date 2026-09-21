@@ -838,6 +838,19 @@ impl Screen {
         }
     }
 
+    /// Take the mark named ID off the grid, wherever it is.
+    ///
+    /// A walk of the grid, as [`Screen::mark_row`] is, and for the same reason: nothing
+    /// records which row a mark is on. Reached once per position a resize carried, so a
+    /// handful of walks per resize at the very most.
+    pub fn unmark(&mut self, id: MarkId) {
+        for index in 0..self.height() {
+            if let Some(mut row) = self.row_mut(index) {
+                row.unmark(id);
+            }
+        }
+    }
+
     /// Which row carries the mark named ID, or nothing if no row does any longer.
     ///
     /// The row is the answer rather than the column because the callers ask about lines:
