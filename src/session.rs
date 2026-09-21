@@ -174,10 +174,11 @@ const REAP_PATIENCE: std::time::Duration = std::time::Duration::from_millis(500)
 
 /// How a session ended, once it has.
 ///
-/// An enum rather than the bare status it crosses to Lisp as, because the second variant
-/// is not a status: there is none to be had, and it used to ride in the same `i32` as the
-/// sentinel -1, which no `waitpid` status is but which the type did not say. See
-/// `LOST` in `wire.rs`, where it becomes that number and nowhere else.
+/// An enum rather than a bare status, because the second variant is not a status: there
+/// is none to be had, and it used to ride in the same `i32` as the sentinel -1, which no
+/// `waitpid` status is but which the type did not say. It crosses to Lisp as an enum too
+/// -- a number or the symbol `lost' -- so the distinction survives the seam; see the
+/// `IntoLisp` for this type in `wire.rs`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Exit {
     /// What `waitpid` reported, as `cooked--on-exit' reads it.

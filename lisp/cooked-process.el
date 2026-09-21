@@ -727,9 +727,9 @@ the last line it is meant to have parsed rather than before it."
 EXIT is the child's status as the core reports it, and it is the shell's
 convention throughout: a code from 0 to 255, or 128 plus the signal for a child
 a signal killed -- `Pty::reap' in src/pty.rs is where the second is made to
-look like the first.  The one value that is neither is -1, which means a
-session whose reader gave up with the child still unreapable, and it is
-reported as 255, the same answer as any other channel that ended without
+look like the first.  The one value that is not a number is the symbol `lost',
+which means a session whose reader gave up with the child still unreapable, and
+it is reported as 255, the same answer as any other channel that ended without
 saying why.
 
 Nothing is called back here.  The stand-in exits, Emacs notices, and the

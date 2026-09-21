@@ -75,6 +75,20 @@ number of lines."
                 acc)))
       (nreverse acc))))
 
+(ert-deftest cooked-a-lost-session-reaches-a-consumer-as-255 ()
+  "`cooked-process--report' has one code for a channel that ended without saying
+why, and the symbol `lost' is that case: 255, the same answer -1 got.  A real
+status still goes out as itself."
+  (let (sent)
+    (cl-letf (((symbol-function 'process-live-p) (lambda (_proc) t))
+              ((symbol-function 'process-send-string)
+               (lambda (_proc string) (push string sent))))
+      (dolist (exit '(lost 7 -1))
+        (with-temp-buffer
+          (cooked-process--report (current-buffer) exit))))
+    (should (equal (nreverse sent)
+                   '("cooked-exit:255\n" "cooked-exit:7\n" "cooked-exit:255\n")))))
+
 (ert-deftest cooked-process-gives-the-child-a-sized-named-terminal ()
   "The child gets a terminal with a size and a name, which is the whole point.
 

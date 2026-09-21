@@ -410,6 +410,8 @@ symbols! {
     // `pbm', not `ppm': it is the name of the Emacs image type that reads binary P6, and
     // that is what this string is for.
     Pbm => "pbm",
+    // The one `:exit' that is not a number: `Exit::Lost'.
+    Lost => "lost",
     // How Lisp spells a colour scheme on the way *in*, for the `FromLisp' impl on
     // `ColorScheme' that `cooked--set-color-scheme' and the INITIAL-STATE plist's
     // `:color-scheme' both go through. Compared against with `Env::eq' rather than

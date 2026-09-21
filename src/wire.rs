@@ -31,19 +31,18 @@ macro_rules! into_lisp_id {
 
 into_lisp_id!(MarkId, LinkId, ImageId);
 
-/// What `:exit' says for a session whose reader gave up on the pty with the child still
-/// unreapable: not an exit status, since there is none, but Lisp still needs the session
-/// to end. `cooked--on-exit' spells it out. Negative because no `waitpid` status is.
+/// The child's status as `:exit' reports it: the number for a child that was reaped, and
+/// the symbol `lost' for one whose reader gave up on the pty with it still unreapable.
 ///
-/// The one place [`Exit::Lost`] becomes a number, so the core carries the distinction in
-/// its type for as long as it is the core's.
-const LOST: i64 = -1;
-
-/// The child's status as `:exit' reports it; see [`LOST`].
-fn exit_to_lisp(exit: Exit) -> i64 {
-    match exit {
-        Exit::Status(status) => status.into(),
-        Exit::Lost => LOST,
+/// A symbol rather than a negative number, which is what this was: there is no status to
+/// report, and a sentinel standing in for one is a number every reader has to be told is
+/// not a status. `cooked--on-exit' and `cooked-process--report' both `pcase' on it.
+impl<'e> env::IntoLisp<'e> for Exit {
+    fn into_lisp(self, env: &Env<'e>) -> Result<Value<'e>> {
+        match self {
+            Exit::Status(status) => i64::from(status).into_lisp(env),
+            Exit::Lost => sym!(env, "lost"),
+        }
     }
 }
 
@@ -336,7 +335,7 @@ pub(crate) fn update_to_lisp<'e>(env: Env<'e>, update: &Update, rejoin: bool) ->
         ":links"       => links_to_lisp(env, &update.delta.links)?,
         ":styles"      => styles_to_lisp(env, &update.delta.styles)?,
         ":events"      => events,
-        ":exit"        => update.exit.map(exit_to_lisp),
+        ":exit"        => update.exit,
         ":withheld"    => update.delta.withheld,
     })
 }

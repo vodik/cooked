@@ -1547,7 +1547,9 @@ nil keeps the buffer, exit status and all, which is the point of running the
 terminal inside Emacs: the transcript outlives the command.  t kills it,
 `on-success' kills it only for a zero status — the shell-in-a-window habit,
 where a failure is the one case you still want to read.  A function is called
-with the exit code and kills the buffer when it returns non-nil.
+with the exit code and kills the buffer when it returns non-nil; the code it
+is handed is the symbol `lost' rather than a number for a session whose reader
+gave up on the pty, which `on-success' treats as the failure it is.
 
 The buffer is killed from a timer rather than mid-redraw, so `kill-buffer-hook'
 and anything watching the buffer list see an ordinary kill."
@@ -1585,7 +1587,10 @@ and a session that exits and is then killed goes through both."
   (setq cooked--session nil cooked--wake nil))
 
 (defun cooked--on-exit (code)
-  "Report that the child exited with CODE and stop the session."
+  "Report that the child exited with CODE and stop the session.
+
+CODE is what `:exit' carried: the child's status, or the symbol `lost' for a
+session whose reader gave up on the pty with the child still unreapable."
   ;; A child can die while still on the alt screen — killed from outside, or
   ;; crashed mid-redraw — and nothing later would widen the buffer for it.
   (setq cooked--alt nil)
@@ -1602,11 +1607,12 @@ and a session that exits and is then killed goes through both."
     (cooked--with-child-edit
       (save-excursion
         (goto-char (point-max))
-        ;; -1 is not a status: the core reports it when its reader lost the pty
-        ;; with the child still unreapable, and the session is over either way.
-        (insert (if (< code 0)
-                    "\n[session lost]\n"
-                  (format "\n[exited %s]\n" code)))))
+        ;; `lost' is not a status: the core reports it when its reader gave up on
+        ;; the pty with the child still unreapable, and there is no number to be
+        ;; had.  The session is over either way.
+        (insert (pcase code
+                  ('lost "\n[session lost]\n")
+                  (_ (format "\n[exited %s]\n" code))))))
     (cooked--dolist-windows w (get-buffer-window-list nil nil t)
       (when (>= (window-point w) (1- old-end))
         (cooked--pin-transcript-bottom (list w)))))

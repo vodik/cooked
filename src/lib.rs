@@ -172,8 +172,8 @@ pub unsafe extern "C" fn emacs_module_init(runtime: *mut Runtime) -> std::ffi::c
         /// :kitty-flags, :modify-other-keys, :mode, :foreground, :images, :links, :styles,
         /// :events, :exit and :withheld.
         ///
-        /// :exit is the child's status once it has one, or -1 for a session whose reader
-        /// gave up on the pty with the child still unreapable.
+        /// :exit is the child's status once it has one, or the symbol `lost' for a
+        /// session whose reader gave up on the pty with the child still unreapable.
         ///
         /// :foreground is `(PGRP . NAME)' for the process group holding the child's tty
         /// and the program its leader is running, or nil while nothing holds it.  The

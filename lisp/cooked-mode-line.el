@@ -208,6 +208,20 @@ screen."
            cooked-title)
       cooked--foreground-label))
 
+(defun cooked--mode-line-exit ()
+  "How the child went, as `cooked--exit' reports it, propertized.
+
+\"exited 0\" in the success face, \"exited 1\" in the failure one, and
+\"session lost\" for the one `cooked--exit' that is not a status: the symbol
+`lost', which the core sends when its reader gave up on the pty with the child
+still unreapable.  Saying the word rather than printing a number that is not
+one is the whole reason the drain carries a symbol there; see
+`cooked--on-exit', which writes the same phrase into the buffer."
+  (propertize (if (eq cooked--exit 'lost)
+                  "session lost"
+                (format "exited %s" cooked--exit))
+              'face (if (eql cooked--exit 0) 'cooked-success 'cooked-failure)))
+
 (defun cooked--mode-line-bell ()
   "The `bell' mark, while `cooked-bell-pending' says it is owed."
   (when cooked-bell-pending
@@ -224,9 +238,7 @@ screen."
   ;; on, so it stays true after the child is gone -- and a build that rang to
   ;; say it was done and then exited is the case it most exists for.
   (if cooked--exit
-      (concat (propertize (format " exited %s" cooked--exit)
-                          'face (if (eql cooked--exit 0) 'cooked-success 'cooked-failure))
-              (cooked--mode-line-bell))
+      (concat " " (cooked--mode-line-exit) (cooked--mode-line-bell))
     (let ((state (cooked--mode-line-state))
           (subject (cooked--mode-line-subject))
           (code (cooked-last-exit-code)))
@@ -300,9 +312,7 @@ A dead session says how the child went and nothing more, for the reason
 reporting a command as running in a session that exited is wrong rather than
 stale."
   (cond
-   (cooked--exit
-    (propertize (format "exited %s" cooked--exit)
-                'face (if (eql cooked--exit 0) 'cooked-success 'cooked-failure)))
+   (cooked--exit (cooked--mode-line-exit))
    ((cooked--running-anchor)
     (let ((input (and cooked--command-input
                       (string-trim (replace-regexp-in-string

@@ -392,6 +392,45 @@ that was passed rather than the one that was wanted."
     (should (cooked-tests--settle
              (lambda () (string-match-p "\\[exited 9\\]" (cooked-tests--text)))))))
 
+(ert-deftest cooked-a-lost-session-says-so-and-minus-one-is-an-ordinary-status ()
+  "`:exit' carries the symbol `lost', so no number stands for a state.
+
+Regression: the core reported a reader that had given up on the pty with the
+child still unreapable as -1, and every reader of `cooked--exit' had to be
+told that one number was not a status.  `cooked--on-exit' tested `(< code 0)',
+which is why -1 -- a status `waitpid' never produces, but one a caller can
+hand this function -- printed as a lost session rather than as itself.
+
+Fed to `cooked--on-exit' rather than provoked: losing a pty takes the race the
+Rust tests stage, while what the readers do with what they are handed is the
+half that lives in Lisp."
+  :tags '(pty)
+  (cooked-tests--with-session (list "/bin/sh")
+    (should (cooked-tests--settle (lambda () (cooked--live-p cooked--session))))
+    (cooked--on-exit 'lost)
+    (should (string-match-p "\\[session lost\\]" (cooked-tests--text))))
+  (cooked-tests--with-session (list "/bin/sh")
+    (should (cooked-tests--settle (lambda () (cooked--live-p cooked--session))))
+    (cooked--on-exit -1)
+    (should (string-match-p "\\[exited -1\\]" (cooked-tests--text)))))
+
+(ert-deftest cooked-the-mode-line-names-a-lost-session ()
+  "The mode line says \"session lost\", not \"exited\" followed by a state.
+
+`cooked--exit' is a status or the symbol `lost', and only the first is a
+number to print after the word."
+  (with-temp-buffer
+    (let ((cooked--exit 'lost))
+      (should (equal (substring-no-properties (cooked--mode-line-exit))
+                     "session lost"))
+      (should (eq (get-text-property 0 'face (cooked--mode-line-exit))
+                  'cooked-failure)))
+    (let ((cooked--exit 0))
+      (should (equal (substring-no-properties (cooked--mode-line-exit))
+                     "exited 0"))
+      (should (eq (get-text-property 0 'face (cooked--mode-line-exit))
+                  'cooked-success)))))
+
 (ert-deftest cooked-buffer-is-kept-on-exit-by-default ()
   :tags '(pty)
   (should-not (cooked-tests--run-until-dead '("/bin/sh" "-c" "exit 0") 1)))
