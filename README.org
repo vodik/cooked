@@ -341,7 +341,9 @@ Puts the emulator on *any* comint buffer — =M-x shell=, =run-python=,
 ** cooked-command-decorations
 
 A fringe marker per command, coloured by exit status — running, succeeded, failed — so
-you can see how a scrollback full of commands went without reading any of it.
+you can see how a scrollback full of commands went without reading any of it. =C-c M-m=,
+or a click on the marker, offers the three verbs for the command at point: rerun it, copy
+its command line, copy its output.
 
 ** cooked-osc-context
 

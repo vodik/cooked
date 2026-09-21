@@ -286,6 +286,16 @@ help from the child: the emulator drops the rows above the prompt (from the OSC 
 when the shell sends one, from the cursor's row when it does not) and Emacs deletes the
 scrollback, each side asked for the half it owns.
 
+One optional layer adds a key of its own to this prefix. `(require
+'cooked-command-decorations)` binds `C-c M-m` to `cooked-command-decorations-menu` —
+rerun the command at point, copy its command line, copy its output, which is the same
+menu a click on its fringe marker opens. It is a Meta letter
+rather than `C-c C-o`, the key it used to take: a `keymap-set` in the layer's own map
+wins over the `<remap> <comint-delete-output>` entry in `cooked-mode-map`, so loading the
+layer silently took `C-c C-o` away from `cooked-delete-output` above. `C-c M-n`, `C-c
+M-o`, `C-c M-p` and `C-c M-x` are cooked's own precedent for an extra under this prefix,
+and `M-m` was free.
+
 ### The menu is comint-shaped too, and for the same reasons
 
 `cooked-mode` inherits comint's three menus along with its keymap — In/Out, Signals and
