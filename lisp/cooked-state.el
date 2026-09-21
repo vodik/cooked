@@ -339,10 +339,11 @@ negotiation it holds at the moment of the write.")
 
 A bit field, as the protocol defines it: 1 disambiguates escape codes, 4 adds
 the shifted key, 8 sends every key as an escape code and 16 adds the text a key
-produces.  Read only while `cooked--keys' is `kitty', and not enough on its own
-even then: with neither 1 nor 8 set, kitty was assumed rather than negotiated --
-see `cooked-key-protocol-overrides' -- and only the `literal' keys are
-re-spelled.  See `cooked--kitty-negotiated-p'.")
+produces.  Nonzero only while `cooked--keys' is `kitty', since the flags a
+child pushed are what put it there; which keys they cover is the core's to
+decide, at the moment of each write, and nothing in Lisp reads the bits.  What
+Lisp does ask is whether the protocol was negotiated at all, and `cooked--keys'
+answers that by itself: see `cooked--kitty-negotiated-p'.")
 (defvar-local cooked--modify-other-keys 0
   "The modifyOtherKeys level the child set with `CSI > 4 ; LEVEL m', or 0.
 

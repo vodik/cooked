@@ -127,35 +127,25 @@ other bytes and write them together; everything else sends the key through
 
 ;;;; The kitty keyboard protocol, as negotiated
 
-(defconst cooked--kitty-disambiguate 1
-  "Kitty keyboard flag 1: spell ambiguous keys, Escape and chords, as escape codes.")
-
-(defconst cooked--kitty-all-keys 8
-  "Kitty keyboard flag 8: report every key as an escape code, text keys included.")
-
-(defconst cooked--kitty-negotiated
-  (logior cooked--kitty-disambiguate cooked--kitty-all-keys)
-  "The kitty flags either of which means the child asked for the protocol itself.
-
-Flag 8 turns the protocol on as surely as flag 1 does, since reporting every key
-as an escape code disambiguates them all by construction, while flags 4 and 16
-only add a field to an escape code something else already chose to send.  The
-core makes the same test in `KittyFlags::enables_encoding'.")
-
 (defun cooked--kitty-negotiated-p ()
   "Whether the child asked for the kitty protocol itself, so all of it applies.
 
-See `cooked--kitty-negotiated' for which flags say so.  What it rules out is a
-`kitty' that nobody negotiated, which `cooked-key-protocol-overrides' assumes
-for a program that reads the protocol without ever asking for it.
+Which is the whole of what `cooked--keys' being `kitty' says.  The core reports
+that encoding only for a child whose flags switch it on -- flag 1, or flag 8,
+which disambiguates every key by construction; flags 4 and 16 only add a field
+to an escape code something else already chose to send -- so
+`KeyEncoding::kitty' in src/emu/term/keys.rs is the one place that test is made
+and there is nothing here to re-derive from `cooked--kitty-flags'.
 
-Read from the drain's copy of the flags, which is right for what asks: this
-decides which keys `cooked--build-passthrough-map' takes away from Emacs, and
-a keymap is rebuilt on a drain anyway.  What the child is *sent* is spelled
-against the flags it holds at the moment of the write, which is the core's to
-read."
-  (and (eq cooked--keys 'kitty)
-       (/= 0 (logand cooked--kitty-flags cooked--kitty-negotiated))))
+What it rules out is a `kitty' that nobody negotiated, which
+`cooked-key-protocol-overrides' assumes for a program that reads the protocol
+without ever asking for it: that guess is applied by the core at the moment of
+each write and never reaches this variable.
+
+Read from the drain's copy, which is right for what asks: this decides which
+keys `cooked--build-passthrough-map' takes away from Emacs, and a keymap is
+rebuilt on a drain anyway."
+  (eq cooked--keys 'kitty))
 
 (defun cooked-send-key ()
   "Send the key that invoked this command straight to the child.

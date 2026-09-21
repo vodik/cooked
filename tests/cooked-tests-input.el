@@ -4214,9 +4214,10 @@ Emacs', since no other protocol can spell them."
                               (cooked-tests--text)))))
     ;; Evil insert state keeps Super for Emacs, as it keeps Meta.
     (should-not (eq (lookup-key cooked-semi-map (kbd "s-A")) #'cooked-send-key))
-    ;; With no flags, Super and Pause fall through to Emacs again while the keys a
-    ;; legacy spelling exists for still forward.  Read per key, so no map is rebuilt.
-    (let ((cooked--kitty-flags 0))
+    ;; With nothing negotiated, Super and Pause fall through to Emacs again while
+    ;; the keys a legacy spelling exists for still forward.  Read per key, so no
+    ;; map is rebuilt.
+    (let ((cooked--keys 'legacy))
       (dolist (key '("s-A" "<pause>"))
         (should-not (eq (key-binding (kbd key)) #'cooked-send-key)))
       (dolist (key '("C-M-S-<up>" "<f13>" "<menu>"))
