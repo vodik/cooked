@@ -1472,6 +1472,12 @@ row's cells end short of the width, as the scrollback's rejoined line does."
   :tags '(pty)
   (cooked-tests--with-wrapped-line "see https://e.x/abc end"
     (should (get-text-property (cooked-tests--link-at "abc") 'cooked-link-url))
+    ;; The mark itself, which is what `cooked-link--join-wrapped' reads: `blanks'
+    ;; and not a count of columns.  The core says whether a short row stops short
+    ;; of its own line or short of a wide character's leftover room; Lisp asks
+    ;; which, and measures nothing.  See `WrapMark' in src/wire.rs.
+    (should (eq (get-text-property (1- (cooked-tests--link-at "end")) 'cooked-wrap)
+                'blanks))
     (let ((runs (cooked-tests--url-runs)))
       (should (equal (mapcar (lambda (run) (nth 2 run)) runs)
                      '("https://e.x/abc")))
@@ -1493,7 +1499,8 @@ makes the same exclusion for the same reason."
                while next
                do (should (= (nth 1 this) (1- (car next))))
                do (should (eq (char-after (nth 1 this)) ?\n))
-               do (should (get-text-property (nth 1 this) 'cooked-wrap))
+               ;; A row filled to the last column: `t', not `blanks'.
+               do (should (eq (get-text-property (nth 1 this) 'cooked-wrap) t))
                do (should-not (get-text-property (nth 1 this) 'mouse-face))
                do (should-not (get-text-property (nth 1 this) 'keymap))))))
 

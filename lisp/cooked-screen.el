@@ -233,10 +233,8 @@ rows joined by newlines -- see `cooked--render-rows' -- so START is where that
 row's text begins in TEXT, WIDTH how many grid cells it occupies, UNIFORM t
 when every character of it is one byte on one cell, `glyph' when the ones that
 are not are box glyphs, and nil otherwise, WRAPPED whether the row below
-continues this row's logical line -- t, or an integer when blanks of that line
-stand between the two, the columns of that integer a wide character's early
-wrap left rather than blanks of the line, zero for an ordinary wrap -- and
-HASH a key for its layout.  All four
+continues this row's logical line -- t, or `blanks' when blanks of that line
+stand between the two -- and HASH a key for its layout.  All four
 are by-products of the core building the row; WIDTH, UNIFORM and HASH are
 `cooked--guard-row-width's and WRAPPED is `cooked--mark-row-wrap's, and
 all four are read by `cooked--render-rows' rather than here.  START is read
@@ -1173,7 +1171,7 @@ the user was pointing is the end of what the row now holds."
   "Record on the newline at EOL whether the row it ends was soft-wrapped.
 
 The `cooked-wrap' property, and this is the only place it is written: WRAP is
-the row table's own fourth field, nil, t or an integer, so the mark is
+the row table's own fourth field, nil, t or `blanks', so the mark is
 what the core says rather than anything inferred here.  Non-nil means the row
 below carries the rest of a logical line the child never broke.  The buffer
 has no other way to know that.  A screen row is one buffer line, so a line the
@@ -1203,20 +1201,18 @@ unterminated -- see `cooked--fit-screen' -- so a wrap on it has no newline to
 sit on.  The mark is owed instead, and paid when extending the region gives the
 row its newline; see `cooked--owed-wrap'.
 
-An integer rather than t says the row was rendered without blanks that are
+`blanks' rather than t says the row was rendered without blanks that are
 interior to its line.  A row is inserted without its trailing blanks, wrapped
 or not, so cells the child left blank before the line went on to the next row
 are missing from the buffer and nothing in it says so.  At twenty columns
 \"see https://e.x/abc end\" leaves \"see https://e.x/abc\" on the first row,
 nineteen cells wide, and \"end\" on the second; joined at the newline with
 nothing between them they read as \"https://e.x/abcend\".
-`cooked-link--join-wrapped' joins such a row with a space instead.  The integer
-itself is how many of the row's own last columns are not blanks of the line but
-a wide character's leftover room -- `日本語' at five columns leaves column 4 to
-the `語' that moved down whole, and that cell belongs to no character of the
-line -- zero when there is no such room.  Nothing in Lisp reads the number
-today: the rewrap arithmetic that did is gone, and `cooked-link--join-wrapped'
-only asks whether the mark is one."
+`cooked-link--join-wrapped' joins such a row with a space instead.  A row that
+a wide character wrapped early is short too, and is still t: `日本語' at five
+columns leaves column 4 to the `語' that moved down whole, and that cell is no
+blank of the line.  Which of the two a short row is, is the core's to say --
+see `WrapMark' in src/wire.rs."
   (if (>= eol (point-max))
       (cooked--owe-wrap eol wrap)
     (let ((marked (get-text-property eol 'cooked-wrap)))

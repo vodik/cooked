@@ -410,6 +410,8 @@ symbols! {
     Pbm => "pbm",
     // The one `:exit' that is not a number: `Exit::Lost'.
     Lost => "lost",
+    // The one `cooked-wrap' mark that is neither nil nor t: `WrapMark::Blanks'.
+    Blanks => "blanks",
     // How Lisp spells a colour scheme on the way *in*, for the `FromLisp' impl on
     // `ColorScheme' that `cooked--set-color-scheme' and the INITIAL-STATE plist's
     // `:color-scheme' both go through. Compared against with `Env::eq' rather than

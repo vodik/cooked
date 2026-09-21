@@ -457,19 +457,20 @@ struct BlockRow {
 /// The `cooked-wrap' mark for one row: what a rendered row's newline carries.
 ///
 /// The values `cooked--mark-row-wrap' puts on a newline, decided here because the core
-/// is what knows the difference. [`WrapMark::Blank`] says the row's line goes on below
+/// is what knows the difference. [`WrapMark::Blanks`] says the row's line goes on below
 /// over blanks its own text stops short of, which `cooked-link--join-wrapped' puts back
 /// as one space when it reads the line as a single string, so that a URL split across
 /// the break is not spliced onto what follows it. A row a wide character wrapped early
 /// stops short of its line's end too, but those extra columns are *not* blanks of the
-/// line: `日本語` at five columns leaves column 4 to the `語` that moved down whole.
-/// Emacs cannot tell the two apart by width alone, since both reach it as a row of four
-/// columns out of five — and a row can be both at once, its own trailing blanks *and* a
-/// wide character's leftover room, as `ab` followed by two blanks and a character with
-/// one column to spare is. `Blank` therefore carries how many of the columns it stands
-/// for are the latter: zero for an ordinary wrap, the early wrap's own pad otherwise.
-/// Nothing in Lisp reads that number today — the rewrap arithmetic that did is gone, a
-/// position across a rewrap being the core's to carry now; see `Delta::carried`.
+/// line: `日本語` at five columns leaves column 4 to the `語` that moved down whole, so
+/// such a row is [`WrapMark::Wraps`] when its text reaches that far. Emacs cannot tell
+/// the two apart by width alone, since both reach it as a row of four columns out of
+/// five, which is why the distinction is drawn here.
+///
+/// A fact rather than a measurement: the mark used to carry how many of the row's empty
+/// columns were an early wrap's padding, and the only reader of that number was the
+/// rewrap arithmetic Lisp no longer does — a position across a rewrap is the core's to
+/// carry now; see `Delta::carried`.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 enum WrapMark {
     /// The line ends with this row; its newline is the child's own.
@@ -477,24 +478,24 @@ enum WrapMark {
     Ends,
     /// The line goes on below, and the row's text reaches the end of it.
     Wraps,
-    /// The line goes on below over blanks the row was rendered without, PAD columns of
-    /// which are a wide character's leftover room rather than blanks of the line.
-    Blank(Cols),
+    /// The line goes on below over blanks the row was rendered without.
+    Blanks,
 }
 
 impl WrapMark {
     /// How a row of COLS columns of text ends, on a screen WIDTH columns wide.
     fn of(wrap: Wrap, cols: Cols, width: usize) -> Self {
-        let (line, pad) = match wrap {
+        let line = match wrap {
             Wrap::No => return Self::Ends,
-            Wrap::Full => (width, Cols::ZERO),
-            // The padding belongs to no column of the line, so the line ends where it
-            // begins. Saturating because a row is measured as Emacs will render it, and
-            // the width guard can leave that shorter than the grid said.
-            Wrap::Early(pad) => (width.saturating_sub(pad.get()), pad),
+            Wrap::Full => width,
+            // An early wrap's padding belongs to no column of the line, so the line ends
+            // where that padding begins. Saturating because a row is measured as Emacs
+            // will render it, and the width guard can leave that shorter than the grid
+            // said.
+            Wrap::Early(pad) => width.saturating_sub(pad.get()),
         };
         if cols.get() < line {
-            Self::Blank(pad)
+            Self::Blanks
         } else {
             Self::Wraps
         }
@@ -502,13 +503,12 @@ impl WrapMark {
 }
 
 impl<'e> env::IntoLisp<'e> for WrapMark {
-    /// nil, `t' and the early-wrap pad count (zero for an ordinary wrap), the values
-    /// `cooked-wrap' takes.
+    /// nil, `t' and `blanks', the values `cooked-wrap' takes.
     fn into_lisp(self, env: &Env<'e>) -> Result<Value<'e>> {
         match self {
             Self::Ends => false.into_lisp(env),
             Self::Wraps => true.into_lisp(env),
-            Self::Blank(pad) => pad.into_lisp(env),
+            Self::Blanks => sym!(env, "blanks"),
         }
     }
 }
@@ -1281,28 +1281,35 @@ mod tests {
         assert_eq!(runs_of(&[1, 1]), vec![vec![1], vec![1]]);
     }
 
-    /// A row can be blank for two reasons at once: `ab` followed by two of the child's
-    /// own spaces, and then a two-column character with only one column of room left, is
-    /// both a row with its own trailing blanks *and* one a wide character wrapped early.
-    /// The mark has to carry the one column of padding separately from the two blanks
-    /// the row's own width implies are missing, or a rewrap counts the wide character's
-    /// leftover room as a third blank of the line that was never there.
+    /// An early wrap's padding is not a blank of the line, so a row whose text runs up to
+    /// it `Wraps' rather than wrapping over blanks: `日本` on a five-column screen whose
+    /// third character moved down has nothing missing between its text and its line's
+    /// end, and joining it to the row below must not put a space in.
     #[test]
-    fn an_early_wrap_s_pad_is_reported_apart_from_the_row_s_own_blanks() {
+    fn an_early_wrap_s_pad_is_not_a_blank_of_the_line() {
         assert_eq!(
-            WrapMark::of(Wrap::Early(Cols::new(1)), Cols::new(2), 5),
-            WrapMark::Blank(Cols::new(1))
+            WrapMark::of(Wrap::Early(Cols::new(1)), Cols::new(4), 5),
+            WrapMark::Wraps
         );
     }
 
-    /// The ordinary case this mark has always covered: a row with nothing but its own
-    /// trailing blanks reports no padding to leave out of them.
+    /// A row can be short for both reasons at once: `ab` followed by two of the child's
+    /// own spaces, and then a two-column character with only one column of room left.
+    /// Blanks of the line are what the mark is about, and there are two of them, so this
+    /// is a wrap over blanks however the last column came to be empty.
     #[test]
-    fn a_full_wrap_s_blanks_carry_no_pad() {
+    fn a_row_with_its_own_blanks_and_an_early_wrap_wraps_over_blanks() {
         assert_eq!(
-            WrapMark::of(Wrap::Full, Cols::new(2), 5),
-            WrapMark::Blank(Cols::ZERO)
+            WrapMark::of(Wrap::Early(Cols::new(1)), Cols::new(2), 5),
+            WrapMark::Blanks
         );
+    }
+
+    /// The ordinary case this mark has always covered: a row whose text stops short of
+    /// its line wraps over the blanks it was rendered without.
+    #[test]
+    fn a_full_wrap_short_of_its_line_wraps_over_blanks() {
+        assert_eq!(WrapMark::of(Wrap::Full, Cols::new(2), 5), WrapMark::Blanks);
     }
 
     /// One row's measurements must not leak into the next one's. A shared answer would
