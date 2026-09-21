@@ -119,8 +119,10 @@ negotiated nothing of its own."
   "The bytes the child would receive for the key EVENT names, or nil.
 
 ASSUMED is a protocol to assume for a program that negotiated none, as for
-`cooked--send-key'.  For the two callers that have to compose the key with
-other bytes and write them together; everything else sends the key through
+`cooked--send-key'.  For the two callers that need the bytes as a value:
+`cooked--override-bytes-for', which returns them beside the literal strings an
+override may be written as, and `cooked-delegate-this-key', whose KEY argument
+is public and is bytes.  Everything else sends the key through
 `cooked--send-key-event'."
   (when-let* ((parts (cooked--key-parts event)))
     (cooked--encode-key (cooked--require-session) (car parts) (cdr parts) assumed)))

@@ -336,11 +336,12 @@ pub unsafe extern "C" fn emacs_module_init(runtime: *mut Runtime) -> std::ffi::c
 
         /// The bytes `cooked--send-key' would send for KEY held with MODS, or nil.
         ///
-        /// The arguments are `cooked--send-key''s, and so is the spelling.  For the two
-        /// callers that have to compose the key with other bytes and write them as one:
-        /// `cooked-delegate-this-key', which sends the pending line ahead of it, and
-        /// `cooked--override-bytes-for', which hands the bytes to
-        /// `cooked-send-override'.  Everything else should send the key.
+        /// The arguments are `cooked--send-key''s, and so is the spelling.  For the
+        /// callers that need a key's bytes as a value rather than as a write:
+        /// `cooked--override-bytes-for', which hands them to `cooked-send-override'
+        /// beside the literal byte strings `cooked-key-overrides' lets the user write,
+        /// and `cooked-delegate-this-key', whose own KEY argument is public and is bytes
+        /// for that reason.  Everything else should send the key.
         "cooked--encode-key" 3..=4 => encode_key_to_lisp;
 
         /// Every key cooked speaks for, as (SYMBOL . KITTY-ONLY).
@@ -408,6 +409,28 @@ pub unsafe extern "C" fn emacs_module_init(runtime: *mut Runtime) -> std::ffi::c
         /// property the core cannot see, before calling this. What the user typed needs
         /// no stripping, and stripping the whole line again would strip it twice.
         "cooked--send-line" 2..=2 => send_line;
+
+        /// Hand TEXT to SESSION's line editor as typing, then KEY, in one write.
+        ///
+        /// What `cooked-delegate-key' sends: the whole pending line, AFTER left arrows
+        /// to put the child's cursor back where the user's was, and then KEY, a string
+        /// of bytes the caller chose. No Return -- the line is being handed over for
+        /// editing, not submitted.
+        ///
+        /// The left arrow is spelled here rather than in Lisp, and under the lock the
+        /// whole write is composed under, so all AFTER of them follow the DECCKM the
+        /// child holds at that moment: a shell reading `ESC O D' for that key and given
+        /// `ESC [ D' never moves its cursor, and half a line's worth of arrows spelled
+        /// against a mode that changed part way would move it the wrong distance.
+        ///
+        /// TEXT is not stripped here, for the reason `cooked--send-line' is not: its
+        /// pasted parts have been through `cooked--strip-pasted-controls' already, keyed
+        /// off a text property the core cannot see. KEY is not stripped at all, since
+        /// sending a control key is what it is for.
+        ///
+        /// ASSUMED is a protocol to assume for a program that negotiated none, as for
+        /// `cooked--send-key'.
+        "cooked--send-delegated-line" 4..=5 => send_delegated_line;
 
         /// Owe SESSION's child STRING, a reply, without waiting for it to be read.
         /// Queued behind earlier replies and written as far as the pty has room for now;
@@ -1298,6 +1321,39 @@ fn send_line<'e>(env: Env<'e>, args: &[Value<'e>]) -> Result<Value<'e>> {
     // it is zeroed here alongside the bytes `write_input' zeroes, exactly as
     // `send_paste_text' zeroes its own copy. TEXT was read out of a Lisp string,
     // ordinarily the buffer's own text, and that string is left as it was.
+    zero_text(&mut text);
+    result?;
+    Ok(env.nil())
+}
+
+/// Compose a delegated line against the modes the child holds now; see
+/// `cooked--send-delegated-line'.
+fn send_delegated_line<'e>(env: Env<'e>, args: &[Value<'e>]) -> Result<Value<'e>> {
+    let mut text = env.from_lisp::<String>(args[1])?;
+    let after = usize::try_from(env.from_lisp::<i64>(args[2])?)
+        .map_err(|_| env.signal("args-out-of-range", "not a count of characters"))?;
+    let key = env.from_lisp::<Vec<u8>>(args[3])?;
+    let assumed = to_assumed(env, args, 4)?;
+    let mut bytes = {
+        let session = env.from_lisp::<&Session>(args[0])?;
+        // The lock covers the key encoding, DECCKM and every byte built from them, and is
+        // let go before the write, which can wait out a child that is not reading.
+        let term = session.term();
+        let left = term
+            .key_report(Key::Named(NamedKey::Left), Modifiers::NONE, assumed)
+            .unwrap_or_default();
+        let mut bytes = text.as_bytes().to_vec();
+        for _ in 0..after {
+            bytes.extend_from_slice(&left);
+        }
+        bytes.extend_from_slice(&key);
+        bytes
+    };
+    // Typed input, like the line `cooked--send-line' submits: the user pressed the key
+    // that delegated, and the echo is what they are waiting to see.
+    let result = write_input(env, args[0], &mut bytes, session::Input::Keyboard);
+    // TEXT can carry a credential pasted into the line, so it is zeroed alongside the
+    // bytes `write_input' zeroes, exactly as `send_line' zeroes its own copy.
     zero_text(&mut text);
     result?;
     Ok(env.nil())

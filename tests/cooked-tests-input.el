@@ -2153,11 +2153,14 @@ cost one byte each."
     ;; Point between `hell' and `o', so there is a suffix to preserve.
     (backward-char 1)
     (let (sent)
-      (cl-letf (((symbol-function 'cooked--send-to-child)
-                 (lambda (bytes) (setq sent bytes))))
+      (cl-letf (((symbol-function 'cooked--send-delegated-line)
+                 (lambda (_session text after key &optional _assumed)
+                   (setq sent (list text after key)))))
         (cooked-delegate-key "\C-r"))
-      ;; The full line, then one left-arrow for the one character after point.
-      (should (equal sent "echo hello\e[D\C-r")))
+      ;; The full line, one left-arrow owed for the one character after point,
+      ;; and the key.  The core spells the arrow and writes all three as one;
+      ;; see `cooked-a-delegated-line-spells-the-cursor-back-against-decckm'.
+      (should (equal sent '("echo hello" 1 "\C-r"))))
     ;; Ownership is gone, and the keys now go where the line did.
     (should (cooked-line-delegated (cooked--line)))
     (should-not (cooked--input-state-p))
@@ -2166,26 +2169,27 @@ cost one byte each."
     ;; Refusing twice, because the second call has nothing left to hand over.
     (should-error (cooked-delegate-key "\C-r") :type 'user-error)))
 
-(ert-deftest cooked-delegation-spells-the-cursor-back-against-decckm ()
+(ert-deftest cooked-a-delegated-line-spells-the-cursor-back-against-decckm ()
   "The left-arrows that put ZLE's cursor back follow the mode the child holds.
 
-Regression: they used to be built in Lisp, spelled `ESC [ D' no matter
-what.  Under DECCKM the child reads cursor keys as `ESC O D', so a delegated
-line whose suffix is more than empty left the child's cursor short of where
-the rest of the line expects it."
-  :tags '(zsh pty)
-  (skip-unless (executable-find "zsh"))
-  (cooked-tests--with-zsh
-    (goto-char cooked--input-end)
-    (insert "echo hello")
-    ;; Point between `hell' and `o', so there is a suffix to preserve.
-    (backward-char 1)
+Regression: they used to be built in Lisp, spelled `ESC [ D' no matter what.
+Under DECCKM the child reads cursor keys as `ESC O D', so a delegated line
+whose suffix is more than empty left the child's cursor short of where the
+rest of the line expects it.
+
+Read off an echoing child rather than off a stub, because the composition is
+the core's now: the line, the arrows and the key are one write, built under the
+lock that reads DECCKM, so a test that flipped the mode between Lisp asking and
+Lisp sending is not constructible from Lisp any more."
+  :tags '(pty)
+  (cooked-tests--with-echoing-child ""
+    (cooked--send-delegated-line cooked--session "echo hello" 2 "\C-r" nil)
+    (should (cooked-tests--settle
+             (lambda () (string-search "echo hello^[[D^[[D^R" (cooked-tests--text)))))
     (cooked-tests--negotiate "\e[?1h")
-    (let (sent)
-      (cl-letf (((symbol-function 'cooked--send-to-child)
-                 (lambda (bytes) (setq sent bytes))))
-        (cooked-delegate-key "\C-r"))
-      (should (equal sent "echo hello\eOD\C-r")))))
+    (cooked--send-delegated-line cooked--session "again" 1 "\C-r" nil)
+    (should (cooked-tests--settle
+             (lambda () (string-search "again^[OD^R" (cooked-tests--text)))))))
 
 (ert-deftest cooked-delegation-strips-control-bytes-from-the-line ()
   "The line handed to the shell is typing, so an ESC yanked into it is a space.
@@ -2198,8 +2202,9 @@ it, and so is the key that follows, since sending a key is the point."
     (goto-char cooked--input-end)
     (insert "echo " (cooked--mark-pasted "\e[A") "hi\e")
     (let (sent)
-      (cl-letf (((symbol-function 'cooked--send-to-child)
-                 (lambda (bytes) (setq sent bytes))))
+      (cl-letf (((symbol-function 'cooked--send-delegated-line)
+                 (lambda (_session text _after key &optional _assumed)
+                   (setq sent (concat text key)))))
         (cooked-delegate-key "\C-r"))
       (should (equal sent "echo  [Ahi\e\C-r")))))
 
@@ -2211,7 +2216,7 @@ A fresh prompt is a fresh line, and Emacs may have it back."
   (cooked-tests--with-zsh
     (goto-char cooked--input-end)
     (insert "true")
-    (cl-letf (((symbol-function 'cooked--send-to-child) #'ignore))
+    (cl-letf (((symbol-function 'cooked--send-delegated-line) #'ignore))
       (cooked-delegate-key "\C-r"))
     (should (cooked-line-delegated (cooked--line)))
     (cooked--handle-semantic '(prompt-start (screen 0 . 0)) nil)

@@ -38,7 +38,8 @@
       cooked--remove-rows cooked--reply cooked--reply-focus cooked--resize
       cooked--row-edited
       cooked--sample-mode cooked--screen-text
-      cooked--send cooked--send-key cooked--send-line cooked--send-mouse-report
+      cooked--send cooked--send-delegated-line cooked--send-key cooked--send-line
+      cooked--send-mouse-report
       cooked--send-paste-text cooked--set-attended
       cooked--set-color-scheme cooked--set-frame-size cooked--set-graphics-shown
       cooked--set-hidden cooked--set-palette

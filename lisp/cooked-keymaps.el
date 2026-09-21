@@ -795,11 +795,12 @@ silently drop whatever followed the cursor, and the left-arrows that avoid it
 cost one byte each.
 
 Then KEY, once the shell's cursor is back where the user's was.  Getting it
-there is the child's own left arrow, spelled once through `cooked--encode-key'
-and repeated: under DECCKM the shell reads `ESC O D' for that key, not the
-`ESC [ D' a hand-written escape would send, and a line editor that never sees
-the byte it asked for leaves the cursor short of where the rest of the line
-expects it.
+there is the child's own left arrow, and the core spells it: under DECCKM the
+shell reads `ESC O D' for that key, not the `ESC [ D' a hand-written escape
+would send, and a line editor that never sees the byte it asked for leaves the
+cursor short of where the rest of the line expects it.  The line, the arrows
+and KEY go out as one write, composed under the lock that reads the mode; see
+`cooked--send-delegated-line'.
 
 The pasted parts of the line are stripped of control bytes on the way, as a
 submitted line's are by `cooked--send-input-string', because the line reaches
@@ -812,13 +813,12 @@ sending a control key is what it is for."
                (text (cooked--strip-pasted-controls
                       (cooked--input-substring start end)))
                (after (- end (max start (min (point) end))))
-               (left (cooked--encode-key (cooked--require-session) 'left nil
-                                         (cooked--assumed-key-protocol))))
+               (session (cooked--require-session)))
     (cooked--clear-input-region)
     (setf (cooked-line-delegated (cooked--line)) t)
     (cooked--request-refresh)
-    (cooked--send-to-child
-     (concat text (apply #'concat (make-list after left)) key))))
+    (cooked--send-delegated-line session text after key
+                                 (cooked--assumed-key-protocol))))
 
 (defun cooked-delegate-this-key ()
   "Delegate the pending input and send the key that invoked this command.
