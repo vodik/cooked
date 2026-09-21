@@ -841,6 +841,28 @@ fn a_carried_position_survives_a_rewrap_and_the_scroll_that_evicts_it() {
     assert!(after.carried.is_empty() && after.marks.is_empty());
 }
 
+/// The id the core mints for a carried position comes off its cell as the answer is
+/// taken, which is what bounds its life to the one rewrap. Left on the grid it would be
+/// reported as a semantic mark on every later resize -- an id Emacs holds no marker for,
+/// naming a position nobody asked about.
+#[test]
+fn a_carried_position_that_stays_on_the_grid_leaves_no_mark_behind() {
+    let mut t = term(4, 10, b"0123456789abc");
+    t.drain();
+    t.carry(&[(CarryKey(0), 1, Chars::new(1))]);
+    t.resize(4, 4);
+    assert_eq!(t.drain().carried.len(), 1, "the carry is answered");
+
+    t.resize(4, 8);
+    let after = t.drain();
+    assert!(after.carried.is_empty());
+    assert!(
+        after.marks.is_empty(),
+        "nothing is left on the grid to report: {:?}",
+        after.marks
+    );
+}
+
 /// The case the carry exists to answer: between Emacs' last drain and the resize the
 /// reader thread has gone on feeding the grid, so the row Emacs names is not the row the
 /// grid has at that index -- it may not be on the grid at all.
@@ -849,7 +871,9 @@ fn a_carried_position_survives_a_rewrap_and_the_scroll_that_evicts_it() {
 /// scrolled five rows past it, and the answer still names the text that was on row 1.
 #[test]
 fn a_carried_position_is_read_in_the_screen_emacs_was_last_given() {
-    let mut t = term(4, 10, b"one\r\nMARK\r\ntwo\r\nthree");
+    // Five lines on a four-row grid, so `zero' is already history when Emacs drains:
+    // its screen row 1 is the grid's row 1 and absolute row 2, which is `MARK'.
+    let mut t = term(4, 10, b"zero\r\none\r\nMARK\r\ntwo\r\nthree");
     t.drain();
     // Fed and not drained: the grid moves on, the buffer does not.
     t.feed(b"\r\nA\r\nB\r\nC\r\nD\r\nE");
