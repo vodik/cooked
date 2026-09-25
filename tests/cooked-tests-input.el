@@ -3743,6 +3743,27 @@ column 0 of that row for a pointer over no cell at all."
           (should (equal (list button kind row col) '(left press 0 12)))))
       (should (= (length fallback) 1)))))
 
+(ert-deftest cooked-mouse-declined-click-reaches-emacs-under-a-forwarding-map ()
+  "A click declined in a buffer wearing `cooked-command-map' falls through to
+the command Emacs would have run, not back to `cooked-mouse-event'.
+
+Regression: the forwarding maps bind every mouse event to `cooked-mouse-event'
+as the local map, and the fallback lifted only `cooked--mouse-map-alist'.  A
+program that had not asked for the mouse -- `brew' waiting on a yes-or-no --
+could not be clicked into focus, since the lookup found cooked's own binding
+again and declined the click into nothing."
+  (cooked-tests--with-mouse-rows '("Proceed? [y/n]")
+    (let ((worn (cooked--forwarding-map cooked-command-map)))
+      (use-local-map worn)
+      (should (eq (lookup-key (current-local-map) [down-mouse-1]) #'cooked-mouse-event))
+      (cooked-tests--displayed
+        (let* ((event (list 'down-mouse-1 (cooked-tests--glyph-posn 3 4)))
+               (binding (cooked--mouse-fallback-binding event [down-mouse-1])))
+          (should (eq binding (lookup-key global-map [down-mouse-1])))
+          (should-not (eq binding #'cooked-mouse-event))))
+      ;; The map worn is put back once the question is answered.
+      (should (eq (current-local-map) worn)))))
+
 (ert-deftest cooked-mouse-offset-stays-inside-the-characters-cells ()
   "A fallback font can draw a character wider than the cells it stands on, and
 the overhang reported into the next column.  A two-cell character keeps both."

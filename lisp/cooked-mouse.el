@@ -1171,16 +1171,42 @@ the buffer that was current, and that is the half of the question a plain
             this-command command)
       (call-interactively command))))
 
+(defvar cooked-mode-map)
+(defvar cooked--semi-map-worn)
+
 (defun cooked--mouse-fallback-binding (event &optional keys)
   "What EVENT would be bound to without cooked's mouse maps.
 
 KEYS is the key it ends, by default `this-command-keys-vector', which carries
 the prefix a click in the mode line is read with.  The lookup
-`cooked--mouse-fallback' makes; see there."
-  (let ((emulation-mode-map-alists
-         (remq 'cooked--mouse-map-alist emulation-mode-map-alists)))
-    (key-binding (or keys (this-command-keys-vector)) nil nil
-                 (and (consp event) (event-start event)))))
+`cooked--mouse-fallback' makes; see there.
+
+Cooked claims the mouse in two places, and both are lifted.  One is
+`cooked--mouse-map-alist'.  The other is the forwarding map a child that owns
+the keyboard wears as the local map -- `cooked-raw-map', `cooked-command-map'
+and `cooked-alt-map' all bind `cooked--mouse-events' to `cooked-mouse-event',
+so that a release owed to a child whose grab has since ended still reaches it.
+Lifting only the alist found that binding again and declined the click into
+nothing: a program that had not asked for the mouse, `brew' waiting on a
+yes-or-no, could not be clicked into focus, because the `mouse-drag-region'
+that would have selected its window was never reached.  So the lookup is made
+with the pointer's buffer wearing `cooked-mode-map', the parent every state
+map ends in, and with the copy of the forwarding evil hangs above its insert
+state switched off; see `cooked--semi-map-worn'.  The `keymap' property under
+the pointer is untouched, so a link still answers first."
+  (let* ((posn (and (consp event) (event-start event)))
+         (window (and posn (posn-window posn)))
+         (buffer (if (windowp window) (window-buffer window) (current-buffer)))
+         (emulation-mode-map-alists
+          (remq 'cooked--mouse-map-alist emulation-mode-map-alists)))
+    (with-current-buffer buffer
+      (let ((local (current-local-map))
+            (cooked--semi-map-worn nil))
+        (unwind-protect
+            (progn
+              (when (derived-mode-p 'cooked-mode) (use-local-map cooked-mode-map))
+              (key-binding (or keys (this-command-keys-vector)) nil nil posn))
+          (use-local-map local))))))
 
 ;; Pointer shape, OSC 22.
 ;;
